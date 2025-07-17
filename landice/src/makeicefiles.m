@@ -37,7 +37,7 @@ wgtmax = 5.0;   % max weight (given for 100% ice concentration).
 
 switch resolution,
 
-  case 'p011',
+  case 'p11',
     landmaskfile = append(input_dir, '/grids/maskGlob1km.gds');
     gridinxnorth = append(input_dir, '/mat/p11/saf2north');
     gridinxsouth = append(input_dir, '/mat/p11/saf2south');
@@ -80,7 +80,7 @@ fprintf(1, 'makeicefiles: icefiles_odir - %s\n', icefiles_odir);
 %%% only for testing:
 if 0,
   switch resolution,
-  case 'p011',
+  case 'p11',
     gridinxnorth = append(input_dir, '/ice/saf2north');
     gridinxsouth = append(input_dir, '/ice/saf2south');
     odir = append(output_dir, '/land/p11/', year);  % output dir.

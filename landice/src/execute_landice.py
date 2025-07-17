@@ -7,10 +7,12 @@ import datetime
 import logging
 import os
 import pathlib
+import subprocess
 
 
 # Constants
 LANDICE_TEMPLATE = "landice_template.m"
+MATLAB_BIN = "/opt/matlab/R2021b/bin/matlab"
 OSISAF_FTP_ARCHIVE = "ftp://osisaf.met.no/archive/ice/conc"
 OSISAF_FTP_PROD = "ftp://osisaf.met.no/prod/ice/conc"
 OSISAF_FTP_REPROCESSED = "ftp://osisaf.met.no/reprocessed/ice/conc/v1p2"
@@ -27,6 +29,8 @@ logging.basicConfig(
 
 def main():
     """Main function to run land ice operations."""
+
+    start = datetime.datetime.now()
 
     # Command line arguments
     arg_parser = create_args()
@@ -59,8 +63,14 @@ def main():
                                           input_dir, output_dir)
         ice_files.append(ice_file_p11)
         logging.info("Created ice file: %s", ice_file_p11)
-        break
 
+        for case_file in (ice_file_p01, ice_file_p11):
+            logging.info("Executing: %s", ice_file_p01)
+            execute_case(case_file)
+            # ice_file_p01.unlink()    # Delete file when work is complete
+
+    end = datetime.datetime.now()
+    logging.info("Execution time: %s", end - start)
 
 def create_args():
     """Create and return argparser with arguments."""
@@ -111,6 +121,12 @@ def create_matlab_file(year, doy, exe_case, exe_path, in_dir, out_dir):
     with open(ice_file, "w") as fh:
         fh.write(lines)
     return ice_file
+
+
+def execute_case(case_file):
+    """Execute MATLAB file for resolution case."""
+
+    subprocess.run([MATLAB_BIN, "-nodisplay", "<", case_file], check=True)
 
 
 if __name__ == "__main__":
