@@ -12,7 +12,7 @@ import subprocess
 
 # Constants
 LANDICE_TEMPLATE = "landice_template.m"
-MATLAB_BIN = "/opt/matlab/R2021b/bin/matlab"
+MATLAB_BIN = "/usr/local/bin/matlab"
 OSISAF_FTP_ARCHIVE = "ftp://osisaf.met.no/archive/ice/conc"
 OSISAF_FTP_PROD = "ftp://osisaf.met.no/prod/ice/conc"
 OSISAF_FTP_REPROCESSED = "ftp://osisaf.met.no/reprocessed/ice/conc/v1p2"
