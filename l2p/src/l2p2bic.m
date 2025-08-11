@@ -2,36 +2,39 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
 % l2p2bic(sensor,region,bicdir,year,day)
 % converts L2P (and L2P_GRIDDED) files to a bic file for a given date.
 
-if ~exist('rewrite','var'), rewrite=0; end;
+  if ~exist('rewrite','var'), rewrite=0; end;
 
-%% inputs (examples):
-%  sensor='winsat'; year=2012; day=010;
-%  sensor='winsat'; year=2012; day=030;
-%  sensor='amsrea';  year=2011; day=239;
-%  sensor='avh19g';  year=2012; day=210;
-%  sensor='avh19g';  year=2012; day=215;
-%  sensor='avmtag';  year=2012; day=220;
-%  sensor='modisa';  year=2012; day=230;
-%
-%  region='Global';
-%
+  %% inputs (examples):
+  %  sensor='winsat'; year=2012; day=010;
+  %  sensor='winsat'; year=2012; day=030;
+  %  sensor='amsrea';  year=2011; day=239;
+  %  sensor='avh19g';  year=2012; day=210;
+  %  sensor='avh19g';  year=2012; day=215;
+  %  sensor='avmtag';  year=2012; day=220;
+  %  sensor='modisa';  year=2012; day=230;
+  %
+  %  region='Global';
+  %
 
+  year=str2double(year)
+  day=str2double(day)
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
   sensor=upper(sensor);
   %filedir=sprintf('%s/%s/%04d',bicdir,sensor,year);
   filedir=bicdir;
+  mkdir(filedir)
   bicfilegz=sprintf('%s/%s_%s_%04d_%03d.bic.gz',filedir,region,sensor,year,day);
   if exist(bicfilegz,'file')&(rewrite==0),
     fprintf(1,'File exists; will NOT be reproduced:\n ... %s\n',bicfilegz);
     return;
   end;
 
-%% get sensor specific data-file parameters:
-  [l2pnames,minConfValue,uncompresscmd]=SensorTable(sensor);
+  %% get sensor specific data-file parameters:
+  [l2pnames,minConfValue,uncompresscmd,subdir]=SensorTable(sensor);
 
 
-%% get actual file names:
+  %% get actual file names:
   for k=1:length(l2pnames),
     files=sprintf('%s/%s',indir,l2pnames{k});
     names=dir(files);
@@ -44,14 +47,13 @@ if ~exist('rewrite','var'), rewrite=0; end;
   % end
   % exit()
 
-%% reference time adjustment (set to beginning of year/day):
-  %tref=int32(julian(day,1,year,3)-julian(1,1,1981,3))*86400;  
-  tref=int64(julian(day,1,year,3)-julian(1,1,1981,3))*86400;  
+  %% reference time adjustment (set to beginning of year/day):
+  %tref=int32(julian(day,1,year,3)-julian(1,1,1981,3))*86400;
+  tref=int64(julian(day,1,year,3)-julian(1,1,1981,3))*86400;
 
-
-%% fill data by reading each file:
-  listfile=sprintf('%s/L2Plist_%s_%s_%04d_%03d.txt',filedir,region,sensor,year,day);
-  disp(listfile)
+  %% fill data by reading each file:
+  listfile=append(filedir,'/L2Plist_',region,'_',sensor,'_',string(year),'_',string(day),'.txt')
+  fprintf(1,'l2p2bic: writing %s\n',listfile);
   flist=fopen(listfile,'w');
 
   lon=[]; lat=[]; hour=[];
@@ -84,7 +86,7 @@ if ~exist('rewrite','var'), rewrite=0; end;
       clear rjct conf;
     end;
     t = int64(t);
-    if length(uncompresscmd), delete(tmpncfile); end;
+    % if length(uncompresscmd), delete(tmpncfile); end;
 
     % skip to next file if there is no SST content:
     if length( tmp )==0, continue; end;
@@ -147,7 +149,6 @@ if ~exist('rewrite','var'), rewrite=0; end;
   %filedir=sprintf('%s/%04d',bicdir,year);
   if ~exist(filedir,'dir'), eval(sprintf('!mkdir -p %s',filedir)); end;
 
-  bicfile=sprintf('%s/%s_%s_%04d_%03d.bic',filedir,region,sensor,year,day);
-
+  bicfile=append(filedir,'/',region,'_',sensor,'_',string(year),'_',string(day),'.bic');
   writebic(bicfile,year,day,lon,lat,sst,bias,rms,hour,flag);
   % writebic does gzipping.

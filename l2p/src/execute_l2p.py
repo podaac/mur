@@ -84,7 +84,7 @@ def main():
             break
         break
 
-    print(data_dict)
+    # delete_downloads(data_dict)
     end = datetime.datetime.now()
     logging.info("Execution time: %s", end - start)
 
@@ -131,7 +131,7 @@ def download_files(collections, sensor, day, data_dir, download):
             files = download_s3(collection, sensor, sd, ed, data_dir)
         downloads.extend(files)
 
-    return downloads
+    return list(set(downloads))
 
 
 def download_http(collection, sensor, sd, ed, data_dir):
@@ -191,6 +191,12 @@ def execute_subprocess(cmd):
 
     subprocess.run(cmd, check=True)
 
+
+def delete_downloads(data_dict):
+    for sensor, files in data_dict.items():
+        logging.info("Deleting downloads for sensor: %s", sensor)
+        for download in files:
+            download.unlink()
 
 if __name__ == "__main__":
     main()
