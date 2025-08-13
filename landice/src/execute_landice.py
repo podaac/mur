@@ -12,7 +12,7 @@ import subprocess
 
 # Constants
 LANDICE_TEMPLATE = "landice_template.m"
-MATLAB_BIN = "/usr/local/bin/matlab"
+MATLAB_BIN = "/opt/matlab/R2021b/bin/matlab"
 OSISAF_FTP_ARCHIVE = "ftp://osisaf.met.no/archive/ice/conc"
 OSISAF_FTP_PROD = "ftp://osisaf.met.no/prod/ice/conc"
 OSISAF_FTP_REPROCESSED = "ftp://osisaf.met.no/reprocessed/ice/conc/v1p2"
@@ -37,37 +37,34 @@ def main():
     args = arg_parser.parse_args()
     input_dir = args.input
     output_dir = args.output
-    logging.info("Input directory: %s", input_dir)
-    logging.info("Output directory: %s", output_dir)
+    year = args.year
+    doy = args.doy
+    for name, value in vars(args).items(): logging.info("%s: %s", name, value)
 
     # Environment variables
     set_up_env()
 
     ice_files = []
 
-    # Execute on range of 9 days
-    end_date = datetime.date.today() - datetime.timedelta(days=1)
-    start_date = end_date - datetime.timedelta(days=8)
-    for day, doy in get_date_range(start_date, end_date):
-        year = day.year
-        logging.info("Running land ice operations for %s/%s", year, doy)
+    # Execute on day
+    logging.info("Running land ice operations for %s/%s", year, doy)
 
-        # Generate P01 execution file
-        ice_file_p01 = create_matlab_file(year, doy, "p01", pathlib.Path().cwd(),
-                                          input_dir, output_dir)
-        ice_files.append(ice_file_p01)
-        logging.info("Created ice file: %s", ice_file_p01)
+    # Generate P01 execution file
+    ice_file_p01 = create_matlab_file(year, doy, "p01", pathlib.Path().cwd(),
+                                        input_dir, output_dir)
+    ice_files.append(ice_file_p01)
+    logging.info("Created ice file: %s", ice_file_p01)
 
-        # Generate P11 execution file
-        ice_file_p11 = create_matlab_file(year, doy, "p11", pathlib.Path().cwd(),
-                                          input_dir, output_dir)
-        ice_files.append(ice_file_p11)
-        logging.info("Created ice file: %s", ice_file_p11)
+    # Generate P11 execution file
+    ice_file_p11 = create_matlab_file(year, doy, "p11", pathlib.Path().cwd(),
+                                        input_dir, output_dir)
+    ice_files.append(ice_file_p11)
+    logging.info("Created ice file: %s", ice_file_p11)
 
-        for case_file in (ice_file_p01, ice_file_p11):
-            logging.info("Executing: %s", ice_file_p01)
-            execute_case(case_file)
-            # ice_file_p01.unlink()    # Delete file when work is complete
+    for case_file in (ice_file_p01, ice_file_p11):
+        logging.info("Executing: %s", ice_file_p01)
+        execute_case(case_file)
+        case_file.unlink()    # Delete file when work is complete
 
     end = datetime.datetime.now()
     logging.info("Execution time: %s", end - start)
@@ -84,6 +81,14 @@ def create_args():
                             "--output",
                             type=pathlib.Path,
                             help="Full path to directory to save results")
+    arg_parser.add_argument("-y",
+                            "--year",
+                            type=int,
+                            help="Year to execute on")
+    arg_parser.add_argument("-d",
+                            "--doy",
+                            type=int,
+                            help="Day of year (numeric) to execute on")
     return arg_parser
 
 

@@ -11,6 +11,7 @@ import pathlib
 
 
 # Constants
+LANDICE_JSON = "landice.json"
 L2P_JSON = "l2p.json"
 
 
@@ -36,6 +37,21 @@ def create_args():
                             type=str,
                             help="Full path to configuration file")
     return arg_parser
+
+
+def generate_landice(config_file, output_dir):
+    """Generate Land Ice coorditing JSON file."""
+
+    end_date = datetime.date.today() - datetime.timedelta(days=1)
+    start_date = end_date - datetime.timedelta(days=8)
+
+    coord_json = list(get_date_range(start_date, end_date))
+
+    out_file = output_dir.joinpath(LANDICE_JSON)
+    with open(out_file, "w") as jf:
+        json.dump(coord_json, jf, indent=2)
+
+    logging.info("Wrote Land Ice JSON: %s", out_file)
 
 
 def generate_l2p(config_file, output_dir):
@@ -87,6 +103,10 @@ def main():
     output_dir = args.output
     config = args.config
     for name, value in vars(args).items(): logging.info("%s: %s", name, value)
+
+    # Landice
+    logging.info("Generating Land Ice coordinating JSON file.")
+    generate_landice(config, output_dir)
 
     # L2P
     logging.info("Generating L2P sensor coordinating JSON file.")

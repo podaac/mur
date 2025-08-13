@@ -1,8 +1,8 @@
 {
-    "input": "/dir/data/l2p/input",
-    "output": "/dir/data/l2p/output",
-    "config": "/dir/mur/l2p/src/config.json",
-    "script": "/dir/mur/l2p/src/execute_l2p.py",
-    "python_exe": "/dir/bin/python3",
-    "inputgen_data": "/dir/data/inputgen/l2p.json"
+    "input": "/data3/tebaldi/mur/workspace/data/l2p/input",
+    "output": "/data3/tebaldi/mur/workspace/data/l2p/output",
+    "config": "/data3/tebaldi/mur/workspace/mur/l2p/src/config.json",
+    "script": "/data3/tebaldi/mur/workspace/mur/l2p/src/execute_l2p.py",
+    "python_exe": "/home/tebaldi/mur/env/l2p/bin/python3",
+    "inputgen_data": "/data3/tebaldi/mur/workspace/data/inputgen/l2p.json"
 }

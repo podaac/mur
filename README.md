@@ -12,13 +12,13 @@ The MUR workflow is made up of several components:
 
 This component creates coordinating JSON files that can be used by exectuion infrastructure to execute the MUR algorithms in parallel.
 
-Runtime: 2025-07-17T19:57:07,307 root INFO Execution time: 0:25:47.920324
+Runtime: 2025-08-13T20:55:10,308 root INFO Execution time: 0:02:29.569614
 
 See this README for details: [InputGen README](inputgen/README.md)
 
 ## Land Ice Operations
 
-This component prepares landmask and sea ice boundary data used in downstream MUR processing. It generates and runs MATLAB scripts that apply land and ice masking operations to MUR SST inputs for the previous 9 days. Two grid resolutions (`p01`, `p11`) are supported.
+This component prepares landmask and sea ice boundary data used in downstream MUR processing. It generates and runs MATLAB scripts that apply land and ice masking operations to MUR SST inputs for the previous 9 days. Two grid resolutions (`p01`, `p11`) are supported. It is parallelized on the day which are arguments to the script. The InputGen operations produce the required date ranges to execute on.
 
 See this README for details: [Land Ice README](landice/README.md)
 
