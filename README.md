@@ -8,6 +8,12 @@ The MUR workflow is made up of several components:
 2) Processing: MRVA
 3) Output (Aggregates results and uploads to S3)
 
+## InputGen Operations
+
+This component creates coordinating JSON files that can be used by exectuion infrastructure to execute the MUR algorithms in parallel.
+
+See this README for details: [InputGen README](inputgen/README.md)
+
 ## Land Ice Operations
 
 This component prepares landmask and sea ice boundary data used in downstream MUR processing. It generates and runs MATLAB scripts that apply land and ice masking operations to MUR SST inputs for the previous 9 days. Two grid resolutions (`p01`, `p11`) are supported.
