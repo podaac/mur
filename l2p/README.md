@@ -42,6 +42,7 @@ python execute_l2p.py \
   -o /path/to/output/data \
   -c /path/to/config.json \
   -w
+```
 
 # Test L2P execution
 
