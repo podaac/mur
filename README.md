@@ -19,3 +19,9 @@ See this README for details: [InputGen README](inputgen/README.md)
 This component prepares landmask and sea ice boundary data used in downstream MUR processing. It generates and runs MATLAB scripts that apply land and ice masking operations to MUR SST inputs for the previous 9 days. Two grid resolutions (`p01`, `p11`) are supported.
 
 See this README for details: [Land Ice README](landice/README.md)
+
+## L2P Sensor Operations
+
+This component downloads (or loads) L2P Sensor data from Earthdata and combines the data in to a binary file to be read by the MRVA process. It is parallelized on the sensor and day which are arguments to the script. The InputGen operations produce the required sensor and date ranges to execute on.
+
+See this README for details: [L2P README](l2p/README.md)

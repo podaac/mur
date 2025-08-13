@@ -2,7 +2,9 @@
 
 This script generates the JSON file needed to coordinate the execution of MUR (Multi-scale Ultra-high Resolution) algorithms.
 
-Specifically, it produces a `l2p.json` file containing date ranges for each sensor, based on a configuration file.
+This script produces data for the following:
+
+- `l2p`: Produces a dictionary of sensors with a 12-day date range. The L2P sensor operations should be executed on each sensor and on each day in the range.
 
 ## Overview
 
