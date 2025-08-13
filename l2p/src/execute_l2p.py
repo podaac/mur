@@ -4,6 +4,7 @@
 # Standard imports
 import argparse
 import datetime
+import json
 import logging
 import os
 import pathlib
@@ -11,6 +12,7 @@ import subprocess
 
 # Third party imports
 import earthaccess
+import fsspec
 
 
 # Constants
@@ -42,49 +44,45 @@ def main():
     # Command line arguments
     arg_parser = create_args()
     args = arg_parser.parse_args()
+    doy = args.doy
+    year = args.year
+    sensor = args.sensor
     input_dir = args.input
     output_dir = args.output
+    config = args.config
     download = args.download
-    logging.info("Input directory: %s", input_dir)
-    logging.info("Output directory: %s", output_dir)
-    logging.info("Download data: %s", download)
-
+    for name, value in vars(args).items(): logging.info("%s: %s", name, value)
 
     # Execute on range of 9 days
-    data_dict = {}
-    for sensor, data in SENSORS.items():
-        # Get date range to retrieve sensor data for
-        end_date = datetime.date.today()
-        start_date = end_date - datetime.timedelta(days=data["day_range"][0])
-        for day, doy in get_date_range(start_date, end_date):
-            year = day.year
-            logging.info("Running l2p operations on %s for %s/%s", sensor, year, doy)
+    day = (datetime.datetime.strptime(f"{year}-{doy}", "%Y-%j")).date()
+    logging.info("Running l2p operations on %s for %s (%s)", sensor, day, doy)
+    data = get_config_data(config, sensor)
 
-            # Download files for sensor for DOY
-            data_dir = input_dir.joinpath(sensor).joinpath(str(doy))
-            data_dir.mkdir(parents=True, exist_ok=True)
-            files = download_files(data["collection_name"], sensor, day, data_dir, download)
-            data_dict[sensor] = files
-            
-            # Determine stability of source file
-            if datetime.date.today().toordinal() - day.toordinal() < data["stable"]:
-                rewrite = 1
-            else:
-                rewrite = 0
+    # Download files for sensor for DOY
+    data_dir = input_dir.joinpath(sensor).joinpath(str(doy))
+    data_dir.mkdir(parents=True, exist_ok=True)
+    files = download_files(data["collection_name"], sensor, day, data_dir,
+                           download)
 
-            # Create MATLAB file
-            bic_dir = output_dir.joinpath(sensor)
-            cmd_file = create_matlab_file(bic_dir, data_dir, sensor, rewrite,
-                                          year, doy, data["region"],
-                                          pathlib.Path().cwd())
+    # Determine stability of source file
+    if datetime.date.today().toordinal() - day.toordinal() < data["stable"]:
+        rewrite = 1
+    else:
+        rewrite = 0
 
-            # Execute MATLAB file
-            cmd = [MATLAB_BIN, "-nodisplay", "<", cmd_file]
-            execute_subprocess(cmd)
-            break
-        break
+    # Create MATLAB file
+    bic_dir = output_dir.joinpath(sensor)
+    cmd_file = create_matlab_file(bic_dir, data_dir, sensor, rewrite, year, doy,
+                                  data["region"], pathlib.Path().cwd())
+    files.append(cmd_file)
 
-    # delete_downloads(data_dict)
+    # Execute MATLAB file
+    cmd = [MATLAB_BIN, "-nodisplay", "<", cmd_file]
+    execute_subprocess(cmd)
+
+    # logging.info("Deleting downloads for sensor: %s", sensor)
+    # delete_downloads(files)
+
     end = datetime.datetime.now()
     logging.info("Execution time: %s", end - start)
 
@@ -93,6 +91,19 @@ def create_args():
     """Create and return argparser with arguments."""
 
     arg_parser = argparse.ArgumentParser(description="Execute Land Ice operations for MUR input")
+    arg_parser.add_argument("-s",
+                            "--sensor",
+                            choices=["AMSR2R", "AVMTBG", "MODISA", "MODIST"],
+                            type=str,
+                            help="Sensor to execute on")
+    arg_parser.add_argument("-d",
+                            "--doy",
+                            type=int,
+                            help="Day of year (numeric) to execute on")
+    arg_parser.add_argument("-y",
+                            "--year",
+                            type=int,
+                            help="Year to execute on")
     arg_parser.add_argument("-i",
                             "--input",
                             type=pathlib.Path,
@@ -101,20 +112,27 @@ def create_args():
                             "--output",
                             type=pathlib.Path,
                             help="Full path to directory to save results")
-    arg_parser.add_argument("-d",
+    arg_parser.add_argument("-c",
+                            "--config",
+                            type=str,
+                            help="Full path to configuration file")
+    arg_parser.add_argument("-w",
                             "--download",
                             action="store_true",
                             help="Whether to download L2P data for access")
     return arg_parser
 
 
-def get_date_range(start_date, end_date):
-    """Generate a sequence of dates from the start date to the end date."""
+def get_config_data(config_file, sensor):
+    """Retrieve configuration data to execute L2P operations."""
 
-    for d in range(int((end_date - start_date).days) + 1):
-        day = start_date + datetime.timedelta(d)
-        doy = day.timetuple().tm_yday
-        yield day, doy
+    if "s3" in config_file:
+        with fsspec.open(config_file, mode='r') as fh:
+            config_data = json.load(fh)
+    else:
+        with open(config_file) as fh:
+            config_data = json.load(fh)
+    return config_data[sensor]
 
 
 def download_files(collections, sensor, day, data_dir, download):
@@ -168,7 +186,8 @@ def download_s3(collection, sensor, sd, ed, data_dir):
 def create_matlab_file(bic_dir, data_dir, sensor, rewrite, year, doy, region, exe_path):
     """Create the MATLAB file specific to the doy and case to execute."""
 
-    with open(pathlib.Path().cwd().joinpath(L2P_TEMPLATE), "r") as fh:
+    template_file_path = pathlib.Path(__file__).resolve().parent.joinpath(L2P_TEMPLATE)
+    with open(template_file_path, "r") as fh:
         lines = fh.read()
 
     lines = lines.replace("<replace_path>", str(exe_path))
@@ -192,11 +211,11 @@ def execute_subprocess(cmd):
     subprocess.run(cmd, check=True)
 
 
-def delete_downloads(data_dict):
-    for sensor, files in data_dict.items():
-        logging.info("Deleting downloads for sensor: %s", sensor)
-        for download in files:
-            download.unlink()
+def delete_downloads(files):
+    """Delete downloaded sensor files."""
+
+    for download in files:
+        download.unlink()
 
 if __name__ == "__main__":
     main()

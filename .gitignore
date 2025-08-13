@@ -208,3 +208,6 @@ __marimo__/
 
 # Landice
 landice/src/makeice_*
+
+# L2P
+l2p/src/make_bic_cmd_*
