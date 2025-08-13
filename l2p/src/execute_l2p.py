@@ -25,6 +25,7 @@ SENSORS = {
     "MODISA": {"collection_name": ("MODIS_A-JPL-L2P-v2019.0",), "region": "Global", "La": 2, "Lb": 12, "day_range": (12, 1), "stable": 2},
     "MODIST": {"collection_name": ("MODIS_T-JPL-L2P-v2019.0",), "region": "Global", "La": 2, "Lb": 12, "day_range": (12, 1), "stable": 3}
 }
+TMP_DIR = "/tmp"
 
 
 # Logger
@@ -52,6 +53,9 @@ def main():
     config = args.config
     download = args.download
     for name, value in vars(args).items(): logging.info("%s: %s", name, value)
+
+    # Set up environment
+    os.environ["TMP_DIR"] = TMP_DIR
 
     # Execute on range of 9 days
     day = (datetime.datetime.strptime(f"{year}-{doy}", "%Y-%j")).date()
