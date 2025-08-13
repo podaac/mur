@@ -10,11 +10,12 @@ import datetime
 import json
 import logging
 import multiprocessing
+import pathlib
 import subprocess
 
 
 # Constants
-CPU_COUNT = 4
+CPU_COUNT = multiprocessing.cpu_count() - 1
 
 # Logger
 logging.getLogger().setLevel(logging.INFO)
@@ -48,12 +49,12 @@ def l2p(config_data, doy, year, sensor):
     """Execute the L2P algorithm."""
 
     python_exe = config_data["python_exe"]
-    script = config_data["script"]
+    script = pathlib.Path(config_data["script"])
     input_dir = config_data["input"]
     output_dir = config_data["output"]
     config = config_data["config"]
     cmd = [
-        python_exe, script,
+        python_exe, str(script),
             "-i", input_dir,
             "-o", output_dir,
             "-w",
@@ -62,7 +63,7 @@ def l2p(config_data, doy, year, sensor):
             "-y", year,
             "-s", sensor
     ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, cwd=script.parent, check=True)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,8 @@ The MUR workflow is made up of several components:
 
 This component creates coordinating JSON files that can be used by exectuion infrastructure to execute the MUR algorithms in parallel.
 
+Runtime: 2025-07-17T19:57:07,307 root INFO Execution time: 0:25:47.920324
+
 See this README for details: [InputGen README](inputgen/README.md)
 
 ## Land Ice Operations
@@ -23,5 +25,7 @@ See this README for details: [Land Ice README](landice/README.md)
 ## L2P Sensor Operations
 
 This component downloads (or loads) L2P Sensor data from Earthdata and combines the data in to a binary file to be read by the MRVA process. It is parallelized on the sensor and day which are arguments to the script. The InputGen operations produce the required sensor and date ranges to execute on.
+
+Runtime: 2025-08-13T20:27:57,501 root INFO Execution time: 0:32:30.754806 (fully parallelized )
 
 See this README for details: [L2P README](l2p/README.md)
