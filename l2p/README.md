@@ -31,6 +31,70 @@ The script:
   - `earthaccess`
   - `fsspec`
 
+## Docker Build and Run Instructions
+
+1. Build the image
+
+From the repository root:
+
+```
+docker build -t mur-l2p:latest .
+```
+
+If you need to provide a .netrc file during build (as a Docker secret):
+
+```
+DOCKER_BUILDKIT=1 docker build \
+  --secret id=netrc_file,src=$HOME/.netrc \
+  -t mur-l2p:latest .
+```
+
+2. Run the container
+
+Mount your input/output directories and .netrc:
+
+```
+docker run --rm \
+  -v /path/to/input:/data/input \
+  -v /path/to/output:/data/output \
+  -v $HOME/.netrc:/home/matlab/.netrc:ro \
+  mur-l2p:latest \
+    -s AMSR2R \
+    -d 220 \
+    -y 2025 \
+    -i /data/input \
+    -o /data/output \
+    -c /data/input/config.json \
+    -w
+```
+
+If using the Docker secret method, you can mount the .netrc at runtime like this:
+
+```
+docker run --rm \
+  --mount type=secret,id=netrc_file,target=/home/matlab/.netrc \
+  -v /path/to/input:/data/input \
+  -v /path/to/output:/data/output \
+  mur-l2p:latest \
+  python execute_l2p.py ...
+```
+
+### .netrc Setup
+
+The `.netrc` file is required for authenticating with NASA Earthdata.
+
+1. Create a `.netrc` file in your home directory:
+    ```bash
+    touch ~/.netrc
+    chmod 600 ~/.netrc
+    ```
+2. Add your Earthdata credentials:
+    ```
+    machine urs.earthdata.nasa.gov
+        login <your-username>
+        password <your-password>
+    ```
+
 ## Usage
 
 ```bash

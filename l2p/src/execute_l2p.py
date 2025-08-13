@@ -16,9 +16,9 @@ import fsspec
 
 
 # Constants
-DOWNLOADER_BIN = "/home/tebaldi/mur/env/l2p/bin/podaac-data-downloader"
+DOWNLOADER_BIN = "/app/env/bin/podaac-data-downloader"
 L2P_TEMPLATE = "l2p_template.m"
-MATLAB_BIN = "/opt/matlab/R2021b/bin/matlab"
+MATLAB_BIN = "/usr/local/bin/matlab"
 SENSORS = {
     "AMSR2R": {"collection_name": ("AMSR2-REMSS-L2P-v8.2", "AMSR2-REMSS-L2P_RT-v8.2"), "region": "Global", "La": 2, "Lb": 8,  "day_range": (12, 1), "stable": 2},
     "AVMTBG": {"collection_name": ("AVHRRMTB_G-NAVO-L2P-v2.0",), "region": "Global", "La": 2, "Lb": 9,  "day_range": (12, 1), "stable": 2},
