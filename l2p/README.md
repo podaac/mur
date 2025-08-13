@@ -1,4 +1,4 @@
-# MUR L2P Sensor Operations Executor
+# MUR L2P Sensor Operations
 
 This script executes **MUR (Multi-scale Ultra-high Resolution)** L2P (Level 2 Preprocessed) sensor operations for a given sensor, day of year, and year.
 
@@ -43,7 +43,7 @@ python execute_l2p.py \
   -c /path/to/config.json \
   -w
 
-# MUR Workflow Algorithm Runner
+# Test L2P execution
 
 This script runs **the L2P algorithm** in the MUR (Multi-scale Ultra-high Resolution) workflow.
 
