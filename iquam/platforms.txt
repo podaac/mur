@@ -1,0 +1,11 @@
+2020 / 286  # of iQuam data "platform" used:
+
+1. Ship                   : 105781
+2. Drifting buoy          : 399463
+3. Tropical moored buoy   :  10261
+4. Coastal moored buoy    : 325173
+5. Argo float             :   4406
+6. High resolution drifter:  31157
+7. IMOS                   :  37442
+8. CRW buoy               :   9047
+

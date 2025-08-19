@@ -1,0 +1,157 @@
+function makedailyiquam(year,doy,rewrite)
+%% makedaily.m
+%% downloads IQUAM HDF file and save as daily bii files.
+
+
+
+  %% detination directory:
+  ddir='/nas2/iquam';
+
+  %% subdirectory:
+  edir=sprintf('/nas2/iquam/%04d',year);
+  if ~exist(edir,'dir'), eval(sprintf('! mkdir -p %s',edir)); end;
+
+  %% filename:  
+  filename=sprintf('%s/Global_IQUAM0_%04d_%03d.bii',edir,year,doy);
+
+
+
+if ~exist('rewrite','var'), rewrite=0; end;
+
+if (~rewrite) & exist(filename,'file'), return; end;
+
+
+    %% HDF file:
+    [day,month]=julian(doy,year);
+    ifile=sprintf('IQUAM.NCEP.%04d.%02d.HDF',year,month);
+    localfile=sprintf('%s.mat',ifile);
+
+
+    %% download, read HDF file, and quality control:
+    if ~exist(localfile,'file'), 
+
+      %% download:
+      %iurl='ftp://www.star.nesdis.noaa.gov/pub/sod/sst/iquam';
+      iurl='ftp://ftp.star.nesdis.noaa.gov/pub/sod/sst/iquam';
+      cmd=sprintf('! wget %s/%s',iurl,ifile);
+      eval(cmd);
+
+      %% read:
+      if ~exist(ifile,'file'), 
+        disp(sprintf('IQUAM failed to download on %04d/%03d',year,doy));
+        return;
+      end;
+      f=hdfreadopen(ifile);
+        dayf=hdfreadvariable(f,'Day');
+        hour=hdfreadvariable(f,'Hour');
+        minute=hdfreadvariable(f,'Minute');
+        lon=hdfreadvariable(f,'Longitude');
+        lat=hdfreadvariable(f,'Latitude');
+        sst=hdfreadvariable(f,'Sea_Surface_Temperature');
+        qual=hdfreadvariable(f,'Quality_Flag');
+        pt=hdfreadvariable(f,'Type');
+      hdfreadclose(f);
+      delete(ifile);
+
+      %% conversion:
+      hour=hour+minute/60;
+      knx=find(lon>180);  if length(knx), lon(knx)=lon(knx)-360; end;
+
+      %% quality control:
+      %% http://www.star.nesdis.noaa.gov/sod/sst/iquam/index.html
+      knx=find( mod(qual,4)==0 );
+      dayf=dayf(knx); hour=hour(knx); pt=pt(knx);
+      sst=sst(knx); lon=lon(knx); lat=lat(knx);
+
+      %% save the contents:
+      save(localfile,'dayf','hour','pt','sst','lon','lat');
+
+    else,  % read from mat file:
+
+      load(localfile);
+
+    end;
+
+    %% extract daily components:
+    knx=find(dayf==day);
+      hour=hour(knx); pt=pt(knx);
+      sst=sst(knx); lon=lon(knx); lat=lat(knx);
+
+
+    %% write file:  (from writeiquambii)
+      f=fopen(filename,'w');
+      if f==-1, error(['cannot write/open to ',filename]); end;
+
+      %% data conversion:
+      N=length(sst(:));
+      sst=int16(sst*100);
+      lon=int16(lon*100);
+      lat=int16(lat*100);
+      hour=int16(hour*100);
+      pt=int8(pt);
+
+      %% write
+      fortwrite(f,'int32',N,'int16',year,'int16',doy);
+      fortwrite(f,'int16',sst,'int16',lon,'int16',lat,'int16',hour,'int8',pt);
+      fclose(f);
+
+
+
+%%%%%%%%%%
+
+function fileID=hdfreadopen(filename,contents)
+% fileID=hdfreadopen(filename,contents)
+% open and HDF file using matlab hdfsd and returns its file ID.
+%
+% If "contents" flag is set, a list of its variable contents is printed.
+%
+% The file is close if the "contents" flag is set (default: contents=0).
+
+
+if ~exist('contents','var'), contents=0; end;
+
+fileID = hdfsd('start',filename, 'read');
+
+if fileID==-1,
+  disp(sprintf('hdfreadopen: %s not found.',filename)); return; 
+end;
+
+if contents,
+  [ndatasets, nglobattr, status] = hdfsd('fileinfo', fileID);
+
+  fprintf(1,'ndatasets=%d, nglobattr=%d\n',ndatasets,nglobattr);
+
+  disp(sprintf('### %s, CONTENTS: ###',filename));
+  for n=0:ndatasets-1,
+    dataID = hdfsd('select', fileID, n);
+    [name,ndim,dimvector,type,nattr] = hdfsd('getinfo', dataID);
+    fprintf(1,'  %s: %s(%d) +%d\n',name,type,ndim,nattr);
+    hdfsd('endaccess',dataID);
+  end;
+
+  hdfsd('end',fileID);
+end;
+
+
+function val=hdfreadvariable(fileID,varname)
+% val=hdfreadvariable(fileID,'varname')
+% returns value "val" of the HDF file variable named "varname".
+
+dataID = hdfsd('select', fileID, hdfsd('nametoindex',fileID,varname) );
+
+if dataID==-1,
+  disp(sprintf('"%s" not found in fileID %d',varname,fileID));
+  val=[];
+  return;
+end;
+
+[name,ndim,dims,type,nattr] = hdfsd('getinfo', dataID);
+startvector=zeros(size(dims)); stridevector=[]; endvector=dims;
+  val = hdfsd('readdata', dataID, startvector, stridevector, endvector);
+hdfsd('endaccess',dataID);
+
+
+function status=hdfreadclose(fileID)
+% closes the opened HDF file.
+status = hdfsd('end',fileID);
+
