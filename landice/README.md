@@ -32,8 +32,10 @@ Ensure input data is available in a local or mounted directory and that an outpu
 
 Example:
 
+```
 /home/username/mur/data/landice/input
 /home/username/mur/data/landice/output
+```
 
 ---
 
