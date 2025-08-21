@@ -11,6 +11,7 @@ The script:
 - Creates MATLAB `.m` execution files from a template (`landice_template.m`).
 - Sets necessary environment variables for MATLAB to access OSI SAF FTP endpoints.
 - Executes the `.m` scripts using MATLAB in batch mode.
+- Parallelized by day (with InputGen providing date ranges).
 
 ---
 
@@ -43,7 +44,9 @@ Example:
 ```bash
 python3 execute_landice.py \
   -i /home/username/mur/data/landice/input \
-  -o /home/username/mur/data/landice/output
+  -o /home/username/mur/data/landice/output \
+  -y 2025 \
+  -d 225
 ```
 
 This command:
@@ -61,7 +64,9 @@ docker run --rm --name landice \
   -v /home/ec2-user/data:/mnt/data \
   landice \
   -i /mnt/data/input \
-  -o /mnt/data/output
+  -o /mnt/data/output \
+  -y 2025 \
+  -d 225
 ```
 
 This command:
@@ -87,5 +92,5 @@ And is executed using: `/opt/matlab/R2021b/bin/matlab -nodisplay < makeice_2025_
 
 Notes
 
-    - You can optionally delete generated .m files after execution (see the commented unlink() line in the script).
-    - The script logs key steps and execution time to aid in monitoring and debugging.
+- You can optionally delete generated .m files after execution (see the commented unlink() line in the script).
+- The script logs key steps and execution time to aid in monitoring and debugging.
