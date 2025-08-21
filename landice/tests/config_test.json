@@ -1,0 +1,7 @@
+{
+    "input": "/data3/tebaldi/mur/workspace/data/landice/input",
+    "output": "/data3/tebaldi/mur/workspace/data/landice/output",
+    "script": "/data3/tebaldi/mur/workspace/mur/landice/src/execute_landice.py",
+    "python_exe": "/home/tebaldi/mur/env/l2p/bin/python3",
+    "inputgen_data": "/data3/tebaldi/mur/workspace/data/inputgen/landice.json"
+}
