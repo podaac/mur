@@ -1,0 +1,43 @@
+# .dockerignore for MRVA Docker build
+# Build context is parent directory (mur/) when running from mrva/:
+#   cd mur/mrva && docker build -f Dockerfile ..
+#
+# This file controls what gets copied from the parent context.
+# We only need mrva/ and common/ directories.
+
+# Exclude everything by default
+*
+
+# Include only what we need
+!mrva/
+!common/
+
+# Exclude unnecessary files from mrva/
+mrva/**/*.pyc
+mrva/**/__pycache__
+mrva/**/.DS_Store
+mrva/**/*.swp
+mrva/**/*~
+mrva/.git
+mrva/.gitignore
+mrva/README.md
+mrva/docs/
+
+# Exclude unnecessary files from common/
+common/**/*.pyc
+common/**/__pycache__
+common/**/.DS_Store
+common/**/*.swp
+common/**/*~
+common/.git
+common/.gitignore
+
+# Exclude other top-level directories we don't need
+preprocessing/
+merge/
+ghrsst/
+tests/
+*.md
+.git/
+.gitignore
+.DS_Store

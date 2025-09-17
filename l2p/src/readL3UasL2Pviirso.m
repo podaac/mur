@@ -15,23 +15,22 @@ ncid=netcdf.open(ncfile,'nowrite');
 % SST:
 if nargout>=1,
   varid = netcdf.inqVarID(ncid,'sea_surface_temperature');
-  sst = netcdf.getVar(ncid,varid);
-  badpix = netcdf.getAtt(ncid,varid,'_FillValue');
-  const = netcdf.getAtt(ncid,varid,'add_offset');
-  scale = netcdf.getAtt(ncid,varid,'scale_factor');
-  sst=single(sst);
+  sst = netcdf.getVar(ncid,varid,'single');
+  badpix = single(netcdf.getAtt(ncid,varid,'_FillValue'));
+  const = single(netcdf.getAtt(ncid,varid,'add_offset'));
+  scale = single(netcdf.getAtt(ncid,varid,'scale_factor'));
   %% find index sets for OpenDAP read:
     [ ii, jj ] = find( sst ~= badpix );
-    ii = min(ii):max(ii); 
-    jj = min(jj):max(jj); 
+    ii = min(ii):max(ii);
+    jj = min(jj):max(jj);
     sst = sst( ii, jj );  % trim SST field.
       %% OpenDAT ranges (initial indices and numbers to read)
-      o0 = [ min(ii), min(jj), 1 ]-1;  
+      o0 = [ min(ii), min(jj), 1 ]-1;
       oN = [ max(ii)-min(ii), max(jj)-min(jj), 0 ]+1;
       % use:  = netcdf.getVar(ncid,varid,o0,oN);
-  inx=find(sst(:)==badpix);
-  sst=sst*single(scale)+single(const);
-  if length(inx), sst(inx)=vfv*ones(size(inx)); end;
+  mask = (sst == badpix);
+  sst = sst * scale + const;
+  if any(mask(:)), sst(mask) = single(vfv); end;
 
     jnx = find( ~isnan( sst(:) ));
     sst = sst( jnx );
@@ -76,35 +75,34 @@ if nargout>=5,
   varid = netcdf.inqVarID(ncid,'sst_dtime');
   dt = netcdf.getVar( ncid, varid, o0, oN);
   badpix = netcdf.getAtt(ncid,varid,'_FillValue');
-  dt( find(dt(:)==badpix) )=vfv;
+  mask = (dt == badpix);
+  if any(mask(:)), dt(mask) = vfv; end;
       dt = dt( jnx );
 end;
 
 % SSES bias:
 if nargout>=6,
   varid = netcdf.inqVarID(ncid,'sses_bias');
-  bias = netcdf.getVar( ncid, varid, o0, oN);
-  badpix = netcdf.getAtt(ncid,varid,'_FillValue');
-  const = netcdf.getAtt(ncid,varid,'add_offset');
-  scale = netcdf.getAtt(ncid,varid,'scale_factor');
-  bias=single(bias);
-  inx=find(bias(:)==badpix); 
-  bias=bias*single(scale)+single(const);
-  if length(inx), bias(inx)=vfv*ones(size(inx)); end;
+  bias = netcdf.getVar( ncid, varid, o0, oN, 'single');
+  badpix = single(netcdf.getAtt(ncid,varid,'_FillValue'));
+  const = single(netcdf.getAtt(ncid,varid,'add_offset'));
+  scale = single(netcdf.getAtt(ncid,varid,'scale_factor'));
+  mask = (bias == badpix);
+  bias = bias * scale + const;
+  if any(mask(:)), bias(mask) = single(vfv); end;
       bias = bias( jnx );
 end;
 
 % SSES std:
 if nargout>=7,
   varid = netcdf.inqVarID(ncid,'sses_standard_deviation');
-  sigma = netcdf.getVar( ncid, varid, o0, oN);
-  badpix = netcdf.getAtt(ncid,varid,'_FillValue');
-  const = netcdf.getAtt(ncid,varid,'add_offset');
-  scale = netcdf.getAtt(ncid,varid,'scale_factor');
-  sigma=single(sigma);
-  inx=find(sigma(:)==badpix); 
-  sigma=sigma*single(scale)+single(const);
-  if length(inx), sigma(inx)=vfv*ones(size(inx)); end;
+  sigma = netcdf.getVar( ncid, varid, o0, oN, 'single');
+  badpix = single(netcdf.getAtt(ncid,varid,'_FillValue'));
+  const = single(netcdf.getAtt(ncid,varid,'add_offset'));
+  scale = single(netcdf.getAtt(ncid,varid,'scale_factor'));
+  mask = (sigma == badpix);
+  sigma = sigma * scale + const;
+  if any(mask(:)), sigma(mask) = single(vfv); end;
       sigma = sigma( jnx );
 end;
 
@@ -114,8 +112,8 @@ if nargout>=8,
   qual = netcdf.getVar( ncid, varid, o0, oN);
   try,
     badpix = netcdf.getAtt(ncid,varid,'_FillValue');
-    inx=find(qual(:)==badpix); 
-    if length(inx), qual(inx)=vfv*ones(size(inx)); end;
+    mask = (qual == badpix);
+    if any(mask(:)), qual(mask) = vfv; end;
   catch,
   end;
       qual = qual( jnx );

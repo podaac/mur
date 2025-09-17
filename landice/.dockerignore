@@ -1,0 +1,69 @@
+# LandIce Docker Build - Local Context Only
+#
+# NOTE: This file is NOT used for the recommended Dockerfile.multistage build!
+# When building with parent context (docker build .. -f Dockerfile.multistage),
+# Docker uses the parent mur/.dockerignore instead.
+#
+# This file only applies if you build with context set to landice directory itself,
+# which is NOT the recommended approach since it can't access common/ utilities.
+#
+# Exclude large test data and unnecessary files
+
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+*.exe
+
+# Test data and outputs (mount at runtime instead)
+tests/
+tests/in/
+tests/out/
+
+# Large data files - these should be mounted at runtime, not copied to image
+*.mask
+*.mat
+*.nc
+*.gds
+*.gz
+*.tar
+*.zip
+
+# macOS files (these cause I/O errors during Docker build)
+.DS_Store
+**/.DS_Store
+._*
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Git files
+.git/
+.gitignore
+
+# Documentation (not needed in container)
+README.md
+REPROCESSING_DATES_README.md
+REFACTORING_SUMMARY.md
+BUILD_INSTRUCTIONS.md
+DEPLOYMENT.md
+*.md
+!Dockerfile*
+
+# Local development files
+*.log
+*.tmp
+.env
+.env.local
+
+# MATLAB temporary files
+*.asv
+*.m~
+
+# Shell scripts (not needed in container)
+*.sh

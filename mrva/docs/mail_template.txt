@@ -1,0 +1,6 @@
+From: MUR_PRODUCTION_
+To: mike.chin@jpl.nasa.gov,toshio.m.chin@jpl.nasa.gov
+Cc: tmchin@jpl.nasa.gov
+Subject: Full Disk: /home/tmchin/nas/L4/GLOB 89.0%, 286.5Gb free
+
+Local time by matlab was 21-Aug-2012 16:07:49

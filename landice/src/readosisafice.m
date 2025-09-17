@@ -10,36 +10,45 @@ function [ice,lon,lat] = readosisafice( hem, year, doy, ...
   if ~exist('lastMJD_archive'), lastMJD_archive=inf; end;
 
   % Retrieve the date
-  year = int32(str2double(year))
-  doy = int32(str2double(doy))
+  year = int32(str2double(year));
+  doy = int32(str2double(doy));
 
-  original_year = year
-  original_doy = doy
+  original_year = year;
+  original_doy = doy;
   [day,month,year] = julian(doy,year);
   date   = sprintf('%04d%02d%02d',year,month,day);
   subdir = sprintf('/%04d/%02d',year,month);
 
 
   %% ftp source and file name(s):
-  if julian(doy,1,year,3) <= lastMJD_reprocessed,
+  current_mjd = julian(doy,1,year,3);
 
-    ftpdir = getenv("OSISAF_FTP_REPROCESSED") % 1978-2015.04
+  if current_mjd <= lastMJD_reprocessed
+
+    ftpdir = getenv("OSISAF_FTP_REPROCESSED"); % 1978-2015.04
     filename = sprintf('ice_conc_%s_polstere-100_reproc_%s1200.nc',hem,date);
+    fprintf(1, 'readOSISAF: Date %s (%s, MJD=%d) <= reprocessing cutoff (MJD=%d)\n', ...
+        date, hem, current_mjd, lastMJD_reprocessed);
+    fprintf(1, 'readOSISAF: Using REPROCESSED FTP source: %s\n', ftpdir);
 
-  elseif julian(doy,1,year,3) <= lastMJD_archive,
+  elseif current_mjd <= lastMJD_archive
 
-    ftpdir = getenv("OSISAF_FTP_ARCHIVE")
+    ftpdir = getenv("OSISAF_FTP_ARCHIVE");
     filename = sprintf('ice_conc_%s_polstere-100_multi_%s1200.nc',hem,date);
+    fprintf(1, 'readOSISAF: Date %s (%s, MJD=%d) > reprocessing cutoff (MJD=%d), <= archive cutoff (MJD=%d)\n', ...
+        date, hem, current_mjd, lastMJD_reprocessed, lastMJD_archive);
+    fprintf(1, 'readOSISAF: Using ARCHIVE FTP source: %s\n', ftpdir);
 
-  else,
+  else
 
-    ftpdir = getenv("OSISAF_FTP_PROD")
+    ftpdir = getenv("OSISAF_FTP_PROD");
     subdir = '';
     filename = sprintf('ice_conc_%s_polstere-100_multi_%s1200.nc',hem,date);
+    fprintf(1, 'readOSISAF: Date %s (%s, MJD=%d) > archive cutoff (MJD=%d)\n', ...
+        date, hem, current_mjd, lastMJD_archive);
+    fprintf(1, 'readOSISAF: Using PRODUCTION FTP source: %s\n', ftpdir);
 
-  end;
-
-  fprintf(1, 'readOSISAF: OSISAF FTP: %s.\n', ftpdir);
+  end
 
   % Attempt to retrieve the file
   pathname = sprintf('%s%s/%s',ftpdir,subdir,filename);
@@ -88,7 +97,7 @@ function [ice,lon,lat] = readosisafice( hem, year, doy, ...
     ice = double(ice)*scale;
     netcdf.close(ncid);
 
-    system( sprintf('rm -f %s',filename) );
+    if isfile(filename), delete(filename); end;
 
   % File does not exist, this is an error
   else,
@@ -106,16 +115,67 @@ end
 % Function to download file pathname from OSISAF
 function download_file(pathname, filename)
   
+  try
+      uri = matlab.net.URI(pathname);
+  catch
+      fprintf(0, 'Error: malformed URL', pathname);
+      return
+  end
+
   fprintf(1,'readOSISAF: %s\n',pathname); 
-  system( sprintf('rm -f %s',filename) );
-  system( sprintf('wget -q %s',pathname) );
+  if isfile(filename), delete(filename); end
 
-  if ~exist(filename,'file'),
+  try
 
-    system(sprintf('wget -q %s.gz',pathname));
-    if exist([filename,'.gz']), system(sprintf('gunzip %s.gz',filename)); end;
+    if strcmpi(uri.Scheme, 'ftp')
+        % Use FTP commands, this failed on my version there may be some
+        % configuration that varies
+        ftpobj = ftp(uri.Host);
+        download_file = uri.Path{end};
+        cd(ftpobj, strjoin(uri.Path(1:end-1), "/"));
+        % Previous code had logic to try adding ".gz" if after the first try
+        % the file didn't download, we can check here first
+        remote_files = dir(ftpobj);
+        filenames = {remote_files.name};
+        if ismember(filename, filenames)
+            mget(ftpobj, download_file);
+        elseif ismember([filename, '.gz'], filenames)
+            %Add the .gz
+            download_file(end+1:end+3) = '.gz';
+            filename(end+1:end+3) = '.gz';
+            if isfile(filename), delete(filename); end
+            mget(ftpobj, download_file);
+        else
+            fprintf(0, 'Error: remote file %s/[.gz], not found', filename);
+        end
+        %Rename if desired
+        if filename ~= download_file
+            movefile(uri.Path(end), filename)
+        end
+    else
+        % Non-FTP --------------------------------
 
-  end;
+        % Do lightweight read to see if file is present
+        request = matlab.net.http.RequestMessage(matlab.net.http.RequestMethod.HEAD);
+
+        % Send the request and get the response
+        response = request.send(uri);
+
+        % Check the HTTP status code
+        options = weboptions('Timeout', 120);
+        if response.StatusCode == matlab.net.http.StatusCode.OK
+            websave(filename, pathname, options);
+        else
+            % Try it with .gz, if it fails nothing else to try
+            pathname(end+1:end+3) = '.gz';
+            filename(end+1:end+3) = '.gz';
+            websave(filename, pathname, options);
+        end
+    end
+  catch er
+    % Ignore download errors, will be handled by file existence check
+    disp(er)
+  end
 
 end
 

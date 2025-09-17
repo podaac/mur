@@ -23,8 +23,17 @@ landindexname=getenv("LAND_INDEX_NAME")
 % read grid data:
   fprintf(1,'loading %s\n',landmaskfile);
   f=fopen(landmaskfile,'r');
-  [ii,jj]=fortread(f,'int',1,'int',1);
-  [mask,lon,lat]=fortread(f,'integer*2',[ii,jj],'real*4',ii,'real*4',jj);
+  % Read Fortran record with dimensions
+  record_header = fread(f, 1, 'uint32');
+  ii = fread(f, 1, 'int32=>int32');
+  jj = fread(f, 1, 'int32=>int32');
+  record_trailer = fread(f, 1, 'uint32');
+  % Read Fortran record with mask and coordinates
+  record_header = fread(f, 1, 'uint32');
+  mask = fread(f, [ii,jj], 'int16=>int16');
+  lon = fread(f, ii, 'single=>single');
+  lat = fread(f, jj, 'single=>single');
+  record_trailer = fread(f, 1, 'uint32');
   fclose(f);
 [xg,yg]=ndgrid(lon,lat);
 xg=xg(:); yg=yg(:);
@@ -52,21 +61,65 @@ mnx=intersect(inx,jnx);
 
 
 
-% find nearest distance and indexes:
-if 1,  % run "nearest.f":
-  f=fopen('nninput.dat','w');
-    fortwrite(f,'integer*4',length(xi),'integer*4',length(mnx));
-    fortwrite(f,'real*4',xi,'real*4',yi);
-    fortwrite(f,'real*4',xg(mnx),'real*4',yg(mnx));
-  fclose(f);
+% find nearest distance and indexes using MATLAB:
+fprintf(1,'Running nearest neighbor search in MATLAB...\n');
+n_saf = length(xi);      % number of SAF points
+n_grid = length(mnx);    % number of grid points
 
-  ! ifort -openmp nearest.f; a.out
+dval = inf(n_grid, 1);   % minimum distances
+iinx = zeros(n_grid, 1); % indices of nearest SAF points
 
-  f=fopen('nnoutput.dat','r');
-    n=fortread(f,'integer*4',1);
-    [dval,iinx]=fortread(f,'real*4',n,'integer*4',n);
-  fclose(f);
-end;
+deg2rad = pi/180;
+
+% For each grid point, find nearest SAF point
+for grid_idx = 1:n_grid
+    if mod(grid_idx, 10000) == 0
+        fprintf(1,'  Progress: %.1f%%\n', 100 * grid_idx / n_grid);
+    end
+    
+    grid_lon = xg(mnx(grid_idx));
+    grid_lat = yg(mnx(grid_idx));
+    
+    min_dist_sq = inf;
+    best_saf_idx = 0;
+    
+    for saf_idx = 1:n_saf
+        saf_lon = xi(saf_idx);
+        saf_lat = yi(saf_idx);
+        
+        % Calculate latitude difference
+        dy = abs(saf_lat - grid_lat);
+        if dy <= mindistance
+            % Calculate longitude difference with wraparound
+            dx = abs(saf_lon - grid_lon);
+            if dx > 360
+                dx = dx - 360;
+            end
+            % Handle crossing 0/360 boundary
+            if dx > 180
+                dx = 360 - dx;
+            end
+            
+            % Apply cosine correction for latitude convergence
+            cos_lat = cos(max(abs(saf_lat), abs(grid_lat)) * deg2rad);
+            dx = dx * cos_lat;
+            
+            if dx <= mindistance
+                % Calculate squared distance
+                dist_sq = dx*dx + dy*dy;
+                if dist_sq < min_dist_sq
+                    min_dist_sq = dist_sq;
+                    best_saf_idx = saf_idx;
+                end
+            end
+        end
+    end
+    
+    dval(grid_idx) = sqrt(min_dist_sq);
+    iinx(grid_idx) = best_saf_idx;
+end
+
+fprintf(1,'Nearest neighbor search completed.\n');
 
 % explore for the cut-off distance:
 if 0,
@@ -98,8 +151,5 @@ iceinx=int32(iceinx);
 gridinx=int32(gridinx);
 
 save saf2south iceinx gridinx;
-
-% clean up:
-! rm nninput.dat nnoutput.dat a.out;
 
 

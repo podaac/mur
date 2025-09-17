@@ -1,50 +1,79 @@
-function makedailyiquam(year,doy,rewrite)
-%% makedaily.m
-%% downloads IQUAM netCDF file and save as daily bii files.
+function makedailyiquam(year, doy, rewrite, outputDir, cacheDir, sourceUrl)
+% makedailyiquam - Download and process IQUAM NetCDF data to daily binary files
+%
+% USAGE:
+%   makedailyiquam(year, doy, rewrite, outputDir, cacheDir, sourceUrl)
+%
+% INPUTS:
+%   year      - Year (e.g., 2024)
+%   doy       - Day of year (1-366)
+%   rewrite   - Force rewrite existing files (0=no, 1=yes) [optional, default: 0]
+%   outputDir - Base directory for .bii output files [optional, default: './output/iquam']
+%   cacheDir  - Directory for temporary .mat cache files [optional, default: pwd]
+%   sourceUrl - URL for IQUAM NetCDF downloads [optional, default: NOAA STAR server]
+%
+% OUTPUTS:
+%   Creates: <outputDir>/YYYY/Global_IQUAM0_YYYY_DDD.bii
+%   Caches:  <cacheDir>/iquam.YYYY.MM.mat (monthly data for reuse)
+%
+% PROCESSING:
+%   1. Downloads monthly IQUAM NetCDF file (if not cached)
+%   2. Reads and quality-controls data (qual >= 5)
+%   3. Extracts observations for specified day
+%   4. Calls writeiquambii() to write binary output
+%
+% NOTE: This function now calls external writeiquambii() - no inline duplication
 
+  %% Handle optional parameters
+  if ~exist('rewrite','var'), rewrite = 0; end
+  if ~exist('outputDir','var') || isempty(outputDir)
+      outputDir = './output/iquam';
+  end
+  if ~exist('cacheDir','var') || isempty(cacheDir)
+      cacheDir = pwd;
+  end
+  if ~exist('sourceUrl','var') || isempty(sourceUrl)
+      sourceUrl = 'https://www.star.nesdis.noaa.gov/pub/socd/sst/iquam/v2.10/';
+  end
 
+  %% Output filename (check if exists and skip if not rewriting)
+  edir = sprintf('%s/%04d', outputDir, year);
+  if ~exist(edir,'dir')
+      [status, msg] = mkdir(edir);
+      if ~status, error('Failed to create output dir: %s', msg); end
+  end
 
-  %% detination directory:
-  ddir='/home/earmstro/mur/mur_production_test_from_tebaldi/data/iquam';
+  %% Ensure cache directory exists
+  if ~exist(cacheDir,'dir')
+      [status, msg] = mkdir(cacheDir);
+      if ~status, error('Failed to create cache dir: %s', msg); end
+  end
 
-  %% subdirectory:
-  edir=sprintf('/home/earmstro/mur/mur_production_test_from_tebaldi/data/iquam/%04d',year);
-  if ~exist(edir,'dir'), eval(sprintf('! mkdir -p %s',edir)); end;
+  filename = sprintf('%s/Global_IQUAM0_%04d_%03d.bii', edir, year, doy);
 
-  %% filename:  
-  filename=sprintf('%s/Global_IQUAM0_%04d_%03d.bii',edir,year,doy);
-
-
-if ~exist('rewrite','var'), rewrite=0; end;
-
-if (~rewrite) & exist(filename,'file'), return; end;
+  if (~rewrite) && exist(filename,'file')
+      return
+  end
 
 
     %% netCDF file:
     [day,month]=julian(doy,year);
-    %ifile=sprintf('IQUAM.NCEP.%04d.%02d.HDF',year,month);
-    %localfile=sprintf('%s.mat',ifile);
     ifile=sprintf('%04d%02d-STAR-L2i_GHRSST-SST-iQuam-*.nc',year,month);
-    %localfile=sprintf('iquam.%04d.%02d.mat',year,month);
-    localfile=sprintf('%s/iquam.%04d.%02d.mat',pwd,year,month);
+    localfile=sprintf('%s/iquam.%04d.%02d.mat',cacheDir,year,month);
 
     %% download, read HDF file, and quality control:
-    if ~exist(localfile,'file'), 
+    if ~exist(localfile,'file')
+      fprintf('Processing %04d/%03d: Downloading IQUAM data for %04d-%02d\n', year, doy, year, month);
 
       %% download:
-      %iurl='ftp://www.star.nesdis.noaa.gov/pub/sod/sst/iquam';
-      %iurl='ftp://ftp.star.nesdis.noaa.gov/pub/sod/sst/iquam/v2.00';
-      iurl='ftp://ftp.star.nesdis.noaa.gov/pub/sod/sst/iquam/v2.10';
-      cmd=sprintf('! wget "%s/%s"',iurl,ifile);
-      eval(cmd);
-      disp(cmd);
+      system(sprintf('wget -nH --cut-dirs 6 -r -l1 -np "%s" -A "%s"',sourceUrl,ifile),'-echo');
 
       %% read:
       ddir = dir( ifile );
       if length(ddir),
         ncfile = ddir(1).name;
       else,
-        disp(sprintf('IQUAM failed to download on %04d/%03d',year,doy));
+        fprintf('ERROR: IQUAM download failed for %04d/%03d\n', year, doy);
         return;
       end;
 
@@ -72,41 +101,27 @@ if (~rewrite) & exist(filename,'file'), return; end;
       %% http://www.star.nesdis.noaa.gov/sod/sst/iquam/index.html
       %knx=find( mod(qual,4)==0 );
       knx=find( qual>=5 );
+      fprintf('  QC: Retained %d of %d observations (qual>=5)\n', length(knx), length(dayf));
       dayf=dayf(knx); hour=hour(knx); pt=pt(knx);
       sst=sst(knx); lon=lon(knx); lat=lat(knx);
 
       %% save the contents:
       save(localfile,'dayf','hour','pt','sst','lon','lat');
 
-    else,  % read from mat file:
-
-      disp(['makedailyiquam: reading ',localfile]);
+    else  % read from mat file:
+      fprintf('Processing %04d/%03d: Using cached data from %s\n', year, doy, localfile);
       load(localfile);
 
-    end;
+    end
 
     %% extract daily components:
     knx=find(dayf==day);
-      hour=hour(knx); pt=pt(knx);
-      sst=sst(knx); lon=lon(knx); lat=lat(knx);
+    fprintf('  Writing %d observations to %s\n', length(knx), filename);
+    hour=hour(knx); pt=pt(knx);
+    sst=sst(knx); lon=lon(knx); lat=lat(knx);
 
-
-    %% write file:  (from writeiquambii)
-      f=fopen(filename,'w');
-      if f==-1, error(['cannot write/open to ',filename]); end;
-
-      %% data conversion:
-      N=length(sst(:));
-      sst=int16(sst*100);
-      lon=int16(lon*100);
-      lat=int16(lat*100);
-      hour=int16(hour*100);
-      pt=int8(pt);
-
-      %% write
-      fortwrite(f,'int32',N,'int16',year,'int16',doy);
-      fortwrite(f,'int16',sst,'int16',lon,'int16',lat,'int16',hour,'int8',pt);
-      fclose(f);
+    %% write file: Call external writeiquambii function (no more code duplication!)
+    writeiquambii(year, doy, lon, lat, sst, hour, pt, outputDir);
 
 
 
@@ -114,43 +129,48 @@ if (~rewrite) & exist(filename,'file'), return; end;
 
 function fileID=hdfreadopen(filename,contents)
 % fileID=hdfreadopen(filename,contents)
-% open and HDF file using matlab hdfsd and returns its file ID.
+% open an HDF file using matlab.io.hdf4.sd and returns its file ID.
 %
 % If "contents" flag is set, a list of its variable contents is printed.
 %
-% The file is close if the "contents" flag is set (default: contents=0).
+% The file is closed if the "contents" flag is set (default: contents=0).
+%
+% Updated to use matlab.io.hdf4.sd interface (replaces deprecated hdfsd)
 
 
 if ~exist('contents','var'), contents=0; end;
 
-fileID = hdfsd('start',filename, 'read');
+fileID = matlab.io.hdf4.sd.start(filename, 'read');
 
 if fileID==-1,
-  disp(sprintf('hdfreadopen: %s not found.',filename)); return; 
+  disp(sprintf('hdfreadopen: %s not found.',filename)); return;
 end;
 
 if contents,
-  [ndatasets, nglobattr, status] = hdfsd('fileinfo', fileID);
+  [ndatasets, nglobattr] = matlab.io.hdf4.sd.fileInfo(fileID);
 
   fprintf(1,'ndatasets=%d, nglobattr=%d\n',ndatasets,nglobattr);
 
   disp(sprintf('### %s, CONTENTS: ###',filename));
   for n=0:ndatasets-1,
-    dataID = hdfsd('select', fileID, n);
-    [name,ndim,dimvector,type,nattr] = hdfsd('getinfo', dataID);
+    dataID = matlab.io.hdf4.sd.select(fileID, n);
+    [name, ndim, dimvector, type, nattr] = matlab.io.hdf4.sd.getInfo(dataID);
     fprintf(1,'  %s: %s(%d) +%d\n',name,type,ndim,nattr);
-    hdfsd('endaccess',dataID);
+    matlab.io.hdf4.sd.endAccess(dataID);
   end;
 
-  hdfsd('end',fileID);
+  matlab.io.hdf4.sd.close(fileID);
 end;
 
 
 function val=hdfreadvariable(fileID,varname)
 % val=hdfreadvariable(fileID,'varname')
 % returns value "val" of the HDF file variable named "varname".
+%
+% Updated to use matlab.io.hdf4.sd interface (replaces deprecated hdfsd)
 
-dataID = hdfsd('select', fileID, hdfsd('nametoindex',fileID,varname) );
+varIndex = matlab.io.hdf4.sd.nameToIndex(fileID, varname);
+dataID = matlab.io.hdf4.sd.select(fileID, varIndex);
 
 if dataID==-1,
   disp(sprintf('"%s" not found in fileID %d',varname,fileID));
@@ -158,15 +178,19 @@ if dataID==-1,
   return;
 end;
 
-[name,ndim,dims,type,nattr] = hdfsd('getinfo', dataID);
-startvector=zeros(size(dims)); stridevector=[]; endvector=dims;
-  val = hdfsd('readdata', dataID, startvector, stridevector, endvector);
-hdfsd('endaccess',dataID);
+[name, ndim, dims, type, nattr] = matlab.io.hdf4.sd.getInfo(dataID);
+startvector = zeros(size(dims));
+stridevector = [];
+endvector = dims;
+val = matlab.io.hdf4.sd.readData(dataID, startvector, stridevector, endvector);
+matlab.io.hdf4.sd.endAccess(dataID);
 
 
 function status=hdfreadclose(fileID)
 % closes the opened HDF file.
-status = hdfsd('end',fileID);
+%
+% Updated to use matlab.io.hdf4.sd interface (replaces deprecated hdfsd)
+status = matlab.io.hdf4.sd.close(fileID);
 
 
 function [dayf,hour,minute,lon,lat,sst,qual,pt] = readnc( ncfile )

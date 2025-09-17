@@ -1,0 +1,69 @@
+[project]
+name = "mur-processing"
+version = "0.1.0"
+description = "MUR SST Pre-processing Test Driver and Data Viewer"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # Core scientific computing
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "scikit-image>=0.20.0",
+
+    # Data access and downloading
+    "earthaccess>=0.9.0",
+    "fsspec>=2024.0.0",
+
+    # Date/time utilities
+    "python-dateutil>=2.8.0",
+
+    # Configuration and logging
+    "pyyaml>=6.0",
+
+    # Data visualization
+    "matplotlib>=3.7.0",
+    "mpl-scatter-density>=0.7.0",
+
+    # Web interface
+    "streamlit>=1.28.0",
+]
+
+[project.scripts]
+mur-pipeline = "run_mur_pipeline:main"
+mur-viewer = "dataviewer.dataviewer:main"
+mur-web-viewer = "run_web_viewer:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+]
+viz = [
+    "cartopy>=0.22.0",
+]
+interactive = [
+    "plotly>=5.17.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dataviewer"]
+include = [
+    "run_mur_pipeline.py",
+    "run_web_viewer.py",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"

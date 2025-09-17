@@ -1,0 +1,2 @@
+SERVER {Hostname} {HostID} {Port}
+USE_SERVER
