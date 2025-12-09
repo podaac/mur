@@ -43,6 +43,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libc6 \
     libstdc++6 \
     zlib1g \
+    wget \
     unzip \
     libgomp1 \
     libxt6 \

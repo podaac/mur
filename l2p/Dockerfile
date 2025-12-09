@@ -48,6 +48,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libc6 \
     libstdc++6 \
+    wget \
     zlib1g \
     unzip \
     gzip \
