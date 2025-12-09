@@ -121,6 +121,7 @@ RUN cd /app/matlab && \
 FROM debian:bookworm-slim
 
 # Install runtime dependencies
+# libxt6, libxmu6: Required by MATLAB Runtime for X11 components even in headless mode
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libc6 \
@@ -128,6 +129,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g \
     unzip \
     libgomp1 \
+    libxt6 \
+    libxmu6 \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
 

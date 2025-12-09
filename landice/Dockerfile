@@ -42,6 +42,7 @@ RUN cd /app/matlab && \
 FROM debian:bookworm-slim
 
 # Install runtime dependencies including Python3
+# libxt6, libxmu6: Required by MATLAB Runtime for X11 components even in headless mode
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libc6 \
@@ -49,6 +50,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g \
     unzip \
     libgomp1 \
+    libxt6 \
+    libxmu6 \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
 
@@ -92,18 +95,27 @@ RUN mkdir -p /data/input /data/output /data/logs /tmp/landice_tmp
 WORKDIR /data
 
 # Create entrypoint wrapper script
+# This wrapper uses fixed container paths (/input, /output)
+# Arguments: year doy (2 args, paths are injected by entrypoint)
 RUN echo '#!/bin/bash' > /opt/landice/bin/entrypoint.sh && \
-    echo '# LANDICE Container Entrypoint' >> /opt/landice/bin/entrypoint.sh && \
+    echo '# LANDICE Container Entrypoint Wrapper' >> /opt/landice/bin/entrypoint.sh && \
     echo 'set -e' >> /opt/landice/bin/entrypoint.sh && \
     echo '' >> /opt/landice/bin/entrypoint.sh && \
-    echo 'if [ "$#" -lt 1 ]; then' >> /opt/landice/bin/entrypoint.sh && \
-    echo '    echo "ERROR: Expected at least 1 argument"' >> /opt/landice/bin/entrypoint.sh && \
-    echo '    echo "Usage: docker run ... [ARGS]"' >> /opt/landice/bin/entrypoint.sh && \
+    echo 'if [ "$#" -ne 2 ]; then' >> /opt/landice/bin/entrypoint.sh && \
+    echo '    echo "ERROR: Expected 2 arguments, got $#"' >> /opt/landice/bin/entrypoint.sh && \
+    echo '    echo "Usage: docker run ... YEAR DOY"' >> /opt/landice/bin/entrypoint.sh && \
+    echo '    echo "  YEAR: 4-digit year (e.g., 2025)"' >> /opt/landice/bin/entrypoint.sh && \
+    echo '    echo "  DOY:  Day of year (1-366)"' >> /opt/landice/bin/entrypoint.sh && \
     echo '    exit 1' >> /opt/landice/bin/entrypoint.sh && \
     echo 'fi' >> /opt/landice/bin/entrypoint.sh && \
     echo '' >> /opt/landice/bin/entrypoint.sh && \
-    echo '# Call MATLAB executable with arguments' >> /opt/landice/bin/entrypoint.sh && \
-    echo 'exec /opt/landice/bin/run_LandiceProcessor.sh "/opt/matlabruntime/R2024b" "$@"' >> /opt/landice/bin/entrypoint.sh && \
+    echo '# Fixed paths managed by Docker volume mounts' >> /opt/landice/bin/entrypoint.sh && \
+    echo 'INDIR="/input"' >> /opt/landice/bin/entrypoint.sh && \
+    echo 'OUTDIR="/output"' >> /opt/landice/bin/entrypoint.sh && \
+    echo '' >> /opt/landice/bin/entrypoint.sh && \
+    echo '# Call MATLAB executable with fixed paths inserted' >> /opt/landice/bin/entrypoint.sh && \
+    echo '# landice_wrapper expects: input_dir output_dir year doy' >> /opt/landice/bin/entrypoint.sh && \
+    echo 'exec /opt/landice/bin/run_LandiceProcessor.sh "/opt/matlabruntime/R2024b" "$INDIR" "$OUTDIR" "$1" "$2"' >> /opt/landice/bin/entrypoint.sh && \
     chmod +x /opt/landice/bin/entrypoint.sh
 
 # Set entrypoint
