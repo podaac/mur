@@ -2,7 +2,7 @@
   "description": "MUR SST Pre-processing Configuration",
   "landice": {
     "container_image": "mur-landice:latest",
-    "input_dir": "./testing/preprocessing/inputs",
+    "input_dir": "./testing/preprocessing/inputs/landice",
     "output_dir": "./testing/preprocessing/output/landice",
     "description": "Land/Ice mask generation from OSI-SAF data"
   },
