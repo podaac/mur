@@ -3,6 +3,11 @@
 import os
 import sys
 
+# Add parent directories to path for mur_date import
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))))
+import mur_date  # noqa: E402
+
 # makenrt.py
 # near real-time front end for IDL based data extraction.
 
@@ -51,9 +56,8 @@ def calday(yday,year):
 
 
 def todoy():
-  """returns day of year (doy) and year for TODAY"""
-  import datetime
-  today=datetime.date.today()
+  """returns day of year (doy) and year for TODAY (or simulated today)"""
+  today = mur_date.today()  # Respects MUR_SIMULATED_DATE env var
   return( int(today.strftime("%j")), today.year )
 
 (d,y)=todoy()

@@ -7,6 +7,10 @@ import sys
 import logging
 import datetime
 
+# Add parent directory to path for mur_date import
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mur_date
+
 # ----------------------------------------------------------------------------
 # Environment Variables
 # ----------------------------------------------------------------------------
@@ -43,7 +47,8 @@ logger.addHandler(handler)
 # Helper functions (ported from original nrtBuoyData.py)
 # ----------------------------------------------------------------------------
 def todoy():
-    today = datetime.date.today()
+    """Returns day of year (doy) and year for today (or simulated today)."""
+    today = mur_date.today()  # Respects MUR_SIMULATED_DATE env var
     return int(today.strftime("%j")), today.year
 
 
@@ -74,7 +79,7 @@ def span(start, end):
 # ----------------------------------------------------------------------------
 def determine_date_range():
     """Yield (year, day, rewrite) tuples across configured ranges."""
-    today_ord = datetime.date.today().toordinal()
+    today_ord = mur_date.today().toordinal()  # Respects MUR_SIMULATED_DATE env var
     day_today, year_today = todoy()
 
     (day2,year2)=adjdoy(day_today-nrtLatency,year_today)   # end of nrt run.

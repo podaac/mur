@@ -66,6 +66,9 @@ import time
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
+# Import centralized date handling for historical reprocessing support
+import mur_date
+
 # Configure logging
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -130,7 +133,18 @@ class MUROrchestrator:
         netrc_path: Optional[pathlib.Path] = None,
         use_rea: bool = False
     ):
-        """Initialize orchestrator with configuration."""
+        """Initialize orchestrator with configuration.
+
+        Args:
+            config_path: Path to configuration JSON file
+            netrc_path: Optional path to .netrc file for NASA Earthdata auth
+            use_rea: Enable REA mode based on date boundaries (default: NRT only)
+
+        Note:
+            Historical reprocessing is controlled via MUR_SIMULATED_DATE env var.
+            Use mur_date.set_simulated_date() before creating the orchestrator,
+            or pass --date to the CLI which sets the env var automatically.
+        """
         self.config_path = config_path
         self.config = self._load_config()
         self.base_dir = pathlib.Path(__file__).parent
@@ -151,12 +165,28 @@ class MUROrchestrator:
         with open(self.config_path) as f:
             return json.load(f)
 
+    def get_reference_today(self) -> datetime.date:
+        """
+        Get the reference "today" date for all calculations.
+
+        Uses mur_date.today() which respects the MUR_SIMULATED_DATE env var.
+        This enables historical reprocessing when --date is passed to the CLI.
+
+        Returns:
+            The simulated date if MUR_SIMULATED_DATE is set, otherwise actual today.
+        """
+        return mur_date.today()
+
     def calculate_processing_window(
         self,
         target_date: Optional[datetime.date] = None
     ) -> Tuple[datetime.date, datetime.date, datetime.date]:
         """
         Calculate processing date range following nrtMRVA.py logic.
+
+        Args:
+            target_date: Override date for "today". If not provided, uses
+                        get_reference_today() (which respects simulated_today).
 
         Returns:
             (day0, day1, day2) where:
@@ -169,7 +199,7 @@ class MUROrchestrator:
             - NRT (near real-time): day1+1 to day2 - may need reprocessing
         """
         if target_date is None:
-            today = datetime.date.today()
+            today = self.get_reference_today()
         else:
             today = target_date
 
@@ -487,6 +517,9 @@ class MUROrchestrator:
 
         Mimics production where each sensor processes a temporal window around
         the analysis date.
+
+        Note: Uses get_reference_today() for all date comparisons to support
+        historical reprocessing via --date flag.
         """
         config = self.config["l2p"]
         sensor_config = config["sensors"][sensor]
@@ -497,7 +530,8 @@ class MUROrchestrator:
         logger.info(f"    Dayrange: -{dayrange[0]} to +{dayrange[1]} days")
 
         success = True
-        today = datetime.date.today()
+        # Use simulated "today" for historical reprocessing support
+        reference_today = self.get_reference_today()
 
         # Calculate total days to process
         total_days = dayrange[0] + dayrange[1] + 1
@@ -507,8 +541,8 @@ class MUROrchestrator:
         for dt in range(-dayrange[0], dayrange[1] + 1):
             data_day = process_date + datetime.timedelta(days=dt)
 
-            # Skip future dates
-            if data_day > today:
+            # Skip future dates (relative to simulated "today")
+            if data_day > reference_today:
                 continue
 
             days_processed += 1
@@ -518,7 +552,8 @@ class MUROrchestrator:
             )
 
             # Determine if data is stable (old enough that it won't change)
-            days_old = (today - data_day).days
+            # Uses simulated "today" so historical runs treat data as "fresh"
+            days_old = (reference_today - data_day).days
             rewrite = days_old < stablat
 
             # Download step (mimics cron job)
@@ -572,8 +607,9 @@ class MUROrchestrator:
 
         # Check if output exists (files will be in year subdirectory created by container)
         output_file = output_dir / str(year) / f"Global_IQUAM0_{year}_{doy:03d}.bii"
-        today = datetime.date.today()
-        days_old = (today - process_date).days
+        # Use simulated "today" for historical reprocessing support
+        reference_today = self.get_reference_today()
+        days_old = (reference_today - process_date).days
         rewrite = days_old < stablat
 
         if output_file.exists() and not rewrite:
@@ -583,7 +619,8 @@ class MUROrchestrator:
 
         # Docker command
         # Note: The iQUAM container determines what to process based on today's date
-        # internally via /tmp/makebic script. It does not accept year/doy arguments.
+        # internally via buoyDataProcessing.m. Pass MUR_SIMULATED_DATE env var so
+        # the container uses simulated "today" for historical reprocessing.
         cmd = [
             "docker", "run", "--rm",
             "--memory=8g",
@@ -592,12 +629,20 @@ class MUROrchestrator:
             "-v", f"{output_dir.resolve()}:/data/output/iquam",
             "-v", f"{cache_dir.resolve()}:/data/cache/iquam",
             "-v", f"{logs_dir.resolve()}:/data/logs",
+        ]
+
+        # Pass simulated date to container if set (for historical reprocessing)
+        if mur_date.is_simulated():
+            simulated = mur_date.get_simulated_date()
+            cmd.extend(["-e", f"MUR_SIMULATED_DATE={simulated.strftime('%Y-%m-%d')}"])
+
+        cmd.extend([
             container_image,
             "/tmp/makebic",
             "/data/logs",
             "/data/output/iquam",
             "/data/cache/iquam"
-        ]
+        ])
 
         try:
             subprocess.run(cmd, check=True)
@@ -950,7 +995,9 @@ Examples:
     parser.add_argument(
         "--date",
         type=str,
-        help="Single date to process (YYYY-MM-DD). Default: yesterday"
+        help="Date to process (YYYY-MM-DD). The script will act as if running on "
+             "this date, affecting NRT/REA boundary calculations, data stability "
+             "checks, and future date filtering. Default: yesterday (actual today)"
     )
 
     parser.add_argument(
@@ -1084,6 +1131,15 @@ def main():
     # Parse execute stages
     execute_stages = parse_execute_stages(args.execute)
 
+    # Set simulated "today" from --date flag via environment variable.
+    # This affects all date calculations throughout the pipeline, including
+    # any child processes and containers that use mur_date.today().
+    if args.date:
+        simulated_date = datetime.datetime.strptime(args.date, "%Y-%m-%d").date()
+        mur_date.set_simulated_date(simulated_date)
+        logger.info(f"Simulating run as if today is: {simulated_date}")
+        logger.info(f"  (MUR_SIMULATED_DATE={mur_date.MUR_SIMULATED_DATE_ENV} set)")
+
     # Initialize orchestrator
     try:
         orchestrator = MUROrchestrator(
@@ -1101,22 +1157,27 @@ def main():
     # Determine processing mode
     try:
         if args.date:
-            # Single date
-            process_date = datetime.datetime.strptime(args.date, "%Y-%m-%d").date()
+            # Single date specified - process that date
+            # The env var is already set, so calculate_processing_window()
+            # will use mur_date.today() for the correct NRT/REA boundary (day1)
+            process_date = mur_date.today()
             _, day1, _ = orchestrator.calculate_processing_window()
+            logger.info(f"NRT/REA boundary (day1): {day1}")
             success = orchestrator.run_single_day(
                 process_date, day1, args.preprocess_only, execute_stages
             )
 
         elif args.all_stages:
             # Full window (mimics nrtMRVA.py full run)
+            # Uses mur_date.today() via get_reference_today() for window calculation
             success = orchestrator.run_date_range(
                 preprocess_only=args.preprocess_only, execute_stages=execute_stages
             )
 
         else:
-            # Default: just yesterday
-            yesterday = datetime.date.today() - datetime.timedelta(days=1)
+            # Default: just yesterday (relative to simulated or actual today)
+            reference_today = orchestrator.get_reference_today()
+            yesterday = reference_today - datetime.timedelta(days=1)
             _, day1, _ = orchestrator.calculate_processing_window()
             success = orchestrator.run_single_day(
                 yesterday, day1, args.preprocess_only, execute_stages

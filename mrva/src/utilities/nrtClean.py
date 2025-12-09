@@ -3,8 +3,14 @@
 # nrtClean.py
 # version 0,  13.12.23
 
-import os,sys
+import os
+import sys
 import datetime
+
+# Add parent directories to path for mur_date import
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))))
+import mur_date  # noqa: E402
 
 testing=0  # set to 1 to test the script without executing download/MRVA.
 
@@ -55,9 +61,8 @@ def calday(yday,year):
   sys.exit('ABORT calday: yearday value out of range')
 
 def todoy():
-  """returns day of year (doy) and year for TODAY"""
-  import datetime
-  today=datetime.date.today()
+  """returns day of year (doy) and year for TODAY (or simulated today)"""
+  today = mur_date.today()  # Respects MUR_SIMULATED_DATE env var
   return( int(today.strftime("%j")), today.year )
 
 def adjdoy(doy,year):

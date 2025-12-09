@@ -1,7 +1,7 @@
 function buoyDataProcessing(workDir, logDir, outputDir, cacheDir, sourceUrl, ...
                             enableREA, testing, nrtLatency, reaLatency, ...
                             scanLatency, buoyDayRange, buoyStabilityLatency, ...
-                            reaAggregationWindow, reaOutputDir)
+                            reaAggregationWindow, reaOutputDir, simulatedToday)
 % buoyDataProcessing - IQUAM In-Situ SST Observation Processing Pipeline
 %
 % USAGE:
@@ -80,6 +80,11 @@ arguments
     % REA-specific parameters (for future implementation)
     reaAggregationWindow {mustBeTextScalar} = '3'  % [days] ±3 days for refbii2biq
     reaOutputDir {mustBeTextScalar} = './output/iquam_rea'  % .biq files
+
+    % Date simulation for historical reprocessing
+    % Format: 'YYYY-MM-DD' or empty string to use current date
+    % When set, uses this date instead of now() for all date calculations
+    simulatedToday {mustBeTextScalar} = ''
 end
 
 % ========================================================================
@@ -150,9 +155,23 @@ if flog == -1
 end
 fprintf('DEBUG: Log file opened successfully\n');
 
-% Get current date
+% Get current date (or simulated date for historical reprocessing)
 fprintf('DEBUG: Getting current date...\n');
-todayDatenum = now;
+if ~isempty(simulatedToday)
+    % Use simulated date for historical reprocessing
+    todayDatenum = datenum(simulatedToday, 'yyyy-mm-dd');
+    fprintf('DEBUG: Using SIMULATED date: %s\n', simulatedToday);
+else
+    % Check environment variable MUR_SIMULATED_DATE
+    envSimDate = getenv('MUR_SIMULATED_DATE');
+    if ~isempty(envSimDate)
+        todayDatenum = datenum(envSimDate, 'yyyy-mm-dd');
+        fprintf('DEBUG: Using MUR_SIMULATED_DATE env var: %s\n', envSimDate);
+    else
+        todayDatenum = now;
+        fprintf('DEBUG: Using actual current date\n');
+    end
+end
 todayVec = datevec(todayDatenum);
 todayYear = todayVec(1);
 todayDoy = floor(todayDatenum - datenum(todayYear, 1, 0));  % Day of year

@@ -13,6 +13,11 @@ import logging
 import os
 import pathlib
 import subprocess
+import sys
+
+# Add parent directories to path for mur_date import
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import mur_date  # noqa: E402
 
 # Third party imports
 import earthaccess
@@ -74,8 +79,8 @@ def main():
     files = download_files(data["collection_name"], sensor, day, data_dir,
                            download)
 
-    # Determine stability of source file
-    if datetime.date.today().toordinal() - day.toordinal() < data["stable"]:
+    # Determine stability of source file (respects MUR_SIMULATED_DATE env var)
+    if mur_date.today().toordinal() - day.toordinal() < data["stable"]:
         rewrite = 1
     else:
         rewrite = 0

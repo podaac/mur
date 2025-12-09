@@ -7,7 +7,14 @@ import argparse
 import datetime
 import json
 import logging
+import os
 import pathlib
+import sys
+
+# Add parent directories to path for mur_date import
+sys.path.insert(0, os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
+import mur_date  # noqa: E402
 
 
 # Constants
@@ -42,7 +49,7 @@ def create_args():
 def generate_landice(config_file, output_dir):
     """Generate Land Ice coorditing JSON file."""
 
-    end_date = datetime.date.today() - datetime.timedelta(days=1)
+    end_date = mur_date.today() - datetime.timedelta(days=1)
     start_date = end_date - datetime.timedelta(days=8)
 
     coord_json = list(get_date_range(start_date, end_date))
@@ -61,8 +68,8 @@ def generate_l2p(config_file, output_dir):
 
     coord_json = {}
     for sensor, data in sensor_dict.items():
-        # Get date range to retrieve sensor data for
-        end_date = datetime.date.today()
+        # Get date range to retrieve sensor data for (respects MUR_SIMULATED_DATE)
+        end_date = mur_date.today()
         start_date = end_date - datetime.timedelta(days=data["day_range"][0])
         coord_json[sensor] = list(get_date_range(start_date, end_date))
 

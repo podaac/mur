@@ -7,8 +7,14 @@
 # version 3a, 13.01.24
 # version 4,  13.02.12
 
-import os,sys
+import os
+import sys
 import datetime
+
+# Add parent directories to path for mur_date import
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))))
+import mur_date  # noqa: E402
 
 testing=0  # set to 1 to test the script without executing download/MRVA.
 
@@ -123,9 +129,8 @@ def calday(yday,year):
   sys.exit('ABORT calday: yearday value out of range')
 
 def todoy():
-  """returns day of year (doy) and year for TODAY"""
-  import datetime
-  today=datetime.date.today()
+  """returns day of year (doy) and year for TODAY (or simulated today)"""
+  today = mur_date.today()  # Respects MUR_SIMULATED_DATE env var
   return( int(today.strftime("%j")), today.year )
 
 def adjdoy(doy,year):
@@ -255,11 +260,11 @@ for year in span(year0,year2):
       ## data day is (d,y):
       (d,y) = adjdoy( day+dt, year ) 
 
-      if datetime.date.today().toordinal() - ordday(d,y) < 0: # future date?
+      if mur_date.today().toordinal() - ordday(d,y) < 0: # future date?
         continue  # ... skip to the next data day.
 
       ## determine stability of source file(s):
-      if datetime.date.today().toordinal() - ordday(d,y) < buoystablat:
+      if mur_date.today().toordinal() - ordday(d,y) < buoystablat:
         rewrite=1
       else:
         rewrite=0
@@ -320,11 +325,11 @@ for year in span(year0,year2):
         ## data day is (d,y):
         (d,y) = adjdoy( day+dt, year ) 
 
-        if datetime.date.today().toordinal() - ordday(d,y) < 0: # future date?
+        if mur_date.today().toordinal() - ordday(d,y) < 0: # future date?
           continue  # ... skip to the next data day.
 
         ## determine stability of source file(s):
-        if datetime.date.today().toordinal() - ordday(d,y) < stablat:
+        if mur_date.today().toordinal() - ordday(d,y) < stablat:
           rewrite=1
         else:
           rewrite=0
