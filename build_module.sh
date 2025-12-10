@@ -230,7 +230,7 @@ else
     # Show usage hint
     echo ""
     # Determine tag for usage hint
-    local HINT_TAG="latest"
+    HINT_TAG="latest"
     if [ "$DEBUG_MODE" -eq 1 ]; then
         HINT_TAG="debug"
     fi
