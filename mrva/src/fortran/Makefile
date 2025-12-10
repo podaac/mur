@@ -3,10 +3,21 @@
 SRC = /home/tmchin/cyc4  # used by "syncme" only.
 CWD = $(PWD)             # used by "syncme" only.
 
-
+# ========================================================================
+# Build Mode Configuration
+# ========================================================================
+# DEBUG=1  - Enable debug symbols, bounds checking, and stack traces
+# DEBUG=0  - Production build with full optimizations (default)
+#
+# Usage:
+#   make DEBUG=1          # Debug build
+#   make                  # Production build
+#   make DEBUG=0          # Explicit production build
+# ========================================================================
+DEBUG ?= 0
 
 #FC = /usr/pgi/linux86/bin/pgf90
-#FCOPT = -Mextend 
+#FCOPT = -Mextend
 
 #FC = /usr/local/bin/g95
 #FCOPT = -funroll-loops -O2
@@ -19,13 +30,42 @@ CWD = $(PWD)             # used by "syncme" only.
 # for new ifort:
 FC = /opt/intel/bin/ifort
 # Intel(R) Fortran Intel(R) 64 Compiler Version 19.0.4.243 Build 20190416
-# Matrix-free mode disabled - causes NaN in PCG solver due to cumulative rounding errors
-#FCOPT = -80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost -fpp -DMATRIX_FREE
-FCOPT = -80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost -fpp
-# -pad, -Qpad = Enables the changing of the variable and array memory layout.
-# -qopenmp, -Qopenmp = Enables OpenMP directives.
+
+# Base flags (always used)
+FCOPT_BASE = -80 -qopenmp -fpp
+# -80 = Allow 80 column fixed format
+# -qopenmp = Enable OpenMP directives
 # -fpp = Enable Fortran preprocessor for #ifdef directives
-# -DMATRIX_FREE = Enable matrix-free mode (currently disabled - see comment above)
+
+# Production optimization flags
+FCOPT_PROD = -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost
+# -pad = Enables changing of variable and array memory layout
+# -ipo = Interprocedural optimization
+# -O3 = Aggressive optimizations
+# -no-prec-div = Faster division
+# -fp-model fast=2 = Fast floating point model
+# -xHost = Optimize for host CPU
+
+# Debug flags for crash investigation
+FCOPT_DEBUG = -g -traceback -check bounds -check uninit -fpe0 -warn all -O0
+# -g = Generate debug symbols (enables line numbers in stack traces)
+# -traceback = Generate stack trace on runtime errors
+# -check bounds = Runtime array bounds checking (catches out-of-bounds access)
+# -check uninit = Check for uninitialized variables
+# -fpe0 = Stop on floating-point exceptions (div by zero, overflow, invalid)
+# -warn all = Enable all compiler warnings
+# -O0 = No optimization (makes debugging easier, variables not optimized away)
+
+# Select flags based on DEBUG setting
+ifeq ($(DEBUG),1)
+    FCOPT = $(FCOPT_BASE) $(FCOPT_DEBUG)
+    $(info *** DEBUG BUILD: Debug symbols, bounds checking, and tracebacks enabled ***)
+else
+    FCOPT = $(FCOPT_BASE) $(FCOPT_PROD)
+endif
+
+# Matrix-free mode disabled - causes NaN in PCG solver due to cumulative rounding errors
+#FCOPT += -DMATRIX_FREE
 
 
 

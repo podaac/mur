@@ -8,12 +8,25 @@
 #   cd mur/mrva
 #   docker build --platform linux/amd64 -t mrva:latest -f Dockerfile ..
 #
+# Debug build (enables debug symbols, bounds checking, stack traces):
+#   docker build --platform linux/amd64 --build-arg DEBUG=1 -t mrva:debug -f Dockerfile ..
+#
 # The .dockerignore file in this directory controls what gets included from parent context
 #
+# ========================================================================
+# Build Arguments
+# ========================================================================
+# DEBUG: Set to 1 to enable debug build with symbols, bounds checking, and tracebacks
+#        Default is 0 (production build with full optimizations)
+ARG DEBUG=0
+
 # ========================================================================
 # Stage 1: Fortran Build Stage (Intel oneAPI HPC Toolkit with ifort)
 # ========================================================================
 FROM intel/oneapi-hpckit:2024.0.1-devel-ubuntu22.04 AS fortran-builder
+
+# Re-declare ARG after FROM to make it available in this stage
+ARG DEBUG
 
 # Remove problematic Intel GPU repository (not needed for Fortran compilation)
 RUN rm -f /etc/apt/sources.list.d/intel-graphics.list 2>/dev/null || true
@@ -50,18 +63,27 @@ RUN sed -i 's|^FC = /opt/intel/bin/ifort|FC = ifort|g' /app/fortran/Makefile && 
 # Build Fortran executables with Intel ifort compiler
 # Main executables: mrva, samplegdscsp, spgrid, trimbip3, makehiresgrid
 # Spline executables: cbscxdata, cbscxcoeff, cbscxcoeffvector
-# Using Intel-optimized flags: -80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost -fpp -DMATRIX_FREE
+#
+# Build modes (controlled by DEBUG build arg):
+#   DEBUG=0 (default): Production build with full optimizations
+#     -80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost -fpp
+#   DEBUG=1: Debug build with symbols, bounds checking, and tracebacks
+#     -80 -qopenmp -fpp -g -traceback -check bounds -check uninit -fpe0 -warn all -O0
+#
 # Note: Intel oneAPI environment is already configured in the base image
 # -fpp: Enable Fortran preprocessor for #ifdef directives
-# MATRIX_FREE mode: Computes matrix-vector products on-the-fly instead of storing full sparse matrix
-#                   Reduces memory usage by ~89% (no infoMatrix allocation)
-#                   Enables processing of high-resolution grids (L=9+) with limited RAM
 SHELL ["/bin/bash", "-c"]
 RUN cd /app/fortran && \
     echo "Starting Fortran compilation with Intel ifort..." && \
+    echo "DEBUG mode: ${DEBUG:-0}" && \
+    if [ "${DEBUG}" = "1" ]; then \
+        echo "*** DEBUG BUILD: Enabling debug symbols, bounds checking, and tracebacks ***"; \
+    else \
+        echo "*** PRODUCTION BUILD: Full optimizations enabled ***"; \
+    fi && \
     ifort --version && \
     make clean && \
-    make && \
+    make DEBUG=${DEBUG:-0} && \
     echo "Main Fortran executables compiled successfully" && \
     echo "Verifying main executables:" && \
     ls -lh /app/fortran/mrva \
@@ -73,7 +95,7 @@ RUN cd /app/fortran && \
     echo "Building cubic B-spline utilities..." && \
     cd /app/fortran/cx && \
     make clean && \
-    make && \
+    make DEBUG=${DEBUG:-0} && \
     echo "Spline utilities compiled successfully" && \
     echo "Verifying spline executables:" && \
     ls -lh /app/fortran/cx/cbscxdata \
@@ -190,6 +212,13 @@ ENV MATLAB_PREFDIR=/tmp/.matlab
 ENV TMP_DIR=/tmp/mrva_tmp
 ENV PATH="/opt/mrva/bin:${PATH}"
 
+# Stack size configuration for Fortran executables
+# The PCG solver uses large local arrays that can overflow the default stack
+# Setting unlimited stack and large OpenMP stack prevents segfaults
+# These can be overridden at runtime with -e flags
+ENV OMP_STACKSIZE=128M
+ENV KMP_STACKSIZE=128M
+
 # Create data directories with proper structure
 RUN mkdir -p /data/input/bic \
              /data/input/iquam \
@@ -210,6 +239,18 @@ RUN cat > /opt/mrva/bin/entrypoint.sh <<'EOF' && chmod +x /opt/mrva/bin/entrypoi
 #!/bin/bash
 # MRVA Container Entrypoint Wrapper
 set -e
+
+# ========================================================================
+# Stack Size Configuration
+# ========================================================================
+# The Fortran PCG solver uses large local arrays that can exceed default stack
+# Setting unlimited stack prevents segmentation faults during solver iterations
+# OMP_STACKSIZE/KMP_STACKSIZE set thread stack for OpenMP parallel regions
+ulimit -s unlimited 2>/dev/null || echo "Warning: Could not set unlimited stack size"
+
+# Ensure OpenMP stack is set (may have been set in Dockerfile ENV but ensure here)
+export OMP_STACKSIZE=${OMP_STACKSIZE:-128M}
+export KMP_STACKSIZE=${KMP_STACKSIZE:-128M}
 
 # Argument validation
 if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
@@ -261,6 +302,10 @@ echo "Year:     $YEAR"
 echo "DOY:      $DOY"
 echo "Mode:     $MODE"
 echo "Sensors:  ${SENSORS:-all (default)}"
+echo "-----------------------------------------"
+echo "Stack:    $(ulimit -s) (soft limit)"
+echo "OMP_STACKSIZE: $OMP_STACKSIZE"
+echo "KMP_STACKSIZE: $KMP_STACKSIZE"
 echo "========================================="
 echo ""
 
@@ -295,12 +340,14 @@ CMD []
 
 # Labels for metadata
 LABEL description="MUR MRVA (Multi-Resolution Variational Analysis) Module - Container Wrapper"
-LABEL version="1.3"
+LABEL version="1.4"
 LABEL maintainer="MUR Team"
 LABEL build-pattern="3-stage: (1) Intel ifort Fortran build, (2) MATLAB compilation, (3) Base runtime image"
 LABEL base-image="mur-matlab-base:r2024b"
 LABEL compiler="Intel Fortran Compiler (ifort) from oneAPI HPC Toolkit 2024.0.1"
-LABEL compiler-flags="-80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost"
+LABEL compiler-flags-production="-80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost"
+LABEL compiler-flags-debug="-80 -qopenmp -g -traceback -check bounds -check uninit -fpe0 -warn all -O0"
+LABEL build-arg-debug="Set DEBUG=1 for debug build with symbols and bounds checking"
 LABEL interface="4-arg interface: year doy mode [sensors]"
 LABEL fortran-executables="mrva, samplegdscsp, spgrid, trimbip3, makehiresgrid, cbscxdata, cbscxcoeff, cbscxcoeffvector"
 

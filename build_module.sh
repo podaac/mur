@@ -2,8 +2,18 @@
 # Build MUR processing modules with automatic base image check
 #
 # Usage:
-#   ./build_module.sh <module_name>  - Build a specific module
-#   ./build_module.sh all            - Build all modules
+#   ./build_module.sh <module_name>           - Build a specific module (production)
+#   ./build_module.sh <module_name> --debug   - Build with debug symbols and bounds checking
+#   ./build_module.sh all                     - Build all modules (production)
+#   ./build_module.sh all --debug             - Build all modules with debug enabled
+#
+# Debug builds enable:
+#   - Debug symbols (-g) for meaningful stack traces
+#   - Runtime bounds checking (-check bounds) to catch array overflows
+#   - Uninitialized variable detection (-check uninit)
+#   - Floating-point exception trapping (-fpe0)
+#   - Full compiler warnings (-warn all)
+#   - No optimization (-O0) for easier debugging
 
 set -e
 
@@ -15,6 +25,9 @@ BUILD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Available modules
 MODULES=("iquam" "l2p" "landice" "mrva")
+
+# Debug mode flag
+DEBUG_MODE=0
 
 # Colors for output
 RED='\033[0;31m'
@@ -36,12 +49,16 @@ build_module() {
     echo ""
     echo "========================================"
     echo "Building Module: ${MODULE}"
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+        echo -e "${YELLOW}*** DEBUG BUILD ***${NC}"
+    fi
     echo "========================================"
     echo ""
 
     cd "$MODULE_DIR"
 
-    # Determine image name (all use mur- prefix)
+    # Determine image name and tag (all use mur- prefix)
+    local IMAGE_TAG="latest"
     case "$MODULE" in
         iquam)
             IMAGE_NAME="mur-iquam"
@@ -57,30 +74,45 @@ build_module() {
             ;;
     esac
 
-    echo "Building: ${IMAGE_NAME}:latest"
+    # Use :debug tag for debug builds
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+        IMAGE_TAG="debug"
+    fi
+
+    echo "Building: ${IMAGE_NAME}:${IMAGE_TAG}"
     echo "Context:  ${BUILD_DIR}"
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+        echo -e "${YELLOW}Debug:    Enabled (symbols, bounds checking, tracebacks)${NC}"
+    fi
     echo ""
+
+    # Build with optional DEBUG arg
+    local BUILD_ARGS=""
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+        BUILD_ARGS="--build-arg DEBUG=1"
+    fi
 
     docker build \
         --platform linux/amd64 \
-        -t "${IMAGE_NAME}:latest" \
+        ${BUILD_ARGS} \
+        -t "${IMAGE_NAME}:${IMAGE_TAG}" \
         -f Dockerfile \
         ..
 
     if [ $? -eq 0 ]; then
         echo ""
-        echo -e "${GREEN}✓${NC} Successfully built ${IMAGE_NAME}:latest"
+        echo -e "${GREEN}✓${NC} Successfully built ${IMAGE_NAME}:${IMAGE_TAG}"
         return 0
     else
         echo ""
-        echo -e "${RED}✗${NC} Failed to build ${IMAGE_NAME}"
+        echo -e "${RED}✗${NC} Failed to build ${IMAGE_NAME}:${IMAGE_TAG}"
         return 1
     fi
 }
 
-# Check arguments
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <module|all>"
+# Parse arguments
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+    echo "Usage: $0 <module|all> [--debug]"
     echo ""
     echo "Available modules:"
     echo "  iquam   - In-situ SST processing (IQUAM buoy data)"
@@ -89,17 +121,31 @@ if [ $# -ne 1 ]; then
     echo "  mrva    - Multi-Resolution Variational Analysis"
     echo "  all     - Build all modules"
     echo ""
+    echo "Options:"
+    echo "  --debug - Enable debug build with symbols and bounds checking"
+    echo "            (tags image as :debug instead of :latest)"
+    echo ""
     echo "Examples:"
-    echo "  $0 mrva       # Build just MRVA"
-    echo "  $0 all        # Build all modules"
+    echo "  $0 mrva             # Build MRVA (production)"
+    echo "  $0 mrva --debug     # Build MRVA with debug symbols"
+    echo "  $0 all              # Build all modules (production)"
+    echo "  $0 all --debug      # Build all modules with debug"
     exit 1
 fi
 
 MODULE=$1
 
+# Check for --debug flag
+if [ "$2" == "--debug" ]; then
+    DEBUG_MODE=1
+fi
+
 # Step 1: Check if base image exists (only once)
 echo "========================================"
 echo "MUR Module Builder"
+if [ "$DEBUG_MODE" -eq 1 ]; then
+    echo -e "${YELLOW}*** DEBUG MODE ENABLED ***${NC}"
+fi
 echo "========================================"
 echo ""
 echo -e "${BLUE}[1/3]${NC} Checking MATLAB base image..."
@@ -183,19 +229,32 @@ else
 
     # Show usage hint
     echo ""
+    # Determine tag for usage hint
+    local HINT_TAG="latest"
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+        HINT_TAG="debug"
+    fi
     echo "Run with:"
     case "$MODULE" in
         iquam)
-            echo "  docker run --rm mur-iquam:latest <year> <doy>"
+            echo "  docker run --rm mur-iquam:${HINT_TAG} <year> <doy>"
             ;;
         l2p)
-            echo "  docker run --rm mur-l2p:latest <sensor> <region> <year> <day> <rewrite>"
+            echo "  docker run --rm mur-l2p:${HINT_TAG} <sensor> <region> <year> <day> <rewrite>"
             ;;
         landice)
-            echo "  docker run --rm mur-landice:latest <yyyy-mm-dd>"
+            echo "  docker run --rm mur-landice:${HINT_TAG} <yyyy-mm-dd>"
             ;;
         mrva)
-            echo "  docker run --rm mur-mrva:latest <year> <doy> <mode> [sensors]"
+            echo "  docker run --rm mur-mrva:${HINT_TAG} <year> <doy> <mode> [sensors]"
+            if [ "$DEBUG_MODE" -eq 1 ]; then
+                echo ""
+                echo -e "${YELLOW}Debug build notes:${NC}"
+                echo "  - Stack traces will show source file and line numbers on crash"
+                echo "  - Array bounds violations will be caught at runtime"
+                echo "  - Uninitialized variable access will be detected"
+                echo "  - Floating-point exceptions (NaN, Inf, div-by-zero) will trap"
+            fi
             ;;
     esac
 fi

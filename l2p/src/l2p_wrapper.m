@@ -123,10 +123,6 @@ end
 % ========================================================================
 
 fprintf('\n=== CALLING L2P2BIC ===\n');
-fprintf('This matches production nrtMRVA.py calling pattern:\n');
-fprintf('  l2p2bic(''%s'', ''%s'', ''%s'', ''%s'', ''%s'', ''%s'', %d)\n', ...
-        sensor_upper, region, indir, bicdir, year_str, day_str, rewrite);
-
 try
     % Call the core L2P to BIC conversion function
     % This is the same function called by production nrtMRVA.py
