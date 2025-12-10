@@ -131,7 +131,8 @@ class MUROrchestrator:
         self,
         config_path: pathlib.Path,
         netrc_path: Optional[pathlib.Path] = None,
-        use_rea: bool = False
+        use_rea: bool = False,
+        keep_containers: bool = False
     ):
         """Initialize orchestrator with configuration.
 
@@ -139,6 +140,7 @@ class MUROrchestrator:
             config_path: Path to configuration JSON file
             netrc_path: Optional path to .netrc file for NASA Earthdata auth
             use_rea: Enable REA mode based on date boundaries (default: NRT only)
+            keep_containers: If True, don't auto-remove containers (for debugging)
 
         Note:
             Historical reprocessing is controlled via MUR_SIMULATED_DATE env var.
@@ -150,6 +152,7 @@ class MUROrchestrator:
         self.base_dir = pathlib.Path(__file__).parent
         self.netrc_path = netrc_path
         self.use_rea = use_rea
+        self.keep_containers = keep_containers
 
         # Track processing stats
         self.stats = {
@@ -259,8 +262,10 @@ class MUROrchestrator:
         # Docker command with required environment variables
         # Note: Container expects positional args (year, doy) and uses
         # hardcoded /input and /output paths inside the container
-        cmd = [
-            "docker", "run", "--rm",
+        cmd = ["docker", "run"]
+        if not self.keep_containers:
+            cmd.append("--rm")
+        cmd.extend([
             "--platform", "linux/amd64",  # Required for Apple Silicon
             "--memory=6g",
             "--memory-reservation=2g",
@@ -280,7 +285,7 @@ class MUROrchestrator:
             # Positional arguments: year doy
             str(year),
             str(doy)
-        ]
+        ])
 
         try:
             subprocess.run(cmd, check=True)
@@ -482,8 +487,10 @@ class MUROrchestrator:
         logger.info(f"    → Processing {sensor} {data_day} → BIC")
 
         # Call container directly (5-arg simplified interface)
-        cmd = [
-            "docker", "run", "--rm",
+        cmd = ["docker", "run"]
+        if not self.keep_containers:
+            cmd.append("--rm")
+        cmd.extend([
             "--memory=8g",
             "--shm-size=2g",
             "-v", f"{input_dir.resolve()}:/data/input",
@@ -494,7 +501,7 @@ class MUROrchestrator:
             str(year),
             str(doy),
             str(1 if rewrite else 0)
-        ]
+        ])
 
         try:
             subprocess.run(cmd, check=True)
@@ -621,15 +628,17 @@ class MUROrchestrator:
         # Note: The iQUAM container determines what to process based on today's date
         # internally via buoyDataProcessing.m. Pass MUR_SIMULATED_DATE env var so
         # the container uses simulated "today" for historical reprocessing.
-        cmd = [
-            "docker", "run", "--rm",
+        cmd = ["docker", "run"]
+        if not self.keep_containers:
+            cmd.append("--rm")
+        cmd.extend([
             "--memory=8g",
             "--memory-swap=8g",
             "--shm-size=2g",
             "-v", f"{output_dir.resolve()}:/data/output/iquam",
             "-v", f"{cache_dir.resolve()}:/data/cache/iquam",
             "-v", f"{logs_dir.resolve()}:/data/logs",
-        ]
+        ])
 
         # Pass simulated date to container if set (for historical reprocessing)
         if mur_date.is_simulated():
@@ -752,8 +761,10 @@ class MUROrchestrator:
         container_name = f"mrva_{year}_{doy:03d}_{int(time.time())}"
 
         # Docker command with volume mounts for all input/output paths
-        cmd = [
-            "docker", "run", "--rm",
+        cmd = ["docker", "run"]
+        if not self.keep_containers:
+            cmd.append("--rm")
+        cmd.extend([
             "--name", container_name,       # Named for explicit cleanup
             "--platform", "linux/amd64",  # Ensure compatibility
             "--memory=10g",
@@ -775,7 +786,7 @@ class MUROrchestrator:
             str(year),
             str(doy),
             mode
-        ]
+        ])
 
         # Add sensor list if specified
         if sensor_arg:
@@ -1043,6 +1054,13 @@ Examples:
              "REA/NRT boundary logic (not fully implemented yet)."
     )
 
+    parser.add_argument(
+        "--keep-containers",
+        action="store_true",
+        help="Keep containers after execution (don't auto-remove). Useful for "
+             "debugging crashes - use 'docker logs <container_id>' to inspect output."
+    )
+
     return parser.parse_args()
 
 
@@ -1145,7 +1163,8 @@ def main():
         orchestrator = MUROrchestrator(
             args.config,
             netrc_path=args.netrc_path,
-            use_rea=args.use_rea
+            use_rea=args.use_rea,
+            keep_containers=args.keep_containers
         )
     except Exception as e:
         logger.error(f"Failed to initialize: {e}")
