@@ -28,6 +28,7 @@ MODULES=("iquam" "l2p" "landice" "mrva")
 
 # Debug mode flag
 DEBUG_MODE=0
+NO_CACHE=0
 
 # Colors for output
 RED='\033[0;31m'
@@ -74,10 +75,8 @@ build_module() {
             ;;
     esac
 
-    # Use :debug tag for debug builds
-    if [ "$DEBUG_MODE" -eq 1 ]; then
-        IMAGE_TAG="debug"
-    fi
+    # Note: Always use :latest tag so pipeline doesn't need to know about debug mode
+    # The debug/production distinction is in the compiled binaries, not the tag
 
     echo "Building: ${IMAGE_NAME}:${IMAGE_TAG}"
     echo "Context:  ${BUILD_DIR}"
@@ -86,10 +85,13 @@ build_module() {
     fi
     echo ""
 
-    # Build with optional DEBUG arg
+    # Build with optional DEBUG arg and no-cache
     local BUILD_ARGS=""
     if [ "$DEBUG_MODE" -eq 1 ]; then
         BUILD_ARGS="--build-arg DEBUG=1"
+    fi
+    if [ "$NO_CACHE" -eq 1 ]; then
+        BUILD_ARGS="$BUILD_ARGS --no-cache"
     fi
 
     docker build \
@@ -111,8 +113,8 @@ build_module() {
 }
 
 # Parse arguments
-if [ $# -lt 1 ] || [ $# -gt 2 ]; then
-    echo "Usage: $0 <module|all> [--debug]"
+if [ $# -lt 1 ]; then
+    echo "Usage: $0 <module|all> [--debug] [--no-cache]"
     echo ""
     echo "Available modules:"
     echo "  iquam   - In-situ SST processing (IQUAM buoy data)"
@@ -122,23 +124,38 @@ if [ $# -lt 1 ] || [ $# -gt 2 ]; then
     echo "  all     - Build all modules"
     echo ""
     echo "Options:"
-    echo "  --debug - Enable debug build with symbols and bounds checking"
-    echo "            (tags image as :debug instead of :latest)"
+    echo "  --debug    - Enable debug build with symbols and bounds checking"
+    echo "               (still tags as :latest for seamless pipeline use)"
+    echo "  --no-cache - Force rebuild without using Docker cache"
     echo ""
     echo "Examples:"
-    echo "  $0 mrva             # Build MRVA (production)"
-    echo "  $0 mrva --debug     # Build MRVA with debug symbols"
-    echo "  $0 all              # Build all modules (production)"
-    echo "  $0 all --debug      # Build all modules with debug"
+    echo "  $0 mrva                      # Build MRVA (production)"
+    echo "  $0 mrva --debug              # Build MRVA with debug symbols"
+    echo "  $0 mrva --debug --no-cache   # Force full debug rebuild"
+    echo "  $0 all                       # Build all modules (production)"
+    echo "  $0 all --debug               # Build all modules with debug"
     exit 1
 fi
 
 MODULE=$1
+shift
 
-# Check for --debug flag
-if [ "$2" == "--debug" ]; then
-    DEBUG_MODE=1
-fi
+# Parse optional flags
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --debug)
+            DEBUG_MODE=1
+            ;;
+        --no-cache)
+            NO_CACHE=1
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+    shift
+done
 
 # Step 1: Check if base image exists (only once)
 echo "========================================"
@@ -229,34 +246,30 @@ else
 
     # Show usage hint
     echo ""
-    # Determine tag for usage hint
-    HINT_TAG="latest"
-    if [ "$DEBUG_MODE" -eq 1 ]; then
-        HINT_TAG="debug"
-    fi
     echo "Run with:"
     case "$MODULE" in
         iquam)
-            echo "  docker run --rm mur-iquam:${HINT_TAG} <year> <doy>"
+            echo "  docker run --rm mur-iquam:latest <year> <doy>"
             ;;
         l2p)
-            echo "  docker run --rm mur-l2p:${HINT_TAG} <sensor> <region> <year> <day> <rewrite>"
+            echo "  docker run --rm mur-l2p:latest <sensor> <region> <year> <day> <rewrite>"
             ;;
         landice)
-            echo "  docker run --rm mur-landice:${HINT_TAG} <yyyy-mm-dd>"
+            echo "  docker run --rm mur-landice:latest <yyyy-mm-dd>"
             ;;
         mrva)
-            echo "  docker run --rm mur-mrva:${HINT_TAG} <year> <doy> <mode> [sensors]"
-            if [ "$DEBUG_MODE" -eq 1 ]; then
-                echo ""
-                echo -e "${YELLOW}Debug build notes:${NC}"
-                echo "  - Stack traces will show source file and line numbers on crash"
-                echo "  - Array bounds violations will be caught at runtime"
-                echo "  - Uninitialized variable access will be detected"
-                echo "  - Floating-point exceptions (NaN, Inf, div-by-zero) will trap"
-            fi
+            echo "  docker run --rm mur-mrva:latest <year> <doy> <mode> [sensors]"
             ;;
     esac
+
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+        echo ""
+        echo -e "${YELLOW}Debug build notes:${NC}"
+        echo "  - Stack traces will show source file and line numbers on crash"
+        echo "  - Array bounds violations will be caught at runtime"
+        echo "  - Uninitialized variable access will be detected"
+        echo "  - Floating-point exceptions (NaN, Inf, div-by-zero) will trap"
+    fi
 fi
 
 echo ""
