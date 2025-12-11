@@ -22,6 +22,12 @@ def main():
         print(f"Error: Could not find web_viewer.py at {web_viewer_path}")
         sys.exit(1)
 
+    # Set default base directory to ./testing if not already set
+    if 'MUR_BASE_DIR' not in os.environ:
+        default_base = mur_dir / 'testing'
+        os.environ['MUR_BASE_DIR'] = str(default_base)
+        print(f"Using default base directory: {default_base}")
+
     # Build the streamlit command
     cmd = ['streamlit', 'run', str(web_viewer_path)]
 
