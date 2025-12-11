@@ -1,0 +1,13 @@
+[server]
+# Bind only to localhost - requires SSH tunnel for remote access
+address = "127.0.0.1"
+port = 8501
+
+# Disable CORS and XSRF protection not needed for localhost-only
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+# Don't automatically open browser on startup
+serverAddress = "localhost"
+gatherUsageStats = false
