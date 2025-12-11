@@ -40,7 +40,7 @@ Set permissions: `chmod 600 ~/.netrc`
 **Purpose:** Prepares landmask and sea ice boundary data
 **Key Features:**
 - Processes OSI SAF sea ice datasets
-- Supports p01 and p11 grid resolutions
+- Supports p01 (0.01°) and p011 (0.011°) grid resolutions
 - Generates MATLAB processing scripts
 - Parallelizable by day
 
@@ -129,8 +129,8 @@ mur/
 │   │   ├── landice_template.m   # MATLAB template
 │   │   └── *.m                  # MATLAB utilities
 │   ├── data_creation/           # Grid-specific MATLAB scripts
-│   │   ├── p01/
-│   │   └── p11/
+│   │   ├── p01/                 # 0.01° grid
+│   │   └── p011/                # 0.011° grid
 │   ├── tests/
 │   └── README.md
 └── l2p/

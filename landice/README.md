@@ -1,6 +1,6 @@
 # Land Ice Operations - MATLAB Application
 
-This MATLAB application automates landmask and ice operations for MUR SST input data. It processes data for two grid resolutions (`p01` and `p11`) using OSI SAF sea ice datasets and has been containerized for easy deployment.
+This MATLAB application automates landmask and ice operations for MUR SST input data. It processes data for two grid resolutions (`p01` at 0.01° and `p011` at 0.011°) using OSI SAF sea ice datasets and has been containerized for easy deployment.
 
 ---
 
@@ -8,7 +8,7 @@ This MATLAB application automates landmask and ice operations for MUR SST input 
 
 The application:
 - Processes land ice operations for a specified year and day-of-year
-- Handles both P01 and P11 grid resolutions automatically in each run
+- Handles both P01 and P011 grid resolutions automatically in each run
 - Uses OSI SAF FTP endpoints for sea ice data access
 - Compiled as a standalone MATLAB executable for containerized deployment
 - No MATLAB license required to run the compiled version
@@ -50,7 +50,7 @@ docker run --rm --shm-size=512M \
 
 - **Fixed paths**: Input data at `/input`, output at `/output` - just bind mount your directories
 - **Simplified arguments**: Only `year` and `doy` required as positional parameters
-- **Automatic processing**: Processes both P01 and P11 grids in a single run
+- **Automatic processing**: Processes both P01 and P011 grids in a single run
 - **Flexible MATLAB code**: The underlying MATLAB script can still accept any input/output paths for development
 - **Optimized performance**: Requires `--shm-size=512M` for MATLAB Runtime (mandatory)
 - **No license required**: Self-contained with MATLAB Runtime R2024b
@@ -169,10 +169,10 @@ landice/
 │   ├── julian.m               # Date conversion utilities
 │   └── ...                    # Other utility MATLAB files
 ├── data_creation/
-│   ├── p01/                   # P01 grid resolution files
+│   ├── p01/                   # P01 grid resolution files (0.01°)
 │   │   ├── saf2north.m        # North region mapping
 │   │   └── saf2south.m        # South region mapping
-│   └── p11/                   # P11 grid resolution files
+│   └── p011/                  # P011 grid resolution files (0.011°)
 │       ├── saf2north.m        # North region mapping
 │       └── saf2south.m        # South region mapping
 ├── tests/

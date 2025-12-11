@@ -70,7 +70,7 @@ flowchart TD
 
 **Technology:** Containerized MATLAB (R2024b Runtime)
 
-**Processing:** Generates masks for both p01 (1km) and p11 (10km) resolutions
+**Processing:** Generates masks for both p01 (0.01°) and p011 (0.011°) resolutions
 
 See [LANDICE_ENCODING.md](LANDICE_ENCODING.md) for detailed mask encoding information.
 

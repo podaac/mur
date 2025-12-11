@@ -1,7 +1,7 @@
 function landice_wrapper(input_dir, output_dir, year_str, doy_str)
 %LANDICE_WRAPPER Wrapper function for compiled MATLAB executable
 %   This wrapper accepts all string inputs from command line and calls
-%   makeicefiles for both p01 and p11 resolutions
+%   makeicefiles for both p01 and p011 resolutions
 %
 %   Usage:
 %   landice_wrapper('/path/to/input', '/path/to/output', '2024', '100')
@@ -23,7 +23,7 @@ setup_environment();
 fprintf('landice_wrapper: Running land ice operations for %s/%s\n', year_str, doy_str);
 
 % Process both resolutions
-resolutions = {'p01', 'p11'};
+resolutions = {'p01', 'p011'};
 for i = 1:length(resolutions)
     res = resolutions{i};
     fprintf('\nlandice_wrapper: ===== Processing %s resolution =====\n', res);

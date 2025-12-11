@@ -792,21 +792,115 @@ class MUROrchestrator:
         if sensor_arg:
             cmd.append(sensor_arg)
 
+        # MRVA timeout: 8 hours (28800 seconds)
+        MRVA_TIMEOUT = 28800
+        MEMORY_CHECK_INTERVAL = 30  # seconds
+
         try:
             logger.info("    → Executing MRVA container...")
             logger.info("    → This may take 30-90 minutes for full processing...")
-            subprocess.run(cmd, check=True, timeout=7200)  # 2-hour timeout
-            logger.info("    ✓ MRVA completed successfully")
-            logger.info(f"      Coefficient files: {csp_dir}")
-            logger.info(f"      NetCDF output: {netcdf_dir}")
-            self.stats["mrva"]["success"] += 1
-            return True
+            logger.info(f"    → Timeout set to {MRVA_TIMEOUT // 3600} hours")
+
+            # Use Popen so we can monitor memory while container runs
+            process = subprocess.Popen(cmd)
+
+            # Track memory usage
+            max_memory_mb = 0.0
+            memory_samples = []
+            start_time = time.time()
+
+            while True:
+                # Check if process has completed
+                return_code = process.poll()
+                if return_code is not None:
+                    break
+
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed > MRVA_TIMEOUT:
+                    timeout_hrs = MRVA_TIMEOUT // 3600
+                    logger.error(f"    ✗ MRVA exceeded {timeout_hrs}-hour timeout")
+                    logger.warning(f"    → Killing container: {container_name}")
+                    subprocess.run(
+                        ["docker", "kill", container_name], capture_output=True
+                    )
+                    process.wait()
+                    subprocess.run(
+                        ["docker", "rm", "-f", container_name], capture_output=True
+                    )
+                    logger.info(f"    → Max memory: {max_memory_mb:.1f} MB")
+                    self.stats["mrva"]["failed"] += 1
+                    return False
+
+                # Get memory usage from docker stats
+                try:
+                    stats_cmd = [
+                        "docker", "stats", container_name,
+                        "--no-stream", "--format", "{{.MemUsage}}"
+                    ]
+                    stats_result = subprocess.run(
+                        stats_cmd, capture_output=True, text=True, timeout=10
+                    )
+                    if stats_result.returncode == 0 and stats_result.stdout.strip():
+                        # Output format: "1.234GiB / 10GiB" or "500MiB / 10GiB"
+                        mem_str = stats_result.stdout.strip().split('/')[0].strip()
+                        # Parse the memory value
+                        if 'GiB' in mem_str:
+                            mem_mb = float(mem_str.replace('GiB', '').strip()) * 1024
+                        elif 'MiB' in mem_str:
+                            mem_mb = float(mem_str.replace('MiB', '').strip())
+                        elif 'KiB' in mem_str:
+                            mem_mb = float(mem_str.replace('KiB', '').strip()) / 1024
+                        else:
+                            mem_mb = 0.0
+
+                        memory_samples.append(mem_mb)
+                        if mem_mb > max_memory_mb:
+                            max_memory_mb = mem_mb
+                            logger.debug(f"    → New max: {max_memory_mb:.1f} MB")
+                except Exception as e:
+                    logger.debug(f"    → Memory stats error: {e}")
+
+                # Wait before next check
+                time.sleep(MEMORY_CHECK_INTERVAL)
+
+            # Process completed - check return code
+            if return_code == 0:
+                logger.info("    ✓ MRVA completed successfully")
+                logger.info(f"      Coefficient files: {csp_dir}")
+                logger.info(f"      NetCDF output: {netcdf_dir}")
+                if max_memory_mb > 0:
+                    avg_mem = sum(memory_samples) / len(memory_samples) if memory_samples else 0  # noqa: E501
+                    n_samples = len(memory_samples)
+                    logger.info(
+                        f"      Memory - Max: {max_memory_mb:.1f} MB, "
+                        f"Avg: {avg_mem:.1f} MB ({n_samples} samples)"
+                    )
+                self.stats["mrva"]["success"] += 1
+                return True
+            else:
+                logger.error(f"    ✗ MRVA failed with exit code {return_code}")
+                if max_memory_mb > 0:
+                    logger.info(f"    → Max memory: {max_memory_mb:.1f} MB")
+                subprocess.run(
+                    ["docker", "rm", "-f", container_name], capture_output=True
+                )
+                self.stats["mrva"]["failed"] += 1
+                return False
 
         except subprocess.TimeoutExpired:
-            logger.error("    ✗ MRVA container exceeded 2-hour timeout")
+            # Safety fallback (shouldn't happen with manual timeout handling)
+            timeout_hrs = MRVA_TIMEOUT // 3600
+            logger.error(f"    ✗ MRVA exceeded {timeout_hrs}-hour timeout")
             logger.warning(f"    → Killing container: {container_name}")
-            subprocess.run(["docker", "kill", container_name], capture_output=True)
-            subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
+            subprocess.run(
+                ["docker", "kill", container_name], capture_output=True
+            )
+            subprocess.run(
+                ["docker", "rm", "-f", container_name], capture_output=True
+            )
+            if max_memory_mb > 0:
+                logger.info(f"    → Max memory: {max_memory_mb:.1f} MB")
             self.stats["mrva"]["failed"] += 1
             return False
         except subprocess.CalledProcessError as e:

@@ -63,15 +63,15 @@ wgtmax = 5.0;   % max weight (given for 100% ice concentration).
 
 switch resolution,
 
-  case 'p11',
+  case 'p011',
     landmaskfile = append(input_dir, '/grids/maskGlob1km.gds');
-    gridinxnorth = append(input_dir, '/mat/p11/saf2north');
-    gridinxsouth = append(input_dir, '/mat/p11/saf2south');
-    odir = append(output_dir, '/land/p11/', year);  % output dir.
+    gridinxnorth = append(input_dir, '/mat/p011/saf2north');
+    gridinxsouth = append(input_dir, '/mat/p011/saf2south');
+    odir = append(output_dir, '/land/p011/', year);  % output dir.
     landicefile = append(odir, '/landice_', year, '_', day, '.gds')
     icesstfile = append(odir, '/Global_ice_', year, '_', day, '.bip')
 
-    % OSI-SAF reprocessing cutoff date for p11 grid
+    % OSI-SAF reprocessing cutoff date for p011 grid (0.011 degrees)
     % Dates <= 2006-12-31 use reprocessed data (reproc files)
     % Dates >  2006-12-31 use archive/production data (multi files)
     lastMJD_reprocessed=julian(31,12,2006,3);  % for OSI-SAF data.

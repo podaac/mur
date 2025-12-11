@@ -1,16 +1,16 @@
 # OSI-SAF Reprocessing Date Configuration
 
 ## Summary
-Different grid resolutions (p01 and p11) have **different reprocessing cutoff dates**, which means they may pull ice concentration data from different FTP sources for the same calendar date.
+Different grid resolutions (p01 at 0.01° and p011 at 0.011°) have **different reprocessing cutoff dates**, which means they may pull ice concentration data from different FTP sources for the same calendar date.
 
 ## Critical Dates
 
-### p11 Grid (1km resolution)
+### p011 Grid (0.011° / ~1km resolution)
 - **Cutoff Date**: 2006-12-31 (MJD = 54100)
 - Dates ≤ 2006-12-31: Use **REPROCESSED** FTP source (`*_reproc_*.nc` files)
 - Dates > 2006-12-31: Use **ARCHIVE/PROD** FTP source (`*_multi_*.nc` files)
 
-### p01 Grid (0.1° resolution)
+### p01 Grid (0.01° resolution)
 - **Cutoff Date**: 2008-12-31 (MJD = 54831)
 - Dates ≤ 2008-12-31: Use **REPROCESSED** FTP source (`*_reproc_*.nc` files)
 - Dates > 2008-12-31: Use **ARCHIVE/PROD** FTP source (`*_multi_*.nc` files)
@@ -18,17 +18,17 @@ Different grid resolutions (p01 and p11) have **different reprocessing cutoff da
 ## Date Range Analysis
 
 ### Range 1: Before 2006-12-31
-- **p11**: REPROCESSED source
+- **p011**: REPROCESSED source
 - **p01**: REPROCESSED source
 - **Result**: ✅ **SAME files** - optimization possible
 
 ### Range 2: 2007-01-01 to 2008-12-31 ⚠️
-- **p11**: ARCHIVE/PROD source
+- **p011**: ARCHIVE/PROD source
 - **p01**: REPROCESSED source
 - **Result**: ❌ **DIFFERENT files** - must download separately!
 
 ### Range 3: After 2008-12-31
-- **p11**: ARCHIVE/PROD source
+- **p011**: ARCHIVE/PROD source
 - **p01**: ARCHIVE/PROD source
 - **Result**: ✅ **SAME files** - optimization possible
 
@@ -36,7 +36,7 @@ Different grid resolutions (p01 and p11) have **different reprocessing cutoff da
 
 The attempted optimization in `landice.m` (downloading ice files once and reusing for both grids) **fails for dates in 2007-2008** because:
 
-1. p11 needs `ice_conc_*_polstere-100_multi_YYYYMMDD1200.nc` (archive)
+1. p011 needs `ice_conc_*_polstere-100_multi_YYYYMMDD1200.nc` (archive)
 2. p01 needs `ice_conc_*_polstere-100_reproc_YYYYMMDD1200.nc` (reprocessed)
 3. These are **different files** with potentially different data
 
@@ -72,14 +72,14 @@ readOSISAF: Using REPROCESSED FTP source: https://thredds.met.no/thredds/fileSer
 vs
 
 ```
-makeicefiles: resolution - p11
-makeicefiles: OSI-SAF reprocessing cutoff for p11 grid: 2006-12-31 (MJD=54100)
+makeicefiles: resolution - p011
+makeicefiles: OSI-SAF reprocessing cutoff for p011 grid: 2006-12-31 (MJD=54100)
 
 readOSISAF: Date 20070701 (nh, MJD=54282) > reprocessing cutoff (MJD=54100), <= archive cutoff (MJD=Inf)
 readOSISAF: Using ARCHIVE FTP source: https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/conc
 ```
 
-Notice how **the same date (2007-07-01) triggers different FTP sources** for p01 vs p11!
+Notice how **the same date (2007-07-01) triggers different FTP sources** for p01 vs p011!
 
 ## Files Modified
 

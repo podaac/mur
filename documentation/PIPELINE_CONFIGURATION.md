@@ -310,7 +310,7 @@ docker pull ghcr.io/nasa-jpl/mur-l2p:latest
 | Parameter | Type | Description | Default |
 |-----------|------|-------------|---------|
 | `region` | string | Processing region code | "G10" (Global 1km) |
-| `resolution` | string | Grid resolution | "p01" (1km) or "p11" (10km) |
+| `resolution` | string | Grid resolution | "p01" (0.01°) or "p011" (0.011°) |
 | `base_dir` | string | Base directory for all data | "/nas2" |
 | `work_dir` | string | Temporary working directory | "/tmp/mur_work" |
 
@@ -525,7 +525,7 @@ docker run --rm \
 #   2025  - Year
 #   042   - Day of year
 #   G10   - Region
-#   p01   - Resolution (p01=1km, p11=10km)
+#   p01   - Resolution (p01=0.01°, p011=0.011°)
 ```
 
 **Output:**

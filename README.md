@@ -95,7 +95,7 @@ See this README for details: [InputGen README](inputgen/README.md)
 
 ## Land Ice Operations
 
-This component prepares landmask and sea ice boundary data used in downstream MUR processing. It generates and runs MATLAB scripts that apply land and ice masking operations to MUR SST inputs for the previous 9 days. Two grid resolutions (`p01`, `p11`) are supported. It is parallelized on the day which are arguments to the script. The InputGen operations produce the required date ranges to execute on.
+This component prepares landmask and sea ice boundary data used in downstream MUR processing. It generates and runs MATLAB scripts that apply land and ice masking operations to MUR SST inputs for the previous 9 days. Two grid resolutions (`p01` at 0.01° and `p011` at 0.011°) are supported. It is parallelized on the day which are arguments to the script. The InputGen operations produce the required date ranges to execute on.
 
 See this README for details: [Land Ice README](landice/README.md)
 
