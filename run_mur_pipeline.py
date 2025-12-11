@@ -771,6 +771,16 @@ class MUROrchestrator:
             "--memory-swap=12g",
             "--shm-size=2g",                # MATLAB Runtime cache
             "--cpus=4.0",                   # OpenMP parallelization
+        ])
+
+        # Pass simulated date to container if set (for historical reprocessing)
+        # This allows the MRVA container to use the correct "today" for
+        # calculating relative dates and stability checks
+        if mur_date.is_simulated():
+            simulated = mur_date.get_simulated_date()
+            cmd.extend(["-e", f"MUR_SIMULATED_DATE={simulated.strftime('%Y-%m-%d')}"])
+
+        cmd.extend([
             # Volume mounts for inputs
             "-v", f"{bic_dir.resolve()}:/data/input/bic",
             "-v", f"{iquam_dir.resolve()}:/data/input/iquam",
@@ -1100,9 +1110,9 @@ Examples:
     parser.add_argument(
         "--date",
         type=str,
-        help="Date to process (YYYY-MM-DD). The script will act as if running on "
-             "this date, affecting NRT/REA boundary calculations, data stability "
-             "checks, and future date filtering. Default: yesterday (actual today)"
+        help="Simulate running on this date (YYYY-MM-DD). Following production "
+             "behavior, MRVA will process YESTERDAY relative to this date. "
+             "E.g., --date 2025-11-13 processes Nov 12. Default: process yesterday"
     )
 
     parser.add_argument(
@@ -1270,11 +1280,15 @@ def main():
     # Determine processing mode
     try:
         if args.date:
-            # Single date specified - process that date
+            # Single date specified - run as if "today" is that date
+            # Following original nrtMRVA.py: process yesterday relative to simulated today
             # The env var is already set, so calculate_processing_window()
             # will use mur_date.today() for the correct NRT/REA boundary (day1)
-            process_date = mur_date.today()
+            reference_today = orchestrator.get_reference_today()
+            process_date = reference_today - datetime.timedelta(days=1)
             _, day1, _ = orchestrator.calculate_processing_window()
+            logger.info(f"Simulated today: {reference_today}")
+            logger.info(f"Processing date (yesterday): {process_date}")
             logger.info(f"NRT/REA boundary (day1): {day1}")
             success = orchestrator.run_single_day(
                 process_date, day1, args.preprocess_only, execute_stages
