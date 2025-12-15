@@ -137,7 +137,7 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
     tmp=tmp(mask); b=b(mask); sigma=sigma(mask); prox=prox(mask);
 
     % collect data with chunked pre-allocation:
-    n_new = length(x);
+    n_new = numel(x);  % Use numel not length in case arrays are 2D
     new_idx = current_idx + n_new;
 
     % Expand arrays if needed (in chunks)
