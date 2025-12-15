@@ -53,11 +53,13 @@ end;
 % SST:
 if nargout>=1,
   varid = netcdf.inqVarID(ncid,'sea_surface_temperature');
-  sst = netcdf.getVar(ncid,varid,'single');
-  badpix = single(netcdf.getAtt(ncid,varid,'_FillValue'));
+  sst = netcdf.getVar(ncid,varid);  % Read as native type (int16)
+  badpix = netcdf.getAtt(ncid,varid,'_FillValue');  % Keep native type for exact comparison
+  mask = (sst == badpix);  % Compare in native type (exact integer match)
+  % Now convert to single for scaling
+  sst = single(sst);
   const = single(netcdf.getAtt(ncid,varid,'add_offset'));
   scale = single(netcdf.getAtt(ncid,varid,'scale_factor'));
-  mask = (sst == badpix);
   sst = sst * scale + const;
   if any(mask(:)), sst(mask) = single(vfv); end;
 end;
@@ -109,11 +111,13 @@ end;
 if nargout>=6,
   if gds2, nameBias='sses_bias'; else, nameBias='SSES_bias_error'; end;
   varid = netcdf.inqVarID(ncid,nameBias);
-  bias = netcdf.getVar(ncid,varid,'single');
-  badpix = single(netcdf.getAtt(ncid,varid,'_FillValue'));
+  bias = netcdf.getVar(ncid,varid);  % Read as native type (int8)
+  badpix = netcdf.getAtt(ncid,varid,'_FillValue');  % Keep native type for exact comparison
+  mask = (bias == badpix);  % Compare in native type (exact integer match)
+  % Now convert to single for scaling
+  bias = single(bias);
   const = single(netcdf.getAtt(ncid,varid,'add_offset'));
   scale = single(netcdf.getAtt(ncid,varid,'scale_factor'));
-  mask = (bias == badpix);
   bias = bias * scale + const;
   if any(mask(:)), bias(mask) = single(vfv); end;
 end;
@@ -126,11 +130,13 @@ if nargout>=7,
     nameSTD='SSES_standard_deviation_error';
   end;
   varid = netcdf.inqVarID(ncid,nameSTD);
-  sigma = netcdf.getVar(ncid,varid,'single');
-  badpix = single(netcdf.getAtt(ncid,varid,'_FillValue'));
+  sigma = netcdf.getVar(ncid,varid);  % Read as native type (int8)
+  badpix = netcdf.getAtt(ncid,varid,'_FillValue');  % Keep native type for exact comparison
+  mask = (sigma == badpix);  % Compare in native type (exact integer match)
+  % Now convert to single for scaling
+  sigma = single(sigma);
   const = single(netcdf.getAtt(ncid,varid,'add_offset'));
   scale = single(netcdf.getAtt(ncid,varid,'scale_factor'));
-  mask = (sigma == badpix);
   sigma = sigma * scale + const;
   if any(mask(:)), sigma(mask) = single(vfv); end;
 end;

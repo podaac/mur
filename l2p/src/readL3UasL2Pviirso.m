@@ -15,11 +15,9 @@ ncid=netcdf.open(ncfile,'nowrite');
 % SST:
 if nargout>=1,
   varid = netcdf.inqVarID(ncid,'sea_surface_temperature');
-  sst = netcdf.getVar(ncid,varid,'single');
-  badpix = single(netcdf.getAtt(ncid,varid,'_FillValue'));
-  const = single(netcdf.getAtt(ncid,varid,'add_offset'));
-  scale = single(netcdf.getAtt(ncid,varid,'scale_factor'));
-  %% find index sets for OpenDAP read:
+  sst = netcdf.getVar(ncid,varid);  % Read as native type (int16)
+  badpix = netcdf.getAtt(ncid,varid,'_FillValue');  % Keep native type for exact comparison
+  %% find index sets for OpenDAP read (compare in native type):
     [ ii, jj ] = find( sst ~= badpix );
     ii = min(ii):max(ii);
     jj = min(jj):max(jj);
@@ -28,7 +26,11 @@ if nargout>=1,
       o0 = [ min(ii), min(jj), 1 ]-1;
       oN = [ max(ii)-min(ii), max(jj)-min(jj), 0 ]+1;
       % use:  = netcdf.getVar(ncid,varid,o0,oN);
-  mask = (sst == badpix);
+  mask = (sst == badpix);  % Compare in native type (exact integer match)
+  % Now convert to single for scaling
+  sst = single(sst);
+  const = single(netcdf.getAtt(ncid,varid,'add_offset'));
+  scale = single(netcdf.getAtt(ncid,varid,'scale_factor'));
   sst = sst * scale + const;
   if any(mask(:)), sst(mask) = single(vfv); end;
 
@@ -83,11 +85,13 @@ end;
 % SSES bias:
 if nargout>=6,
   varid = netcdf.inqVarID(ncid,'sses_bias');
-  bias = netcdf.getVar( ncid, varid, o0, oN, 'single');
-  badpix = single(netcdf.getAtt(ncid,varid,'_FillValue'));
+  bias = netcdf.getVar( ncid, varid, o0, oN);  % Read as native type (int8)
+  badpix = netcdf.getAtt(ncid,varid,'_FillValue');  % Keep native type for exact comparison
+  mask = (bias == badpix);  % Compare in native type (exact integer match)
+  % Now convert to single for scaling
+  bias = single(bias);
   const = single(netcdf.getAtt(ncid,varid,'add_offset'));
   scale = single(netcdf.getAtt(ncid,varid,'scale_factor'));
-  mask = (bias == badpix);
   bias = bias * scale + const;
   if any(mask(:)), bias(mask) = single(vfv); end;
       bias = bias( jnx );
@@ -96,11 +100,13 @@ end;
 % SSES std:
 if nargout>=7,
   varid = netcdf.inqVarID(ncid,'sses_standard_deviation');
-  sigma = netcdf.getVar( ncid, varid, o0, oN, 'single');
-  badpix = single(netcdf.getAtt(ncid,varid,'_FillValue'));
+  sigma = netcdf.getVar( ncid, varid, o0, oN);  % Read as native type (int8)
+  badpix = netcdf.getAtt(ncid,varid,'_FillValue');  % Keep native type for exact comparison
+  mask = (sigma == badpix);  % Compare in native type (exact integer match)
+  % Now convert to single for scaling
+  sigma = single(sigma);
   const = single(netcdf.getAtt(ncid,varid,'add_offset'));
   scale = single(netcdf.getAtt(ncid,varid,'scale_factor'));
-  mask = (sigma == badpix);
   sigma = sigma * scale + const;
   if any(mask(:)), sigma(mask) = single(vfv); end;
       sigma = sigma( jnx );

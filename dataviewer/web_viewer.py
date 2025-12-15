@@ -1102,12 +1102,362 @@ def display_file_info(data: dict, format_type: str, filepath: Path):
                 st.metric("Max", f"{sst_valid.max():.2f} °C")
 
 
+def compare_files_data(data1: dict, data2: dict, format_type: str, tolerance: float = 1e-6) -> dict:
+    """
+    Compare two data dictionaries of the same format.
+
+    Args:
+        data1: First data dictionary
+        data2: Second data dictionary
+        format_type: File format type
+        tolerance: Numerical tolerance for float comparisons
+
+    Returns:
+        Dictionary with comparison results
+    """
+    results = {
+        'all_match': True,
+        'comparisons': [],
+        'stats': {}
+    }
+
+    if format_type in ['bip', 'biq', 'bic', 'bin']:
+        # Compare point data
+        n1 = data1.get('N', len(data1.get('sst', [])))
+        n2 = data2.get('N', len(data2.get('sst', [])))
+
+        if n1 != n2:
+            results['comparisons'].append({
+                'field': 'N (point count)',
+                'match': False,
+                'message': f"Different: {n1:,} vs {n2:,}"
+            })
+            results['all_match'] = False
+        else:
+            results['comparisons'].append({
+                'field': 'N (point count)',
+                'match': True,
+                'message': f"Match: {n1:,}"
+            })
+
+        # Compare fields that exist in both
+        fields_to_compare = ['lon', 'lat', 'sst', 'hour']
+        if 'weight' in data1 and 'weight' in data2:
+            fields_to_compare.append('weight')
+        if 'rms' in data1 and 'rms' in data2:
+            fields_to_compare.append('rms')
+        if 'bias' in data1 and 'bias' in data2:
+            fields_to_compare.append('bias')
+
+        for field in fields_to_compare:
+            if field not in data1 or field not in data2:
+                continue
+
+            arr1 = np.asarray(data1[field])
+            arr2 = np.asarray(data2[field])
+
+            if arr1.shape != arr2.shape:
+                results['comparisons'].append({
+                    'field': field,
+                    'match': False,
+                    'message': f"Different shapes: {arr1.shape} vs {arr2.shape}"
+                })
+                results['all_match'] = False
+                continue
+
+            # Handle NaN values
+            valid_mask = ~(np.isnan(arr1) | np.isnan(arr2))
+            if not np.any(valid_mask):
+                results['comparisons'].append({
+                    'field': field,
+                    'match': True,
+                    'message': "Both all NaN"
+                })
+                continue
+
+            diff = arr1[valid_mask] - arr2[valid_mask]
+            max_diff = np.max(np.abs(diff))
+            mean_diff = np.mean(diff)
+            std_diff = np.std(diff)
+
+            if np.allclose(arr1, arr2, atol=tolerance, rtol=tolerance, equal_nan=True):
+                results['comparisons'].append({
+                    'field': field,
+                    'match': True,
+                    'message': f"Match (max diff: {max_diff:.2e})"
+                })
+            else:
+                results['comparisons'].append({
+                    'field': field,
+                    'match': False,
+                    'message': f"Differs: max={max_diff:.4f}, mean={mean_diff:.4f}, std={std_diff:.4f}"
+                })
+                results['all_match'] = False
+
+            results['stats'][field] = {
+                'max_diff': max_diff,
+                'mean_diff': mean_diff,
+                'std_diff': std_diff,
+                'diff': diff if len(diff) < 100000 else None  # Only store if manageable size
+            }
+
+    elif format_type in ['gds', 'map']:
+        # Compare grid data
+        dim1 = data1.get('dimensions', data1.get('sst', np.array([])).shape)
+        dim2 = data2.get('dimensions', data2.get('sst', np.array([])).shape)
+
+        if dim1 != dim2:
+            results['comparisons'].append({
+                'field': 'dimensions',
+                'match': False,
+                'message': f"Different: {dim1} vs {dim2}"
+            })
+            results['all_match'] = False
+        else:
+            results['comparisons'].append({
+                'field': 'dimensions',
+                'match': True,
+                'message': f"Match: {dim1}"
+            })
+
+        # Compare fields
+        if format_type == 'gds':
+            fields_to_compare = ['mask', 'lon', 'lat', 'icemap']
+        else:  # map
+            fields_to_compare = ['sst', 'lon', 'lat']
+
+        for field in fields_to_compare:
+            if field not in data1 or field not in data2:
+                continue
+
+            arr1 = np.asarray(data1[field])
+            arr2 = np.asarray(data2[field])
+
+            if arr1.shape != arr2.shape:
+                results['comparisons'].append({
+                    'field': field,
+                    'match': False,
+                    'message': f"Different shapes: {arr1.shape} vs {arr2.shape}"
+                })
+                results['all_match'] = False
+                continue
+
+            # Handle NaN values for float arrays
+            if np.issubdtype(arr1.dtype, np.floating):
+                valid_mask = ~(np.isnan(arr1) | np.isnan(arr2))
+                if np.any(valid_mask):
+                    diff = arr1[valid_mask] - arr2[valid_mask]
+                    max_diff = np.max(np.abs(diff))
+                    num_diff = np.sum(np.abs(diff) > tolerance)
+                else:
+                    max_diff = 0
+                    num_diff = 0
+            else:
+                diff = arr1.astype(float) - arr2.astype(float)
+                max_diff = np.max(np.abs(diff))
+                num_diff = np.sum(arr1 != arr2)
+
+            pct_diff = 100.0 * num_diff / arr1.size if arr1.size > 0 else 0
+
+            if num_diff == 0:
+                results['comparisons'].append({
+                    'field': field,
+                    'match': True,
+                    'message': f"Match"
+                })
+            else:
+                results['comparisons'].append({
+                    'field': field,
+                    'match': False,
+                    'message': f"Differs: {num_diff:,} elements ({pct_diff:.4f}%), max diff: {max_diff}"
+                })
+                results['all_match'] = False
+
+            results['stats'][field] = {
+                'max_diff': max_diff,
+                'num_diff': num_diff,
+                'pct_diff': pct_diff
+            }
+
+    return results
+
+
+def create_comparison_plot(data1: dict, data2: dict, format_type: str,
+                           file1_name: str, file2_name: str) -> plt.Figure:
+    """
+    Create a comparison visualization showing both datasets and their difference.
+
+    Args:
+        data1: First data dictionary
+        data2: Second data dictionary
+        format_type: File format type
+        file1_name: Name of first file
+        file2_name: Name of second file
+
+    Returns:
+        Matplotlib figure
+    """
+    if format_type in ['bip', 'biq', 'bic', 'bin']:
+        # Point data comparison
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+        # SST scatter plots
+        ax1 = axes[0, 0]
+        valid1 = ~np.isnan(data1['sst'])
+        sst1 = data1['sst'][valid1]
+        if len(sst1) > 0:
+            vmin = np.percentile(sst1, 1)
+            vmax = np.percentile(sst1, 99)
+            sc1 = ax1.scatter(data1['lon'][valid1], data1['lat'][valid1],
+                              c=sst1, s=1, cmap='RdYlBu_r', vmin=vmin, vmax=vmax, alpha=0.7)
+            plt.colorbar(sc1, ax=ax1, label='SST (K)')
+        ax1.set_title(f"File 1: {file1_name}")
+        ax1.set_xlabel('Longitude')
+        ax1.set_ylabel('Latitude')
+
+        ax2 = axes[0, 1]
+        valid2 = ~np.isnan(data2['sst'])
+        sst2 = data2['sst'][valid2]
+        if len(sst2) > 0:
+            sc2 = ax2.scatter(data2['lon'][valid2], data2['lat'][valid2],
+                              c=sst2, s=1, cmap='RdYlBu_r', vmin=vmin, vmax=vmax, alpha=0.7)
+            plt.colorbar(sc2, ax=ax2, label='SST (K)')
+        ax2.set_title(f"File 2: {file2_name}")
+        ax2.set_xlabel('Longitude')
+        ax2.set_ylabel('Latitude')
+
+        # SST difference histogram
+        ax3 = axes[1, 0]
+        n1, n2 = len(data1['sst']), len(data2['sst'])
+        if n1 == n2:
+            diff = data1['sst'] - data2['sst']
+            valid_diff = diff[~np.isnan(diff)]
+            if len(valid_diff) > 0:
+                ax3.hist(valid_diff, bins=100, edgecolor='black', alpha=0.7)
+                ax3.axvline(x=0, color='r', linestyle='--', label='Zero')
+                ax3.set_xlabel('SST Difference (File1 - File2)')
+                ax3.set_ylabel('Count')
+                ax3.set_title(f'SST Difference Distribution\n'
+                             f'Mean: {np.mean(valid_diff):.4f}, Std: {np.std(valid_diff):.4f}')
+                ax3.legend()
+        else:
+            ax3.text(0.5, 0.5, f'Cannot compute difference:\nDifferent point counts\n({n1:,} vs {n2:,})',
+                    ha='center', va='center', transform=ax3.transAxes)
+            ax3.set_title('SST Difference')
+
+        # SST 1:1 comparison scatter
+        ax4 = axes[1, 1]
+        if n1 == n2:
+            valid_both = ~(np.isnan(data1['sst']) | np.isnan(data2['sst']))
+            sst1_valid = data1['sst'][valid_both]
+            sst2_valid = data2['sst'][valid_both]
+            if len(sst1_valid) > 0:
+                # Downsample if too many points
+                if len(sst1_valid) > 10000:
+                    idx = np.random.choice(len(sst1_valid), 10000, replace=False)
+                    sst1_plot = sst1_valid[idx]
+                    sst2_plot = sst2_valid[idx]
+                else:
+                    sst1_plot = sst1_valid
+                    sst2_plot = sst2_valid
+
+                ax4.scatter(sst1_plot, sst2_plot, s=1, alpha=0.3)
+                # Add 1:1 line
+                lims = [min(sst1_plot.min(), sst2_plot.min()),
+                       max(sst1_plot.max(), sst2_plot.max())]
+                ax4.plot(lims, lims, 'r--', label='1:1 line')
+                ax4.set_xlabel(f'SST File 1 (K)')
+                ax4.set_ylabel(f'SST File 2 (K)')
+                ax4.set_title('SST Comparison (1:1)')
+                ax4.legend()
+                ax4.set_aspect('equal')
+        else:
+            ax4.text(0.5, 0.5, 'Cannot create 1:1 plot:\nDifferent point counts',
+                    ha='center', va='center', transform=ax4.transAxes)
+            ax4.set_title('SST 1:1 Comparison')
+
+        plt.tight_layout()
+        return fig
+
+    elif format_type == 'map':
+        # Grid data comparison
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+        sst1 = data1['sst']
+        sst2 = data2['sst']
+        lon1 = data1['lon']
+        lat1 = data1['lat']
+
+        # Common colorbar limits
+        valid1 = ~np.isnan(sst1)
+        valid2 = ~np.isnan(sst2)
+        all_valid = np.concatenate([sst1[valid1], sst2[valid2]])
+        if len(all_valid) > 0:
+            vmin = np.percentile(all_valid, 1)
+            vmax = np.percentile(all_valid, 99)
+        else:
+            vmin, vmax = 270, 305
+
+        ax1 = axes[0, 0]
+        im1 = ax1.pcolormesh(lon1, lat1, sst1, cmap='RdYlBu_r', vmin=vmin, vmax=vmax)
+        plt.colorbar(im1, ax=ax1, label='SST (K)')
+        ax1.set_title(f"File 1: {file1_name}")
+
+        ax2 = axes[0, 1]
+        im2 = ax2.pcolormesh(lon1, lat1, sst2, cmap='RdYlBu_r', vmin=vmin, vmax=vmax)
+        plt.colorbar(im2, ax=ax2, label='SST (K)')
+        ax2.set_title(f"File 2: {file2_name}")
+
+        # Difference map
+        ax3 = axes[1, 0]
+        if sst1.shape == sst2.shape:
+            diff = sst1 - sst2
+            diff_max = np.nanmax(np.abs(diff))
+            im3 = ax3.pcolormesh(lon1, lat1, diff, cmap='RdBu_r',
+                                 vmin=-diff_max, vmax=diff_max)
+            plt.colorbar(im3, ax=ax3, label='Difference (K)')
+            ax3.set_title(f'Difference (File1 - File2)\nMax: {diff_max:.4f}')
+        else:
+            ax3.text(0.5, 0.5, 'Cannot compute difference:\nDifferent grid sizes',
+                    ha='center', va='center', transform=ax3.transAxes)
+
+        # Histogram of differences
+        ax4 = axes[1, 1]
+        if sst1.shape == sst2.shape:
+            diff_valid = diff[~np.isnan(diff)]
+            if len(diff_valid) > 0:
+                ax4.hist(diff_valid.flatten(), bins=100, edgecolor='black', alpha=0.7)
+                ax4.axvline(x=0, color='r', linestyle='--')
+                ax4.set_xlabel('Difference (K)')
+                ax4.set_ylabel('Count')
+                ax4.set_title(f'Difference Distribution\n'
+                             f'Mean: {np.nanmean(diff):.4f}, Std: {np.nanstd(diff):.4f}')
+
+        plt.tight_layout()
+        return fig
+
+    else:
+        # Unsupported format
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.text(0.5, 0.5, f'Comparison visualization not implemented for {format_type} format',
+                ha='center', va='center', fontsize=14)
+        ax.axis('off')
+        return fig
+
+
 def main():
     """Main Streamlit application."""
 
     # Title and description
     st.title("🌊 MUR Data Viewer")
     st.markdown("### Web-based interface for MUR SST processing data files")
+
+    # Mode selector at the top
+    mode = st.radio(
+        "Mode:",
+        ["📊 View Single File", "🔄 Compare Two Files"],
+        horizontal=True
+    )
 
     # Sidebar for file browsing
     st.sidebar.header("📁 File Browser")
@@ -1122,6 +1472,12 @@ def main():
         st.session_state.selected_file = None
     if 'should_visualize' not in st.session_state:
         st.session_state.should_visualize = False
+    if 'compare_file1' not in st.session_state:
+        st.session_state.compare_file1 = None
+    if 'compare_file2' not in st.session_state:
+        st.session_state.compare_file2 = None
+    if 'should_compare' not in st.session_state:
+        st.session_state.should_compare = False
 
     # Ensure current directory is safe
     if not is_safe_path(base_dir, st.session_state.current_dir):
@@ -1130,7 +1486,8 @@ def main():
     current_dir = Path(st.session_state.current_dir)
 
     # Directory navigation
-    st.sidebar.write(f"**Current:** `{current_dir.relative_to(base_dir) if current_dir != base_dir else '/'}`")
+    rel_path = current_dir.relative_to(base_dir) if current_dir != base_dir else '/'
+    st.sidebar.write(f"**Current:** `{rel_path}`")
 
     # Parent directory button
     if current_dir != base_dir:
@@ -1179,17 +1536,22 @@ def main():
         files = sorted(set(files))
 
     if not files:
-        st.warning("No files found in the current directory with the selected filter.")
-        st.info("Use the file browser in the sidebar to navigate to a directory with MUR data files.")
+        st.warning("No files found in current directory with selected filter.")
+        st.info("Use the sidebar file browser to navigate to MUR data files.")
         return
 
     # File search/filter
     st.sidebar.write(f"**Found {len(files)} file(s)**")
-    search_term = st.sidebar.text_input("🔍 Search files:", placeholder="Type to filter...")
+    search_term = st.sidebar.text_input(
+        "🔍 Search files:",
+        placeholder="Type to filter..."
+    )
 
     # Filter files based on search term
     if search_term:
-        filtered_files = [f for f in files if search_term.lower() in f.name.lower()]
+        filtered_files = [
+            f for f in files if search_term.lower() in f.name.lower()
+        ]
         st.sidebar.write(f"**Showing {len(filtered_files)} matching file(s)**")
     else:
         filtered_files = files
@@ -1198,83 +1560,230 @@ def main():
         st.sidebar.warning("No files match your search.")
         return
 
-    # File selector
-    selected_file = st.sidebar.selectbox(
-        "Select a file:",
-        filtered_files,
-        format_func=lambda x: x.name,
-        key="file_selector"
-    )
-
-    if selected_file:
-        st.sidebar.write("---")
-
-        # Visualization button (explicit action)
-        st.sidebar.write("**Actions:**")
-        if st.sidebar.button("📊 Visualize File", type="primary", use_container_width=True):
-            st.session_state.selected_file = selected_file
-            st.session_state.should_visualize = True
-
-        # Rendering options
-        st.sidebar.write("---")
-        st.sidebar.write("**Display Options:**")
-        show_info = st.sidebar.checkbox("Show file info", value=True)
-
-        # Plot type selector
-        plot_type = st.sidebar.radio(
-            "Plot type:",
-            ["Matplotlib (Fast)", "Plotly (Interactive)"],
-            help="Matplotlib is faster for large datasets. Plotly allows zoom/pan but may be slower."
+    # =========== SINGLE FILE MODE ===========
+    if mode == "📊 View Single File":
+        # File selector
+        selected_file = st.sidebar.selectbox(
+            "Select a file:",
+            filtered_files,
+            format_func=lambda x: x.name,
+            key="file_selector"
         )
-        use_plotly = plot_type.startswith("Plotly")
 
-        # Only load and display if visualize button was clicked
-        if st.session_state.should_visualize and st.session_state.selected_file == selected_file:
-            try:
-                # Detect format
-                format_type = DataFileReader.detect_format(selected_file)
+        if selected_file:
+            st.sidebar.write("---")
 
-                with st.spinner(f"Reading {format_type.upper()} file..."):
-                    data = read_file(selected_file)
+            # Visualization button (explicit action)
+            st.sidebar.write("**Actions:**")
+            viz_btn = st.sidebar.button(
+                "📊 Visualize File",
+                type="primary",
+                use_container_width=True
+            )
+            if viz_btn:
+                st.session_state.selected_file = selected_file
+                st.session_state.should_visualize = True
 
-                # Display info
-                if show_info:
-                    display_file_info(data, format_type, selected_file)
+            # Rendering options
+            st.sidebar.write("---")
+            st.sidebar.write("**Display Options:**")
+            show_info = st.sidebar.checkbox("Show file info", value=True)
 
-                # Display plot
-                st.write("---")
-                st.subheader("📊 Visualization")
+            # Plot type selector
+            plot_type = st.sidebar.radio(
+                "Plot type:",
+                ["Matplotlib (Fast)", "Plotly (Interactive)"],
+                help="Matplotlib is faster. Plotly allows zoom/pan."
+            )
+            use_plotly = plot_type.startswith("Plotly")
 
-                with st.spinner("Creating visualization..."):
-                    if format_type in ['bip', 'biq', 'bii', 'bic', 'bin']:
-                        if use_plotly:
-                            try:
-                                fig = create_interactive_point_plot(data, format_type, selected_file)
-                                st.plotly_chart(fig, use_container_width=True)
-                            except Exception as e:
-                                st.error(f"Plotly visualization failed: {e}")
-                                st.info("Falling back to Matplotlib...")
-                                fig = create_point_data_plot(data, format_type, selected_file)
+            # Only load and display if visualize button was clicked
+            should_viz = st.session_state.should_visualize
+            same_file = st.session_state.selected_file == selected_file
+            if should_viz and same_file:
+                try:
+                    # Detect format
+                    format_type = DataFileReader.detect_format(selected_file)
+
+                    with st.spinner(f"Reading {format_type.upper()} file..."):
+                        data = read_file(selected_file)
+
+                    # Display info
+                    if show_info:
+                        display_file_info(data, format_type, selected_file)
+
+                    # Display plot
+                    st.write("---")
+                    st.subheader("📊 Visualization")
+
+                    with st.spinner("Creating visualization..."):
+                        if format_type in ['bip', 'biq', 'bii', 'bic', 'bin']:
+                            if use_plotly:
+                                try:
+                                    fig = create_interactive_point_plot(
+                                        data, format_type, selected_file
+                                    )
+                                    st.plotly_chart(fig, use_container_width=True)
+                                except Exception as e:
+                                    st.error(f"Plotly failed: {e}")
+                                    st.info("Falling back to Matplotlib...")
+                                    fig = create_point_data_plot(
+                                        data, format_type, selected_file
+                                    )
+                                    st.pyplot(fig)
+                                    plt.close(fig)
+                            else:
+                                fig = create_point_data_plot(
+                                    data, format_type, selected_file
+                                )
                                 st.pyplot(fig)
                                 plt.close(fig)
-                        else:
-                            fig = create_point_data_plot(data, format_type, selected_file)
+                        elif format_type in ['gds', 'map']:
+                            fig = create_grid_data_plot(
+                                data, format_type, selected_file
+                            )
                             st.pyplot(fig)
                             plt.close(fig)
-                    elif format_type in ['gds', 'map']:
-                        fig = create_grid_data_plot(data, format_type, selected_file)
-                        st.pyplot(fig)
-                        plt.close(fig)
-                    else:
-                        st.info(f"Visualization not yet implemented for {format_type} format.")
+                        else:
+                            st.info(
+                                f"Visualization not implemented for "
+                                f"{format_type} format."
+                            )
 
-            except Exception as e:
-                st.error(f"Error processing file: {e}")
-                import traceback
-                with st.expander("Show error details"):
-                    st.code(traceback.format_exc())
+                except Exception as e:
+                    st.error(f"Error processing file: {e}")
+                    import traceback
+                    with st.expander("Show error details"):
+                        st.code(traceback.format_exc())
+            else:
+                st.info("👆 Select a file and click **Visualize File**.")
+
+    # =========== COMPARE MODE ===========
+    else:
+        st.sidebar.write("---")
+        st.sidebar.write("**Select Files to Compare:**")
+
+        # File 1 selector
+        file1 = st.sidebar.selectbox(
+            "File 1 (reference):",
+            filtered_files,
+            format_func=lambda x: x.name,
+            key="compare_file1_selector"
+        )
+
+        # File 2 selector
+        file2 = st.sidebar.selectbox(
+            "File 2 (comparison):",
+            filtered_files,
+            format_func=lambda x: x.name,
+            key="compare_file2_selector",
+            index=min(1, len(filtered_files) - 1) if len(filtered_files) > 1 else 0
+        )
+
+        st.sidebar.write("---")
+
+        # Tolerance setting
+        tolerance = st.sidebar.number_input(
+            "Comparison tolerance:",
+            min_value=1e-10,
+            max_value=1.0,
+            value=1e-6,
+            format="%.2e",
+            help="Numerical tolerance for float comparisons"
+        )
+
+        # Compare button
+        compare_btn = st.sidebar.button(
+            "🔄 Compare Files",
+            type="primary",
+            use_container_width=True
+        )
+        if compare_btn:
+            st.session_state.compare_file1 = file1
+            st.session_state.compare_file2 = file2
+            st.session_state.should_compare = True
+
+        # Perform comparison
+        should_cmp = st.session_state.should_compare
+        same_f1 = st.session_state.compare_file1 == file1
+        same_f2 = st.session_state.compare_file2 == file2
+        if should_cmp and same_f1 and same_f2:
+            if file1 == file2:
+                st.warning("Please select two different files to compare.")
+            else:
+                try:
+                    # Detect formats
+                    fmt1 = DataFileReader.detect_format(file1)
+                    fmt2 = DataFileReader.detect_format(file2)
+
+                    if fmt1 != fmt2:
+                        st.error(
+                            f"Cannot compare different formats: "
+                            f"{fmt1.upper()} vs {fmt2.upper()}"
+                        )
+                    else:
+                        # Read both files
+                        with st.spinner("Reading files..."):
+                            data1 = read_file(file1)
+                            data2 = read_file(file2)
+
+                        # Display comparison results
+                        st.subheader("🔄 Comparison Results")
+
+                        # File info
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.write(f"**File 1:** `{file1.name}`")
+                        with col2:
+                            st.write(f"**File 2:** `{file2.name}`")
+
+                        st.write(f"**Format:** {fmt1.upper()}")
+                        st.write(f"**Tolerance:** {tolerance:.2e}")
+                        st.write("---")
+
+                        # Run comparison
+                        results = compare_files_data(
+                            data1, data2, fmt1, tolerance
+                        )
+
+                        # Display results table
+                        st.write("**Field Comparison:**")
+                        for comp in results['comparisons']:
+                            icon = "✅" if comp['match'] else "❌"
+                            st.write(
+                                f"{icon} **{comp['field']}**: {comp['message']}"
+                            )
+
+                        st.write("---")
+
+                        # Summary
+                        if results['all_match']:
+                            st.success("🎉 All fields match within tolerance!")
+                        else:
+                            st.warning("❌ Some differences found.")
+
+                        # Visualization
+                        st.write("---")
+                        st.subheader("📊 Comparison Visualization")
+
+                        with st.spinner("Creating comparison plots..."):
+                            fig = create_comparison_plot(
+                                data1, data2, fmt1,
+                                file1.name, file2.name
+                            )
+                            st.pyplot(fig)
+                            plt.close(fig)
+
+                except Exception as e:
+                    st.error(f"Error comparing files: {e}")
+                    import traceback
+                    with st.expander("Show error details"):
+                        st.code(traceback.format_exc())
         else:
-            st.info("👆 Select a file and click **Visualize File** to display it.")
+            st.info(
+                "👆 Select two files in the sidebar and click "
+                "**Compare Files** to see the comparison."
+            )
 
 
 if __name__ == '__main__':
