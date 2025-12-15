@@ -30,7 +30,6 @@ c2=1/hrsscale;
             'integer*2',bias,'uint8',rms,'uint8',qt);
       fclose(f);
 
-      if 1,  % compress further:
-        eval(sprintf('! gzip -f %s &',bicfile));
-      end;
+      % Note: gzip removed - downstream makebiq handles compressed or uncompressed
+      % If archival compression needed, do it as post-processing step
 

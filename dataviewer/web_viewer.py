@@ -1478,6 +1478,12 @@ def main():
         st.session_state.compare_file2 = None
     if 'should_compare' not in st.session_state:
         st.session_state.should_compare = False
+    if 'reference_file' not in st.session_state:
+        st.session_state.reference_file = None
+    if 'reference_data' not in st.session_state:
+        st.session_state.reference_data = None
+    if 'reference_format' not in st.session_state:
+        st.session_state.reference_format = None
 
     # Ensure current directory is safe
     if not is_safe_path(base_dir, st.session_state.current_dir):
@@ -1660,24 +1666,33 @@ def main():
 
     # =========== COMPARE MODE ===========
     else:
+        # Show reference file status in sidebar
         st.sidebar.write("---")
-        st.sidebar.write("**Select Files to Compare:**")
+        if st.session_state.reference_file:
+            st.sidebar.success(
+                f"📌 **Reference:** `{st.session_state.reference_file.name}`"
+            )
+            if st.sidebar.button(
+                "🗑️ Clear Reference",
+                use_container_width=True
+            ):
+                st.session_state.reference_file = None
+                st.session_state.reference_data = None
+                st.session_state.reference_format = None
+                st.session_state.should_compare = False
+                st.rerun()
+        else:
+            st.sidebar.info("📌 No reference file set")
 
-        # File 1 selector
-        file1 = st.sidebar.selectbox(
-            "File 1 (reference):",
+        st.sidebar.write("---")
+        st.sidebar.write("**Select file to compare:**")
+
+        # File selector for comparison
+        selected_file = st.sidebar.selectbox(
+            "File:",
             filtered_files,
             format_func=lambda x: x.name,
-            key="compare_file1_selector"
-        )
-
-        # File 2 selector
-        file2 = st.sidebar.selectbox(
-            "File 2 (comparison):",
-            filtered_files,
-            format_func=lambda x: x.name,
-            key="compare_file2_selector",
-            index=min(1, len(filtered_files) - 1) if len(filtered_files) > 1 else 0
+            key="compare_file_selector"
         )
 
         st.sidebar.write("---")
@@ -1692,40 +1707,78 @@ def main():
             help="Numerical tolerance for float comparisons"
         )
 
-        # Compare button
-        compare_btn = st.sidebar.button(
-            "🔄 Compare Files",
-            type="primary",
-            use_container_width=True
+        st.sidebar.write("---")
+        st.sidebar.write("**Actions:**")
+
+        # Set as Reference button
+        set_ref_btn = st.sidebar.button(
+            "📌 Set as Reference",
+            use_container_width=True,
+            help="Set the selected file as the reference for comparisons"
         )
-        if compare_btn:
-            st.session_state.compare_file1 = file1
-            st.session_state.compare_file2 = file2
+        if set_ref_btn and selected_file:
+            with st.spinner("Loading reference file..."):
+                try:
+                    ref_fmt = DataFileReader.detect_format(selected_file)
+                    ref_data = read_file(selected_file)
+                    st.session_state.reference_file = selected_file
+                    st.session_state.reference_data = ref_data
+                    st.session_state.reference_format = ref_fmt
+                    st.session_state.should_compare = False
+                    st.rerun()
+                except Exception as e:
+                    st.sidebar.error(f"Error loading reference: {e}")
+
+        # Compare to Reference button (only enabled if reference is set)
+        compare_btn = st.sidebar.button(
+            "🔄 Compare to Reference",
+            type="primary",
+            use_container_width=True,
+            disabled=st.session_state.reference_file is None
+        )
+        if compare_btn and selected_file:
+            st.session_state.compare_file2 = selected_file
             st.session_state.should_compare = True
 
-        # Perform comparison
-        should_cmp = st.session_state.should_compare
-        same_f1 = st.session_state.compare_file1 == file1
-        same_f2 = st.session_state.compare_file2 == file2
-        if should_cmp and same_f1 and same_f2:
-            if file1 == file2:
-                st.warning("Please select two different files to compare.")
+        # Main content area
+        if st.session_state.reference_file is None:
+            st.info(
+                "👆 **Step 1:** Select a file in the sidebar and click "
+                "**Set as Reference** to begin comparisons."
+            )
+        elif not st.session_state.should_compare:
+            st.info(
+                f"📌 **Reference set:** `{st.session_state.reference_file.name}`\n\n"
+                "👆 **Step 2:** Select another file and click "
+                "**Compare to Reference** to see the comparison.\n\n"
+                "You can compare multiple files to this reference without resetting."
+            )
+        else:
+            # Perform comparison
+            ref_file = st.session_state.reference_file
+            cmp_file = st.session_state.compare_file2
+
+            if ref_file == cmp_file:
+                st.warning("The selected file is the same as the reference file.")
             else:
                 try:
-                    # Detect formats
-                    fmt1 = DataFileReader.detect_format(file1)
-                    fmt2 = DataFileReader.detect_format(file2)
+                    # Use cached reference data
+                    ref_data = st.session_state.reference_data
+                    ref_fmt = st.session_state.reference_format
 
-                    if fmt1 != fmt2:
+                    # Detect format for comparison file
+                    cmp_fmt = DataFileReader.detect_format(cmp_file)
+
+                    if ref_fmt != cmp_fmt:
                         st.error(
                             f"Cannot compare different formats: "
-                            f"{fmt1.upper()} vs {fmt2.upper()}"
+                            f"{ref_fmt.upper()} (reference) vs "
+                            f"{cmp_fmt.upper()} (comparison)"
                         )
                     else:
-                        # Read both files
-                        with st.spinner("Reading files..."):
-                            data1 = read_file(file1)
-                            data2 = read_file(file2)
+                        # Read comparison file
+                        with st.spinner("Reading comparison file..."):
+                            cmp_data = read_file(cmp_file)
 
                         # Display comparison results
                         st.subheader("🔄 Comparison Results")
@@ -1733,17 +1786,17 @@ def main():
                         # File info
                         col1, col2 = st.columns(2)
                         with col1:
-                            st.write(f"**File 1:** `{file1.name}`")
+                            st.write(f"**Reference:** `{ref_file.name}`")
                         with col2:
-                            st.write(f"**File 2:** `{file2.name}`")
+                            st.write(f"**Comparison:** `{cmp_file.name}`")
 
-                        st.write(f"**Format:** {fmt1.upper()}")
+                        st.write(f"**Format:** {ref_fmt.upper()}")
                         st.write(f"**Tolerance:** {tolerance:.2e}")
                         st.write("---")
 
                         # Run comparison
                         results = compare_files_data(
-                            data1, data2, fmt1, tolerance
+                            ref_data, cmp_data, ref_fmt, tolerance
                         )
 
                         # Display results table
@@ -1768,8 +1821,8 @@ def main():
 
                         with st.spinner("Creating comparison plots..."):
                             fig = create_comparison_plot(
-                                data1, data2, fmt1,
-                                file1.name, file2.name
+                                ref_data, cmp_data, ref_fmt,
+                                ref_file.name, cmp_file.name
                             )
                             st.pyplot(fig)
                             plt.close(fig)
@@ -1779,11 +1832,6 @@ def main():
                     import traceback
                     with st.expander("Show error details"):
                         st.code(traceback.format_exc())
-        else:
-            st.info(
-                "👆 Select two files in the sidebar and click "
-                "**Compare Files** to see the comparison."
-            )
 
 
 if __name__ == '__main__':

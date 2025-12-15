@@ -148,28 +148,19 @@ end
 
 fprintf('\n=== VERIFYING OUTPUT ===\n');
 
-% Check for output BIC file (compressed)
-expected_bic_gz = fullfile(bicdir, ...
-    sprintf('%s_%s_%04d_%03d.bic.gz', region, sensor_upper, year_num, day_num));
+% Check for output BIC file (uncompressed - makebiq handles either format)
+expected_bic = fullfile(bicdir, ...
+    sprintf('%s_%s_%04d_%03d.bic', region, sensor_upper, year_num, day_num));
 
-if exist(expected_bic_gz, 'file')
-    file_info = dir(expected_bic_gz);
+if exist(expected_bic, 'file')
+    file_info = dir(expected_bic);
     fprintf('SUCCESS: Output file created\n');
-    fprintf('  File: %s\n', expected_bic_gz);
+    fprintf('  File: %s\n', expected_bic);
     fprintf('  Size: %.2f MB\n', file_info.bytes / 1024^2);
 else
     fprintf('WARNING: Expected output file not found:\n');
-    fprintf('  %s\n', expected_bic_gz);
-
-    % Check for uncompressed version
-    expected_bic = fullfile(bicdir, ...
-        sprintf('%s_%s_%04d_%03d.bic', region, sensor_upper, year_num, day_num));
-    if exist(expected_bic, 'file')
-        file_info = dir(expected_bic);
-        fprintf('  Found uncompressed .bic file (%.2f MB)\n', file_info.bytes / 1024^2);
-    else
-        fprintf('  No output file created - check logs above for errors\n');
-    end
+    fprintf('  %s\n', expected_bic);
+    fprintf('  No output file created - check logs above for errors\n');
 end
 
 % ========================================================================
