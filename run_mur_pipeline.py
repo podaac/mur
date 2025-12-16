@@ -58,6 +58,7 @@ import argparse
 import datetime
 import json
 import logging
+import os
 import pathlib
 import signal
 import subprocess
@@ -66,8 +67,13 @@ import time
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
+# Configure SSL certificates using certifi (fixes SSL errors on some Linux systems)
+import certifi
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+
 # Import centralized date handling for historical reprocessing support
-import mur_date
+import mur_date  # noqa: E402
 
 # Configure logging
 logging.basicConfig(
