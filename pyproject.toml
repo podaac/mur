@@ -13,6 +13,7 @@ dependencies = [
     # Data access and downloading
     "earthaccess>=0.9.0",
     "fsspec>=2024.0.0",
+    "podaac-data-subscriber>=1.14.0",
 
     # Date/time utilities
     "python-dateutil>=2.8.0",

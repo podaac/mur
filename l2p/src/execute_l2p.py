@@ -1,8 +1,24 @@
 """Execute MUR L2P sensor operations.
 
-This script downloads L2P data using podaac-data-subscriber (matching the
-production cron job infrastructure) and processes it using MATLAB to generate
+This script downloads L2P data and processes it using MATLAB to generate
 BIC (Best Interpolated Clear-sky) files for MUR SST analysis.
+
+Download Methods
+----------------
+Two download methods are available:
+
+1. podaac-data-subscriber (HTTP) - DEFAULT
+   - Matches the original production cron job infrastructure
+   - Uses CMR temporal filtering that returns granules based on observation time
+   - Results in files that match historical production outputs
+
+2. earthaccess (S3) - Use --s3 flag for in-region AWS access
+   - Uses in-region S3 access for faster downloads in AWS
+   - CMR temporal filtering returns granules that OVERLAP the time window
+   - May include granules from adjacent days (e.g., late previous day files
+     whose observations extend into the target day)
+   - The l2p2bic.m MATLAB code filters observations to 0 <= hour < 24 to
+     compensate, but file counts may differ from historical production
 """
 
 # Standard imports
@@ -25,8 +41,8 @@ import fsspec
 
 
 # Constants
-SUBSCRIBER_BIN = ("/measures_mur/seamap/newnas/nas2/l2p/mur_sst/"
-                  "data_subscriber/bin/podaac-data-subscriber")
+# Use installed podaac-data-subscriber from PATH (installed via pip)
+SUBSCRIBER_BIN = "podaac-data-subscriber"
 DOCKER_BIN = "docker"
 CONTAINER_IMAGE = "mur-l2p:latest"
 SENSORS = {
@@ -61,9 +77,10 @@ def main():
     input_dir = args.input
     output_dir = args.output
     config = args.config
-    download = args.download
+    use_s3 = args.s3
     container_image = args.container_image
-    for name, value in vars(args).items(): logging.info("%s: %s", name, value)
+    for name, value in vars(args).items():
+        logging.info("%s: %s", name, value)
 
     # Set up environment
     os.environ["TMP_DIR"] = TMP_DIR
@@ -77,7 +94,7 @@ def main():
     data_dir = input_dir.joinpath(sensor).joinpath(str(doy))
     data_dir.mkdir(parents=True, exist_ok=True)
     files = download_files(data["collection_name"], sensor, day, data_dir,
-                           download)
+                           use_s3)
 
     # Determine stability of source file (respects MUR_SIMULATED_DATE env var)
     if mur_date.today().toordinal() - day.toordinal() < data["stable"]:
@@ -130,11 +147,11 @@ def create_args():
                             "--config",
                             type=str,
                             help="Full path to configuration file")
-    arg_parser.add_argument("-w",
-                            "--download",
+    arg_parser.add_argument("--s3",
                             action="store_true",
-                            help="Download L2P data via HTTP (podaac-data-subscriber). "
-                                 "If False, uses S3 in-region access (earthaccess)")
+                            help="Use S3 in-region access via earthaccess "
+                                 "instead of default podaac-data-subscriber. "
+                                 "May include adjacent-day granules.")
     arg_parser.add_argument("--container-image",
                             type=str,
                             default=CONTAINER_IMAGE,
@@ -155,7 +172,7 @@ def get_config_data(config_file, sensor):
     return config_data[sensor]
 
 
-def download_files(collections, sensor, day, data_dir, download):
+def download_files(collections, sensor, day, data_dir, use_s3):
     """Download data files for sensor for date."""
 
     sd = f"{day}T00:00:00Z"
@@ -163,10 +180,10 @@ def download_files(collections, sensor, day, data_dir, download):
 
     downloads = []
     for collection in collections:
-        if download:    # HTTP access
-            files = download_http(collection, sensor, sd, ed, data_dir)
-        else:    # S3 access
+        if use_s3:
             files = download_s3(collection, sensor, sd, ed, data_dir)
+        else:  # Default: use podaac-data-subscriber (matches production)
+            files = download_http(collection, sensor, sd, ed, data_dir)
         downloads.extend(files)
 
     return list(set(downloads))
@@ -188,13 +205,22 @@ def download_http(collection, sensor, sd, ed, data_dir):
 
 
 def download_s3(collection, sensor, sd, ed, data_dir):
-    """Download data files as in-region access to S3."""
+    """Download data files as in-region access to S3.
 
+    WARNING: earthaccess temporal filtering returns granules that OVERLAP
+    the specified time window, not just those whose observations fall
+    entirely within it. This means files from late previous day (e.g.,
+    22:45 UTC) may be included if their observation window extends into
+    the target day. The l2p2bic.m code compensates by filtering
+    observations to 0 <= hour < 24.
+
+    For exact historical production matching, use download_http() instead.
+    """
     auth = earthaccess.Auth()
     auth.login(strategy="netrc")
 
     results = earthaccess.search_data(
-        short_name = collection,
+        short_name=collection,
         temporal=(sd, ed),
         cloud_hosted=True
     )

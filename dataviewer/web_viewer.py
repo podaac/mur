@@ -1564,6 +1564,29 @@ def main():
 
     if not filtered_files:
         st.sidebar.warning("No files match your search.")
+        # Still show reference file status in compare mode even with no files
+        if mode == "🔄 Compare Files" and st.session_state.reference_file:
+            st.sidebar.write("---")
+            ref_path = st.session_state.reference_file
+            try:
+                rel_path = ref_path.relative_to(base_dir)
+            except ValueError:
+                rel_path = ref_path.name
+            st.sidebar.success(f"📌 **Reference:**\n`{rel_path}`")
+            if st.sidebar.button(
+                "🗑️ Clear Reference",
+                use_container_width=True,
+                key="clear_ref_no_files"
+            ):
+                st.session_state.reference_file = None
+                st.session_state.reference_data = None
+                st.session_state.reference_format = None
+                st.session_state.should_compare = False
+                st.rerun()
+            st.info(
+                f"📌 **Reference set:** `{rel_path}`\n\n"
+                "Navigate to a folder with files to select comparison files."
+            )
         return
 
     # =========== SINGLE FILE MODE ===========
@@ -1669,9 +1692,12 @@ def main():
         # Show reference file status in sidebar
         st.sidebar.write("---")
         if st.session_state.reference_file:
-            st.sidebar.success(
-                f"📌 **Reference:** `{st.session_state.reference_file.name}`"
-            )
+            ref_path = st.session_state.reference_file
+            try:
+                ref_rel_path = ref_path.relative_to(base_dir)
+            except ValueError:
+                ref_rel_path = ref_path.name
+            st.sidebar.success(f"📌 **Reference:**\n`{ref_rel_path}`")
             if st.sidebar.button(
                 "🗑️ Clear Reference",
                 use_container_width=True
@@ -1748,7 +1774,7 @@ def main():
             )
         elif not st.session_state.should_compare:
             st.info(
-                f"📌 **Reference set:** `{st.session_state.reference_file.name}`\n\n"
+                f"📌 **Reference set:** `{ref_rel_path}`\n\n"
                 "👆 **Step 2:** Select another file and click "
                 "**Compare to Reference** to see the comparison.\n\n"
                 "You can compare multiple files to this reference without resetting."
@@ -1783,12 +1809,16 @@ def main():
                         # Display comparison results
                         st.subheader("🔄 Comparison Results")
 
-                        # File info
+                        # File info with relative paths
+                        try:
+                            cmp_rel_path = cmp_file.relative_to(base_dir)
+                        except ValueError:
+                            cmp_rel_path = cmp_file.name
                         col1, col2 = st.columns(2)
                         with col1:
-                            st.write(f"**Reference:** `{ref_file.name}`")
+                            st.write(f"**Reference:** `{ref_rel_path}`")
                         with col2:
-                            st.write(f"**Comparison:** `{cmp_file.name}`")
+                            st.write(f"**Comparison:** `{cmp_rel_path}`")
 
                         st.write(f"**Format:** {ref_fmt.upper()}")
                         st.write(f"**Tolerance:** {tolerance:.2e}")

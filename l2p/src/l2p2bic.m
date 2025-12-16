@@ -141,8 +141,13 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
     new_idx = current_idx + n_new;
 
     % Expand arrays if needed (in chunks)
-    if new_idx > max_size,
+    % Note: expand to new_idx + chunk_size to ensure we have room for this batch
+    % plus some buffer, avoiding the boundary bug where positions at exact
+    % chunk multiples could remain as zeros
+    while new_idx > max_size
       max_size = max_size + chunk_size;
+    end
+    if length(lon) < max_size
       lon(max_size) = 0;
       lat(max_size) = 0;
       hour(max_size) = 0;
@@ -150,7 +155,7 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
       bias(max_size) = 0;
       rms(max_size) = 0;
       flag(max_size) = 0;
-    end;
+    end
 
     % Store data
     idx_range = (current_idx+1):new_idx;
@@ -195,6 +200,38 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
   bias = bias(valid_mask);
   rms = rms(valid_mask);
   flag = flag(valid_mask);
+
+  % Filter to only include data within the target day (0 <= hour < 24)
+  % This matches historical behavior where only same-day observations are included
+  day_mask = (hour >= 0) & (hour < 24);
+  n_outside_day = sum(~day_mask);
+  if n_outside_day > 0
+      fprintf('  Filtering %d observations outside target day (hour < 0 or >= 24)\n', n_outside_day);
+  end
+
+  lon = lon(day_mask);
+  lat = lat(day_mask);
+  hour = hour(day_mask);
+  sst = sst(day_mask);
+  bias = bias(day_mask);
+  rms = rms(day_mask);
+  flag = flag(day_mask);
+
+  % Safety check: filter out any zero-filled entries from pre-allocation
+  % that may have slipped through (quality=0 with lat=lon=0)
+  quality_mask = (flag >= minConfValue);
+  n_low_quality = sum(~quality_mask);
+  if n_low_quality > 0
+      fprintf('  Warning: Filtering %d low-quality observations (quality < %d)\n', n_low_quality, minConfValue);
+  end
+
+  lon = lon(quality_mask);
+  lat = lat(quality_mask);
+  hour = hour(quality_mask);
+  sst = sst(quality_mask);
+  bias = bias(quality_mask);
+  rms = rms(quality_mask);
+  flag = flag(quality_mask);
 
 
 %% compare against an existing bic file:
