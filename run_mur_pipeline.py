@@ -311,11 +311,9 @@ class MUROrchestrator:
         """
         Download L2P satellite data for a sensor/day.
 
-        Production: Hourly cron jobs call podaac-data-subscriber
-        Test: Calls earthaccess (S3 in-region access) or podaac-data-subscriber
-
-        This mimics the separation between data download and processing in
-        the production system.
+        Uses podaac-data-subscriber (HTTP) by default, matching production cron jobs.
+        This ensures CMR temporal filtering returns granules based on observation time,
+        producing results consistent with historical production outputs.
 
         Args:
             sensor: Sensor name (AMSR2R, MODISA, etc.)
@@ -326,8 +324,6 @@ class MUROrchestrator:
         Returns:
             True if successful
         """
-        import earthaccess
-
         config = self.config["l2p"]
         sensor_config = config["sensors"][sensor]
 
@@ -342,93 +338,51 @@ class MUROrchestrator:
             self.stats["l2p_download"]["skipped"] += 1
             return True
 
-        # Download via earthaccess (S3 in-region access)
-        # Set timeout for download operations (5 minutes per collection)
-        DOWNLOAD_TIMEOUT = 300  # seconds
+        # Download via podaac-data-subscriber (matches production cron jobs)
+        # This uses CMR temporal filtering based on observation time
+        sd = f"{data_day}T00:00:00Z"
+        ed = f"{data_day}T23:59:59Z"
 
-        try:
-            import os
+        downloads = []
+        for collection in sensor_config["collection_name"]:
+            logger.info(f"    → Downloading {sensor} data: {data_day} ({collection})")
 
-            # Set NETRC environment variable if custom path provided
-            if self.netrc_path:
-                os.environ["NETRC"] = str(self.netrc_path.absolute())
-                logger.debug(f"Using custom .netrc path: {self.netrc_path}")
-
-            logger.info(f"    → Authenticating with NASA Earthdata...")
             try:
-                with timeout(30, "Authentication timed out after 30 seconds"):
-                    auth = earthaccess.login(strategy="netrc")
-                logger.debug(f"      ✓ Authentication successful")
-            except TimeoutError as e:
-                logger.error(f"    ✗ {e}")
-                logger.error("    → NASA Earthdata authentication is unresponsive")
-                logger.error("    → Check network connectivity to urs.earthdata.nasa.gov")
+                cmd = [
+                    "podaac-data-subscriber",
+                    "-c", collection,
+                    "-d", str(download_dir),
+                    "-e", ".nc",
+                    "-sd", sd,
+                    "-ed", ed,
+                    "--verbose"
+                ]
+
+                subprocess.run(cmd, check=True)
+
+                # Count downloaded files
+                files = list(download_dir.glob("*.nc"))
+                downloads.extend(files)
+                logger.info(f"      ✓ Downloaded {len(files)} files")
+
+            except subprocess.CalledProcessError as e:
+                logger.error(f"    ✗ Download failed for {collection}: {e}")
+                # Continue with next collection
+                continue
+            except FileNotFoundError:
+                logger.error("    ✗ podaac-data-subscriber not found in PATH")
+                logger.error("    → Install with: pip install podaac-data-subscriber")
                 self.stats["l2p_download"]["failed"] += 1
                 return False
 
-            sd = f"{data_day}T00:00:00Z"
-            ed = f"{data_day}T23:59:59Z"
-
-            downloads = []
-            for collection in sensor_config["collection_name"]:
-                logger.info(f"    → Searching for {sensor} data: {data_day} ({collection})")
-
-                try:
-                    # Search for data with timeout
-                    with timeout(60, f"Search timed out after 60 seconds for {collection}"):
-                        results = earthaccess.search_data(
-                            short_name=collection,
-                            temporal=(sd, ed),
-                            cloud_hosted=True
-                        )
-
-                    logger.debug(f"      Found {len(results)} granules")
-
-                    if results:
-                        logger.info(f"    → Downloading {len(results)} files from {collection}...")
-
-                        # Download with timeout
-                        with timeout(DOWNLOAD_TIMEOUT, f"Download timed out after {DOWNLOAD_TIMEOUT}s"):
-                            store = earthaccess.Store(auth)
-                            files = store.get(results, local_path=download_dir)
-                            downloads.extend(files)
-
-                        logger.info(f"      ✓ Downloaded {len(files)} files")
-                    else:
-                        logger.debug(f"      No data found for {collection}")
-
-                except TimeoutError as e:
-                    logger.error(f"    ✗ {e}")
-                    logger.error(f"    → Skipping {collection} due to timeout")
-                    # Continue with next collection instead of failing completely
-                    continue
-
-            if downloads:
-                self.stats["l2p_download"]["success"] += 1
-                logger.info(f"    ✓ Total downloaded: {len(downloads)} files")
-                return True
-            else:
-                logger.warning(f"    ⚠ No data found for {sensor} {data_day}")
-                self.stats["l2p_download"]["skipped"] += 1
-                return True  # Not an error - data may not exist
-
-        except TimeoutError as e:
-            logger.error(f"    ✗ Download operation timed out: {e}")
-            logger.error("    → Try again later or check network connectivity")
-            self.stats["l2p_download"]["failed"] += 1
-            return False
-        except Exception as e:
-            logger.error(f"    ✗ Download failed for {sensor} {data_day}: {e}")
-            # Check for common authentication issues
-            error_str = str(e)
-            if "invalid_credentials" in error_str or "Authentication" in error_str:
-                logger.error("    → Check your ~/.netrc file has valid NASA Earthdata credentials")
-                logger.error("    → Format should be:")
-                logger.error("       machine urs.earthdata.nasa.gov")
-                logger.error("           login YOUR_USERNAME")
-                logger.error("           password YOUR_PASSWORD")
-            self.stats["l2p_download"]["failed"] += 1
-            return False
+        if downloads:
+            self.stats["l2p_download"]["success"] += 1
+            logger.info(f"    ✓ Total downloaded: {len(downloads)} files")
+            return True
+        else:
+            logger.warning(f"    ⚠ No data found for {sensor} {data_day}")
+            self.stats["l2p_download"]["skipped"] += 1
+            return True  # Not an error - data may not exist
 
     # ========================================================================
     # Stage 3: L2P Container Processing
