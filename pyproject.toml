@@ -58,8 +58,8 @@ include = [
     "run_web_viewer.py",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",
 ]
