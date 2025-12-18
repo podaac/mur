@@ -385,8 +385,10 @@ class BICReader(DataFileReader):
         )
 
         # Unscale
+        # Note: offset in file is 273.15 (used for K->C conversion during write)
+        # We do NOT add it back - we want Celsius output to match other formats
         hour = hour_raw * hour_scale
-        sst = sst_raw * sst_scale + offset
+        sst = sst_raw * sst_scale  # Returns Celsius (not Kelvin)
         bias = bias_raw * sst_scale
         rms = rms_raw * sst_scale
 

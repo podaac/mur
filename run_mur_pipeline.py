@@ -726,11 +726,11 @@ class MUROrchestrator:
             cmd.append("--rm")
         cmd.extend([
             "--name", container_name,       # Named for explicit cleanup
-            "--platform", "linux/amd64",  # Ensure compatibility
-            "--memory=10g",
-            "--memory-swap=12g",
+            "--platform", "linux/amd64",    # Ensure compatibility
+            "--memory=64g",                 # Requires a lot of memory
+            "--memory-swap=70g",
             "--shm-size=2g",                # MATLAB Runtime cache
-            "--cpus=4.0",                   # OpenMP parallelization
+            "--cpus=6.0",                   # OpenMP parallelization
         ])
 
         # Pass simulated date to container if set (for historical reprocessing)
@@ -762,8 +762,8 @@ class MUROrchestrator:
         if sensor_arg:
             cmd.append(sensor_arg)
 
-        # MRVA timeout: 8 hours (28800 seconds)
-        MRVA_TIMEOUT = 28800
+        # MRVA timeout: 16 hours
+        MRVA_TIMEOUT = 576000
         MEMORY_CHECK_INTERVAL = 30  # seconds
 
         try:
