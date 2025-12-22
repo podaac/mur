@@ -3,9 +3,14 @@ function outname=makehiresgrid(year,day,sensorlist, ...
                                bipdir,outname,hiressensorlist, ...
                                lon0,lat0,dlon,dlat,nlon,nlat)
 
-grddir = '/home/tmchin/nas/grd';  % result destination.
+% Container path mapping
+grddir = '/data/cache/grd';  % result destination (container path)
+fortran_bin = '/opt/mrva/bin';  % Fortran executables location
 
-if ~exist('bipdir','dir'), bipdir='./bip'; end;
+% Ensure grddir exists
+if ~exist(grddir, 'dir'), mkdir(grddir); end
+
+if ~exist('bipdir','var'), bipdir='/data/cache/bip'; end;
 
 if ~exist('outname','var'), 
   %outname=sprintf('hiresdt_%04d_%03d.grd',year,day); 
@@ -54,6 +59,6 @@ fprintf(f,' $end\n');
 fclose(f);
 
 %% run the fortran code (faster than makehiresgrid_matlab.m):
-system('./makehiresgrid');
+system([fortran_bin, '/makehiresgrid']);
 
 

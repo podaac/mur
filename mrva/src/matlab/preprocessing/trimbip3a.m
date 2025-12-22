@@ -1,7 +1,11 @@
 %% trimbip3a.m
 function refcspfile=trimbip3a(sensors,year,day,bipdir,region,MURcsp)
 
-%% same as trimbip.m (see just below), 
+% Container path configuration
+fortran_bin = '/opt/mrva/bin';
+L4_reference_root = '/data/static-resources/L4';
+
+%% same as trimbip.m (see just below),
 %% except that refcspfile is linked to MURcsp, if "MURcsp" is given.
 
 %% 1) converts a global GHRSST L4 file into a bip file;
@@ -49,7 +53,7 @@ sensparam={ % sensor_name, multiplier, wgtcutoff
 
 %% background SST field (refcspfile):
 
-L4dir='/store/ghrsst/open/data/L4';
+L4dir=L4_reference_root;
 
 L4list={  % choose only one:
 'RV1','GLOB/NCDC/AVHRR_OI','*fv02*.bz2','bzcat'
@@ -130,7 +134,7 @@ else,  %% use L4 reference:
       fclose(f);
 
     % run mrva:
-    ! /opt/mrva/bin/mrva > log.ref;
+    system([fortran_bin, '/mrva > log.ref']);
     eval(sprintf('!mv mrva.c%02d %s',LF,refcspfile));
     eval(sprintf('!rm -f mrva_001.a%02d',LF));
     eval(sprintf('!rm -f fort.%02d',LF+80));
@@ -166,7 +170,6 @@ end;
     fclose(f);
 
     % run trimbip:
-    %! trimbip;
-    ! /opt/mrva/bin/trimbip3;
+    system([fortran_bin, '/trimbip3']);
 
 

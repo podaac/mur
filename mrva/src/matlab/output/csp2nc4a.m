@@ -1,6 +1,13 @@
 %% csp2nc4a.m
+%
+% Container-compatible version for MRVA processing
+%
 
-
+%% Container path configuration
+fortran_bin = '/opt/mrva/bin';           % Fortran executables
+landice_root = '/data/input/landice';    % Landice input data
+grids_root = '/data/static-resources/grids';  % Static grid files
+tmp_root = '/tmp';                        % Temporary files
 
 %% Inputs:
 
@@ -102,40 +109,40 @@ switch version,
     resolution='0.011 degrees'; % for metadata.
     resfloat=single(0.011);
     if iceIncluded,
-      gridfile='/home/tmchin/nas/landice/%04d/landice_%04d_%03d.gds.gz';
-      tmpgridfile='/tmp/landice_%04d_%03d.gds';
-      icefiles='/nas/ftp/mur_sst/tmchin/landice/%04d/icefiles_%04d_%03d.txt';
+      gridfile=[landice_root, '/%04d/landice_%04d_%03d.gds.gz'];
+      tmpgridfile=[tmp_root, '/landice_%04d_%03d.gds'];
+      icefiles=[landice_root, '/%04d/icefiles_%04d_%03d.txt'];
     else,
-      gridfile='/home/tmchin/grids/maskGlob1km.gds';
+      gridfile=[grids_root, '/maskGlob1km.gds'];
     end;
   case '04',
     ncsubdir=[ncsubdir,'/v4'];  % destination directory (will be created).
     resolution='0.01 degrees';  % for metadata.
     resfloat=single(0.01);
     if iceIncluded,
-      gridfile='/nas2/landice/%04d/landiceP01_%04d_%03d.gds.gz';
-      tmpgridfile='/tmp/landice_%04d_%03d.gds';
-      icefiles='/nas/ftp/mur_sst/tmchin/landice/%04d/icefiles_%04d_%03d.txt';
+      gridfile=[landice_root, '/%04d/landiceP01_%04d_%03d.gds.gz'];
+      tmpgridfile=[tmp_root, '/landice_%04d_%03d.gds'];
+      icefiles=[landice_root, '/%04d/icefiles_%04d_%03d.txt'];
     else,
-      gridfile='/home/tmchin/grids/maskGLOBp01deg.gds';
+      gridfile=[grids_root, '/maskGLOBp01deg.gds'];
     end;
   case '04.1',
     ncsubdir=[ncsubdir,'/v4'];  % destination directory (will be created).
     resolution='0.01 degrees';  % for metadata.
     resfloat=single(0.01);
     if iceIncluded,
-      gridfile='/nas2/landice/%04d/landiceP01_%04d_%03d.gds.gz';
-      tmpgridfile='/tmp/landice_%04d_%03d.gds';
-      icefiles='/nas/ftp/mur_sst/tmchin/landice/%04d/icefiles_%04d_%03d.txt';
+      gridfile=[landice_root, '/%04d/landiceP01_%04d_%03d.gds.gz'];
+      tmpgridfile=[tmp_root, '/landice_%04d_%03d.gds'];
+      icefiles=[landice_root, '/%04d/icefiles_%04d_%03d.txt'];
     else,
-      gridfile='/home/tmchin/grids/maskGLOBp01deg.gds';
+      gridfile=[grids_root, '/maskGLOBp01deg.gds'];
     end;
   otherwise,
     ncsubdir=[ncsubdir,'/v0'];  % destination directory (will be created).
     resolution='0.088 degrees'; % for metadata.
     resfloat=single(0.088);
-    gridfile='/home/tmchin/grids/maskGlob8km.gds';
-    icefiles='/nas/ftp/mur_sst/tmchin/landice/%04d/icefiles_%04d_%03d.txt';
+    gridfile=[grids_root, '/maskGlob8km.gds'];
+    icefiles=[landice_root, '/%04d/icefiles_%04d_%03d.txt'];
     iceIncluded=0;  % force no ice.
 end;
 
@@ -267,7 +274,7 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
     fprintf(f,' $end\n');
     fclose(f);
 
-    ! spgrid;
+    system([fortran_bin, '/spgrid']);
 
     f=fopen(sprintf('./fort.%d',L+180),'r');
     % Read dimensions
@@ -310,7 +317,7 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
       fprintf(f,' $end\n');
       fclose(f);
 
-      ! spgrid;
+      system([fortran_bin, '/spgrid']);
 
       f=fopen(sprintf('./fort.%d',Lerr+180),'r');
       % Read dimensions

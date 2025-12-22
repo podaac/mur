@@ -1,8 +1,11 @@
 function [sst,lon,lat,dev]=readSeasonal(doy,vfv);
 % [sst,lon,lat,dev]=readNC(ncfile,vfv);
 
+% Container path for seasonal climatology data
+seasonal_root = '/data/static-resources/seasonal';
+
 if doy==366, doy=365; end;
-ncfile = sprintf('/home/tmchin/nas/seasonal/mur_%03d.nc',doy);
+ncfile = sprintf('%s/mur_%03d.nc', seasonal_root, doy);
 
 
 % default fill value:

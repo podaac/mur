@@ -2,9 +2,9 @@
   "description": "MUR SST Pre-processing Configuration",
   "landice": {
     "container_image": "mur-landice:latest",
-    "input_dir": "./testing/preprocessing/inputs/landice",
+    "input_dir": "./testing/static-resources",
     "output_dir": "./testing/preprocessing/output/landice",
-    "description": "Land/Ice mask generation from OSI-SAF data"
+    "description": "Land/Ice mask generation from OSI-SAF data. Input directory contains static grids and mat transformation files."
   },
   "l2p": {
     "container_image": "mur-l2p:latest",
@@ -91,6 +91,7 @@
     "input_dir_bic": "./testing/preprocessing/output/l2p",
     "input_dir_iquam": "./testing/preprocessing/output/iquam",
     "input_dir_landice": "./testing/preprocessing/output/landice",
+    "static_resources_dir": "./testing/static-resources",
     "output_dir_csp": "./testing/mrva/output/csp",
     "output_dir_netcdf": "./testing/mrva/output/netcdf",
     "cache_dir": "./testing/mrva/cache",

@@ -429,7 +429,7 @@ function mrva4com_container(year, day, realtime, varargin)
 
     % Execute Fortran MRVA
     tic;
-    [status, result] = system('mrva');
+    [status, result] = system([fortran_bin, '/mrva']);
     elapsed = toc;
 
     if status == 99
@@ -542,7 +542,9 @@ function mrva4com_container(year, day, realtime, varargin)
 
         % Call csp2nc4a directly (synchronous for container)
         try
-            % Set up paths for csp2nc4a
+            % Set up paths for csp2nc4a in base workspace
+            % Note: csp2nc4a is a script, so we must run it in the same
+            % workspace where variables are assigned (base workspace)
             assignin('base', 'ncdir', netcdf_dir);
             assignin('base', 'cspdir', cspdir);
             assignin('base', 'cspfmt', cspfmt);
@@ -556,9 +558,9 @@ function mrva4com_container(year, day, realtime, varargin)
                 assignin('base', 'hiresgridfile', hiresgridfile);
             end
 
-            % Execute NetCDF generation
+            % Execute NetCDF generation in base workspace where variables were assigned
             tic;
-            csp2nc4a;
+            evalin('base', 'csp2nc4a');
             elapsed = toc;
 
             fprintf('  ✓ NetCDF generation completed in %.1f minutes\n\n', elapsed/60);
