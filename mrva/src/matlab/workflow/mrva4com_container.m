@@ -540,30 +540,34 @@ function mrva4com_container(year, day, realtime, varargin)
             mkdir(logdir);
         end
 
-        % Call csp2nc4a directly (synchronous for container)
+        % Call csp2nc4a as a function with config struct
         try
-            % Set up paths for csp2nc4a in base workspace
-            % Note: csp2nc4a is a script, so we must run it in the same
-            % workspace where variables are assigned (base workspace)
-            assignin('base', 'ncdir', netcdf_dir);
-            assignin('base', 'cspdir', cspdir);
-            assignin('base', 'cspfmt', cspfmt);
-            assignin('base', 'L', outL4);
-            assignin('base', 'region', region);
-            assignin('base', 'hourAna', hourAna);
-            assignin('base', 'whichdays', {{year, day:day}});
-            assignin('base', 'realtime', realtime);
+            % Build configuration struct for csp2nc4a
+            nc_config = struct();
+            nc_config.ncdir = netcdf_dir;
+            nc_config.cspdir = cspdir;
+            nc_config.cspfmt = cspfmt;
+            nc_config.L = outL4;
+            nc_config.region = region;
+            nc_config.hourAna = hourAna;
+            nc_config.whichdays = {year, day:day};
+            nc_config.realtime = realtime;
 
+            % Add optional high-res grid file if available
             if hiresgridFlag && ~isempty(hiresgridfile)
-                assignin('base', 'hiresgridfile', hiresgridfile);
+                nc_config.hiresgridfile = hiresgridfile;
             end
 
-            % Execute NetCDF generation in base workspace where variables were assigned
+            % Execute NetCDF generation
             tic;
-            evalin('base', 'csp2nc4a');
+            status = csp2nc4a(nc_config);
             elapsed = toc;
 
-            fprintf('  ✓ NetCDF generation completed in %.1f minutes\n\n', elapsed/60);
+            if status == 0
+                fprintf('  ✓ NetCDF generation completed in %.1f minutes\n\n', elapsed/60);
+            else
+                warning('NetCDF generation returned non-zero status: %d', status);
+            end
 
         catch ME
             warning('NetCDF generation failed: %s', ME.message);

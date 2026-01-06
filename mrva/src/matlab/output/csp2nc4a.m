@@ -1,40 +1,124 @@
-%% csp2nc4a.m
+function status = csp2nc4a(config)
+%CSP2NC4A Generate NetCDF4 output from CSP coefficient files
 %
 % Container-compatible version for MRVA processing
 %
+% INPUTS:
+%   config - struct with fields:
+%     Required:
+%       .ncdir      - Output directory for NetCDF files
+%       .cspdir     - Source directory for CSP files
+%       .cspfmt     - CSP filename format string (e.g., '%04d%02d%02d%02d_MRVA4_%s')
+%       .L          - Coefficient level (e.g., 11)
+%       .region     - Region identifier (e.g., 'Global')
+%       .hourAna    - Analysis hour UTC (e.g., 9)
+%       .whichdays  - Cell array of {year, day_range}
+%       .realtime   - NRT flag (0 or 1)
+%     Optional:
+%       .hiresgridfile  - High-res distance grid path (default: none)
+%       .fortran_bin    - Fortran bin directory (default: /opt/mrva/bin)
+%       .landice_root   - Landice data directory (default: /data/input/landice)
+%       .grids_root     - Static grids directory (default: /data/static-resources/grids)
+%       .tmp_root       - Temp directory (default: /tmp)
+%       .version        - Product version (default: '04.1')
+%       .podaacpush     - PODAAC push flag (default: 1)
+%       .nc4d           - NetCDF4 deflation level (default: 7)
+%
+% OUTPUTS:
+%   status - 0 on success, non-zero on failure
+%
+% Example:
+%   cfg = struct();
+%   cfg.ncdir = '/data/output/netcdf';
+%   cfg.cspdir = '/data/output/csp/2025';
+%   cfg.cspfmt = '%04d%02d%02d%02d_MRVA4_%s';
+%   cfg.L = 11;
+%   cfg.region = 'Global';
+%   cfg.hourAna = 9;
+%   cfg.whichdays = {2025, 315:315};
+%   cfg.realtime = 1;
+%   status = csp2nc4a(cfg);
 
-%% Container path configuration
-fortran_bin = '/opt/mrva/bin';           % Fortran executables
-landice_root = '/data/input/landice';    % Landice input data
-grids_root = '/data/static-resources/grids';  % Static grid files
-tmp_root = '/tmp';                        % Temporary files
+status = 0;  % Initialize success status
 
-%% Inputs:
+%% Validate required parameters
+required_fields = {'ncdir', 'cspdir', 'cspfmt', 'L', 'region', 'hourAna', 'whichdays', 'realtime'};
+for i = 1:length(required_fields)
+    if ~isfield(config, required_fields{i})
+        error('csp2nc4a:MissingParameter', 'Required parameter ''%s'' not provided in config struct', required_fields{i});
+    end
+end
 
-%ncdir='/tmp';  % destination directory (must exist).
-%ncdir='/nas/ftp/mur_sst/tmchin/ssta/L4';  % destination directory (must exist).
+%% Extract required parameters from config
+ncdir = config.ncdir;
+cspdir = config.cspdir;
+cspfmt = config.cspfmt;
+L = config.L;
+region = config.region;
+hourAna = config.hourAna;
+whichdays = config.whichdays;
+realtime = config.realtime;
 
-%cspdir='/nas4/cyc4out/yyyy';  % source directory.
-%cspfmt='%04d%02d%02d%02d_MRVA4_%s';  % source file body name format.
+%% Extract optional parameters with defaults
 
+% Container path configuration
+if isfield(config, 'fortran_bin')
+    fortran_bin = config.fortran_bin;
+else
+    fortran_bin = '/opt/mrva/bin';
+end
 
-%L=11; region='Global'; hourAna=9;
+if isfield(config, 'landice_root')
+    landice_root = config.landice_root;
+else
+    landice_root = '/data/input/landice';
+end
 
-% year=2014; day=349;
-%whichdays={
-%2012,1:2
-%};
-%realtime=0;
+if isfield(config, 'grids_root')
+    grids_root = config.grids_root;
+else
+    grids_root = '/data/static-resources/grids';
+end
 
+if isfield(config, 'tmp_root')
+    tmp_root = config.tmp_root;
+else
+    tmp_root = '/tmp';
+end
+
+% Optional high-res grid file (no default - truly optional)
+if isfield(config, 'hiresgridfile')
+    hiresgridfile = config.hiresgridfile;
+    hiresgridfile_provided = true;
+else
+    hiresgridfile_provided = false;
+end
+
+% Product version
+if isfield(config, 'version')
+    version = config.version;
+else
+    version = '04.1';
+end
+
+% PODAAC push flag
+if isfield(config, 'podaacpush')
+    podaacpush = config.podaacpush;
+else
+    podaacpush = 1;
+end
+
+% NetCDF4 deflation level
+if isfield(config, 'nc4d')
+    nc4d = config.nc4d;
+else
+    nc4d = 7;
+end
 
 %%%%%
 
 
 %% Destination:
-
-podaacpush=1;  % set this flag to push into PODAAC JPL-MUR-RTO depository.
-%if realtime, podaacpush=1; end;
-
 
 ncsubdir='GLOB/JPL/MUR';  % destination directory (will be created).
 
@@ -43,18 +127,11 @@ ncsubdir='GLOB/JPL/MUR';  % destination directory (will be created).
     %%   GDS 2.0:
     %%     yyyymmddhhmmss-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-v02.0-fv01.0.nc
 
-version='04.1'; % is used to chose landmask & in both filename and metadata.
-%version='04'; % is used to chose landmask & in both filename and metadata.
-%version='03'; % is used to chose landmask & in both filename and metadata.
-
-%namebody=sprintf('-JPL-L4UHfnd-GLOB-v01-fv%s-MUR',version);  % GDS-1.x
 namebody=sprintf('%02d0000-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-v02.0-fv%s',hourAna,version);  % GDS-2.0.
 
-%entryID='JPL-L4UHfnd-GLOB-MUR';  % for metadata.
 entryID=['MUR-JPL-L4-GLOB-v',version]; % for metadata.
 
 %% creation date (today):
-%cdy=2011; cdm=2; cdd=8;  % "creation date" (today), for metadata only.
 cdy=str2num(datestr(datenum(date),'yyyy'));
 cdm=str2num(datestr(datenum(date),'mm'));
 cdd=str2num(datestr(datenum(date),'dd'));
@@ -68,7 +145,6 @@ cnS=str2num(datestr(datenum(now),'SS'));
 %% Grid boundary and trimming:
 
 box=[-180,180,-90,90];  trimGrid=0;  % for metadata and trimming.
-%box=[-180,180,-79,89];  trimGrid = 1;  % for metadata and trimming.
 
   % If trimGrid is set, use "box" to trim each variable array.
   % However, netCDF4 compresses monotony well; so no trimming is fine.
@@ -79,8 +155,6 @@ box=[-180,180,-90,90];  trimGrid=0;  % for metadata and trimming.
 
 %% error info:
 
-%Lerr=6;  uave=0.6; udev=1.1;  % uncertainty data scale, mean, and std.
-%Lerr=7;  uave=1.3; udev=1.7;  % uncertainty data scale, mean, and std.
 Lerr=8;  uave=1.7; udev=2.0;  % uncertainty data scale, mean, and std.
 targetMean=0.5;
 targetMin=0.3;
@@ -150,8 +224,7 @@ end;
 
 %% file/data compression:
 
-nc4d=7;  % netcdf4 "deflation level".
-compression='';  
+compression='';
 
 switch compression,
   case '', ctail='';
@@ -189,6 +262,7 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
     fprintf(1,'searching root directory %s\n',ncdir);
     if ~exist(ncdir,'dir'),
       fprintf(1,'*** Missing destination directory %s ***\n',ncdir);
+      status = 1;
       return;
     end;
     ddir=sprintf('%s/%s',ncdir,ncsubdir);
@@ -204,8 +278,6 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
     if iceIncluded,
       gridfilegz=sprintf(gridfile,year,year,day);
       tmpmaskfile=sprintf(tmpgridfile,year,day);
-%      eval(sprintf('!zcat -f %s > tmp.gds',gridfilegz));
-%      landmaskfile='tmp.gds';
       eval(sprintf('!zcat -f %s > %s',gridfilegz,tmpmaskfile));
       landmaskfile=tmpmaskfile;
       fprintf(1,'loading %s\n',landmaskfile);
@@ -239,7 +311,7 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
 
     %% hires grid data for dt_1km_data variable:
     if hiresgridIncluded,
-      if exist('hiresgridfile','var'),  % should have been made by mrva4com.m.
+      if hiresgridfile_provided,  % should have been passed via config
           if exist(hiresgridfile,'file'),
             f=fopen(hiresgridfile,'r');
             % Read hires grid dimensions
@@ -339,7 +411,6 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
       err=single(err);
     end;
 
-%    ! rm -f tmp.gds;
     system( sprintf('rm -f %s',tmpmaskfile) );
 
     %% revert "shore-line" flag values to "land"
@@ -368,15 +439,11 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
     %% *.nc and *.xml file names:
     [d,m,y]=julian(day,year);
     ncbasename=sprintf('%04d%02d%02d%s.nc',y,m,d,namebody);
-%    ncbasename=sprintf('%04d%02d%02d%s.nc4',y,m,d,namebody);
     ncname=sprintf('%s/%s',ddir,ncbasename);
     xmlbasename=sprintf('FR-%04d%02d%02d%s.xml',y,m,d,namebody);
     xmlname=sprintf('%s/%s',ddir,xmlbasename);
 
     %% File open:
-    %% mode='64bit_offset'; % for files larger than 2Gb.
-    %% mode='noclobber'; % do not overwrite existing file.
-      %mode=0;  % overwrites existing file.
       mode = netcdf.getConstant('NETCDF4');
       ncid = netcdf.create(ncname, mode);
 
@@ -394,7 +461,6 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
         v0 = netcdf.defVar(ncid,'time',4,[d0]);
         netcdf.putAtt(ncid,v0,'long_name','reference time of sst field');
         netcdf.putAtt(ncid,v0,'standard_name','time');
-%        netcdf.putAtt(ncid,v0,'coverage_content_type','coordinate');
         netcdf.putAtt(ncid,v0,'axis','T');
         netcdf.putAtt(ncid,v0,'units','seconds since 1981-01-01 00:00:00 UTC');
         netcdf.putAtt(ncid,v0,'comment','Nominal time of analyzed fields');
@@ -403,7 +469,6 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
         netcdf.defVarDeflate(ncid,v1,true,true,nc4d);
         netcdf.putAtt(ncid,v1,'long_name','latitude');
         netcdf.putAtt(ncid,v1,'standard_name','latitude');
-%        netcdf.putAtt(ncid,v1,'coverage_content_type','coordinate');
         netcdf.putAtt(ncid,v1,'axis','Y');
         netcdf.putAtt(ncid,v1,'units','degrees_north');
         netcdf.putAtt(ncid,v1,'valid_min',single(box(3)));
@@ -414,7 +479,6 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
         netcdf.defVarDeflate(ncid,v2,true,true,nc4d);
         netcdf.putAtt(ncid,v2,'long_name','longitude');
         netcdf.putAtt(ncid,v2,'standard_name','longitude');
-%        netcdf.putAtt(ncid,v2,'coverage_content_type','coordinate');
         netcdf.putAtt(ncid,v2,'axis','X');
         netcdf.putAtt(ncid,v2,'units','degrees_east');
         netcdf.putAtt(ncid,v2,'valid_min',single(box(1)));
@@ -426,9 +490,7 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
         netcdf.defVarDeflate(ncid,v3,true,true,nc4d);
         netcdf.putAtt(ncid,v3,'long_name','analysed sea surface temperature');
         netcdf.putAtt(ncid,v3,'standard_name','sea_surface_foundation_temperature');
-%        netcdf.putAtt(ncid,v3,'coverage_content_type','physicalMeasurement');
         netcdf.putAtt(ncid,v3,'units','kelvin');
-%        netcdf.putAtt(ncid,v3,'_FillValue',int16(-32768));
         netcdf.defVarFill(ncid,v3,false,int16(-32768));
         netcdf.putAtt(ncid,v3,'add_offset',sstoffset);
         netcdf.putAtt(ncid,v3,'scale_factor',sstscale);
@@ -443,14 +505,12 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
         netcdf.putAtt(ncid,v3,'coordinates','lon lat');
         netcdf.putAtt(ncid,v3,'source',sourcedata);
 
-      if errIncluded, 
+      if errIncluded,
         v4 = netcdf.defVar(ncid,'analysis_error',3,[d2,d1,d0]);
         netcdf.defVarChunking(ncid,v4,"CHUNKED",[2047 1023 1]);
         netcdf.defVarDeflate(ncid,v4,true,true,nc4d);
         netcdf.putAtt(ncid,v4,'long_name','estimated error standard deviation of analysed_sst');
-%        netcdf.putAtt(ncid,v4,'coverage_content_type','qualityInformation');
         netcdf.putAtt(ncid,v4,'units','kelvin');
-%        netcdf.putAtt(ncid,v4,'_FillValue',int16(-32768));
         netcdf.defVarFill(ncid,v4,false,int16(-32768));
         netcdf.putAtt(ncid,v4,'add_offset',erroffset);
         netcdf.putAtt(ncid,v4,'scale_factor',errscale);
@@ -464,17 +524,11 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
         netcdf.defVarChunking(ncid,v5,"CHUNKED",[2047 1023 1]);
         netcdf.defVarDeflate(ncid,v5,true,true,nc4d);
         netcdf.putAtt(ncid,v5,'long_name','sea/land field composite mask');
-%        netcdf.putAtt(ncid,v5,'_FillValue',int8(-128));
-%        netcdf.putAtt(ncid,v5,'coverage_content_type','referenceInformation');
         netcdf.defVarFill(ncid,v5,false,int8(-128));
         netcdf.putAtt(ncid,v5,'valid_min',int8(1));
         netcdf.putAtt(ncid,v5,'valid_max',int8(31));
-        %netcdf.putAtt(ncid,v5,'flag_values',int8([1,2,3,5,9,11,13]));
-        %netcdf.putAtt(ncid,v5,'flag_meanings','1=open-sea; 2=land; 3=coast/shore; 5=open-lake; 9=open-sea with ice in the grid; 11=coast/shore with ice in the grid; 13=open-lake with ice in the grid');
         netcdf.putAtt(ncid,v5,'flag_masks',int8([1,2,4,8,16]));
-%        netcdf.putAtt(ncid,v5,'flag_values',int8([1,2,5,9,13]));
         netcdf.putAtt(ncid,v5,'flag_meanings','open_sea land open_lake open_sea_with_ice_in_the_grid open_lake_with_ice_in_the_grid');
-%        netcdf.putAtt(ncid,v5,'flag_meanings','1=open-sea, 2=land, 5=open-lake, 9=open-sea with ice in the grid, 13=open-lake with ice in the grid');
         netcdf.putAtt(ncid,v5,'comment','mask can be used to further filter the data.');
         netcdf.putAtt(ncid,v5,'coordinates','lon lat');
         netcdf.putAtt(ncid,v5,'source','GMT "grdlandmask", ice flag from sea_ice_fraction data');
@@ -487,19 +541,12 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
         netcdf.defVarDeflate(ncid,v6,true,true,nc4d);
         netcdf.putAtt(ncid,v6,'long_name','sea ice area fraction');
         netcdf.putAtt(ncid,v6,'standard_name','sea_ice_area_fraction');
-%        netcdf.putAtt(ncid,v6,'coverage_content_type','auxiliaryInformation');
-        %netcdf.putAtt(ncid,v6,'units','fraction (between 0 and 1)');
-        %netcdf.putAtt(ncid,v6,'units','1 (dimensionless)');
-        %netcdf.putAtt(ncid,v6,'units','1');
-        %netcdf.putAtt(ncid,v6,'units','percent');
-%        netcdf.putAtt(ncid,v6,'_FillValue',int8(-128));
         netcdf.defVarFill(ncid,v6,false,int8(-128));
         netcdf.putAtt(ncid,v6,'add_offset',iceoffset);
         netcdf.putAtt(ncid,v6,'scale_factor',icescale);
         netcdf.putAtt(ncid,v6,'valid_min',int8(0));
         netcdf.putAtt(ncid,v6,'valid_max',int8(100));
         netcdf.putAtt(ncid,v6,'source','EUMETSAT OSI-SAF, copyright EUMETSAT');
-        %netcdf.putAtt(ncid,v6,'comment','ice data interpolated by a nearest neighbor approach.');
         comment_string = sprintf('ice fraction is a dimensionless quantity between 0 and 1; it has been interpolated by a nearest neighbor approach; EUMETSAT OSI-SAF files used: %s.',ice_string);
         netcdf.putAtt(ncid,v6,'comment',comment_string);
         netcdf.putAtt(ncid,v6,'coordinates','lon lat');
@@ -510,12 +557,8 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
         netcdf.defVarChunking(ncid,v7,"CHUNKED",[2047 1023 1]);
         netcdf.defVarDeflate(ncid,v7,true,true,nc4d);
         netcdf.putAtt(ncid,v7,'long_name','time to most recent 1km data');
-        %netcdf.putAtt(ncid,v7,'standard_name','time to most recent 1km data');
-%        netcdf.putAtt(ncid,v7,'coverage_content_type','auxiliaryInformation');
         netcdf.putAtt(ncid,v7,'units','hours');
         netcdf.defVarFill(ncid,v7,false,int8(-128));
-        %netcdf.putAtt(ncid,v7,'add_offset',0);
-        %netcdf.putAtt(ncid,v7,'scale_factor',1);
         netcdf.putAtt(ncid,v7,'valid_min',int8(-127));
         netcdf.putAtt(ncid,v7,'valid_max',int8(127));
         netcdf.putAtt(ncid,v7,'source','MODIS and VIIRS pixels ingested by MUR');
@@ -528,9 +571,7 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
         netcdf.defVarChunking(ncid,v8,"CHUNKED",[2047 1023 1]);
         netcdf.defVarDeflate(ncid,v8,true,true,nc4d);
         netcdf.putAtt(ncid,v8,'long_name','SST anomaly from a seasonal SST climatology based on the MUR data over 2003-2014 period');
-%        netcdf.putAtt(ncid,v8,'coverage_content_type','auxiliaryInformation');
         netcdf.putAtt(ncid,v8,'units','kelvin');
-%        netcdf.putAtt(ncid,v8,'_FillValue',int16(-32768));
         netcdf.defVarFill(ncid,v8,false,int16(-32768));
         netcdf.putAtt(ncid,v8,'add_offset',0.0);
         netcdf.putAtt(ncid,v8,'scale_factor',sstscale);
@@ -543,7 +584,8 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
 
     %% global attributes:
         varid=netcdf.getConstant('GLOBAL');
-        if realtime, version=[version,'nrt']; end;
+        version_attr = version;
+        if realtime, version_attr=[version_attr,'nrt']; end;
         netcdf.putAtt(ncid,varid,'Conventions','CF-1.7');
         if realtime,
           str='Daily MUR SST, Interim near-real-time (nrt) product';
@@ -561,25 +603,18 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
         end;
         netcdf.putAtt(ncid,varid,'history',str);
         if realtime,
-          str='nrt-MUR will be replaced by MUR (reanalysis) in about 3 days';
-        else,
-          str='reanalysis';
-        end;
-        if realtime,
           str='Interim-MUR(nrt) will be replaced by MUR-Final in about 3 days; MUR = "Multi-scale Ultra-high Resolution"';
         else,
           str='MUR = "Multi-scale Ultra-high Resolution"';
         end;
         netcdf.putAtt(ncid,varid,'comment',str);
         netcdf.putAtt(ncid,varid,'license','These data are available free of charge under data policy of JPL PO.DAAC.');
-        %netcdf.putAtt(ncid,varid,'DSD_entry_id',entryID);
         netcdf.putAtt(ncid,varid,'id',entryID);
         netcdf.putAtt(ncid,varid,'naming_authority','org.ghrsst');
-        netcdf.putAtt(ncid,varid,'product_version',version);
+        netcdf.putAtt(ncid,varid,'product_version',version_attr);
         netcdf.putAtt(ncid,varid,'uuid','27665bc0-d5fc-11e1-9b23-0800200c9a66');
         netcdf.putAtt(ncid,varid,'gds_version_id','2.0');
         netcdf.putAtt(ncid,varid,'netcdf_version_id','4.1');
-        %netcdf.putAtt(ncid,varid,'date_created',sprintf('%04d-%02d-%02d',cdy,cdm,cdd));
       timestamp=sprintf('%04d%02d%02dT%02d%02d%02dZ',cdy,cdm,cdd,cnH,cnM,cnS);
         netcdf.putAtt(ncid,varid,'date_created',timestamp);
       [d,m,y]=julian(day,year); hA=hourAna; mjd=julian(d,m,y,3)+hA/24;
@@ -592,16 +627,14 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
       [d,m,y]=julian(mjd+12/24); hA=mod(hourAna-12,24);
       timestamp=sprintf('%04d%02d%02dT%02d0000Z',y,m,d,hA);
         netcdf.putAtt(ncid,varid,'time_coverage_end',timestamp);
-        %netcdf.putAtt(ncid,varid,'file_quality_level','3'); % 0=unknown; 1=best
         netcdf.putAtt(ncid,varid,'file_quality_level',int32(3)); % 0=unknown; 1=best
         netcdf.putAtt(ncid,varid,'source',sourcedata);
         netcdf.putAtt(ncid,varid,'platform',platformdata);
         netcdf.putAtt(ncid,varid,'sensor',sensordata);
         netcdf.putAtt(ncid,varid,'Metadata_Conventions','Unidata Observation Dataset v1.0');
-%        netcdf.putAtt(ncid,varid,'metadata_link','http://data.nodc.noaa.gov/cgi-bin/fgdc?id=nodc.noaa.gov:FGDC-GHRSST_all-JPL-L4UHfnd-GLOB-v01-MUR;view=text');
         netcdf.putAtt(ncid,varid,'metadata_link',['http://podaac.jpl.nasa.gov/ws/metadata/dataset/?format=iso&shortName=',entryID]);
-        netcdf.putAtt(ncid,varid,'keywords','Oceans > Ocean Temperature > Sea Surface Temperature'); 
-        netcdf.putAtt(ncid,varid,'keywords_vocabulary','NASA Global Change Master Directory (GCMD) Science Keywords'); 
+        netcdf.putAtt(ncid,varid,'keywords','Oceans > Ocean Temperature > Sea Surface Temperature');
+        netcdf.putAtt(ncid,varid,'keywords_vocabulary','NASA Global Change Master Directory (GCMD) Science Keywords');
         netcdf.putAtt(ncid,varid,'standard_name_vocabulary','NetCDF Climate and Forecast (CF) Metadata Convention');
         netcdf.putAtt(ncid,varid,'southernmost_latitude',single(box(3)));
         netcdf.putAtt(ncid,varid,'northernmost_latitude',single(box(4)));
@@ -632,7 +665,6 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
 
         % time:
         [d,m,y]=julian(day,year);
-        %sec=(julian(d,m,y,3)-julian(1,1,1981,3))*86400;
         sec=(julian(d,m,y,3)-julian(1,1,1981,3)+hourAna/24)*86400;
         netcdf.putVar(ncid,v0,int32(sec))
 
@@ -751,7 +783,6 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
   if length(compression), eval(sprintf('! %s -f %s',compression,ncname)); end;
   back=pwd; cd(ddir);  % go to the data directory.
   eval(sprintf('! md5sum %s%s > %s%s.md5',ncbasename,ctail,ncname,ctail));
-%  eval(sprintf('! md5sum %s > %s.md5',xmlbasename,xmlname));
   cd(back);
 
 
@@ -760,27 +791,12 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
   % "push" into PO.DAAC %
   %%%%%%%%%%%%%%%%%%%%%%%
 
-  % SFTP
-  % if podaacpush,
-  %   back=pwd; cd(ddir);  % go to the data directory.
-  %   %cmd=sprintf('!%s/putsftpfile.sh sftp-ghrsst@seafire JPL-MUR-RTO/tmp',back);
-  %   %cmd=sprintf('!%s/putsftpfile.sh gds2@seafire.jpl.nasa.gov JPL/tmp',back);
-  %   cmd=sprintf('!%s/putsftpfile.sh gds2@ops-seafire.jpl.nasa.gov JPL/tmp',back);
-  %   pushname=sprintf('%s%s',ncbasename,ctail);
-  %   disp(sprintf('%s %s %s',cmd,pushname,pushname));
-  %   eval(sprintf('%s %s %s',cmd,pushname,pushname));
-  %   pushname=[pushname,'.md5'];
-  %   disp(sprintf('%s %s %s',cmd,pushname,pushname));
-  %   eval(sprintf('%s %s %s',cmd,pushname,pushname));
-  %   cd(back);
-  % end;
-  
   % S3 UPLOAD
   if podaacpush,
-    s3_bucket='podaac-dev-ghrsst-jpl'
-    dataset_key='MUR-JPL-L4-GLOB-v4.1'
+    s3_bucket='podaac-dev-ghrsst-jpl';
+    dataset_key='MUR-JPL-L4-GLOB-v4.1';
     back=pwd; cd(ddir);  % go to the data directory.
-    cmd=sprintf('!%s/upload.py %s %s',back,s3_bucket,dataset_key)
+    cmd=sprintf('!%s/upload.py %s %s',back,s3_bucket,dataset_key);
     pushname=sprintf('%s%s',ncbasename,ctail);
     disp(sprintf('%s %s',cmd,pushname));
     eval(sprintf('%s %s',cmd,pushname));
@@ -793,3 +809,7 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
 
 end;
 end;
+
+fprintf(1,'csp2nc4 completed successfully.\n');
+
+end
