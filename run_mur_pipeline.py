@@ -727,8 +727,8 @@ class MUROrchestrator:
         cmd.extend([
             "--name", container_name,       # Named for explicit cleanup
             "--platform", "linux/amd64",    # Ensure compatibility
-            "--memory=64g",                 # Requires a lot of memory
-            "--memory-swap=70g",
+            "--memory=72g",                 # Observed max ~65GB, 72GB gives headroom
+            "--memory-swap=72g",            # Equal to memory = no swap (cleaner)
             "--shm-size=2g",                # MATLAB Runtime cache
             "--cpus=6.0",                   # OpenMP parallelization
         ])
