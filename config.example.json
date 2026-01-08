@@ -4,7 +4,7 @@
     "container_image": "mur-landice:latest",
     "input_dir": "./testing/static-resources",
     "output_dir": "./testing/preprocessing/output/landice",
-    "description": "Land/Ice mask generation from OSI-SAF data. Input directory contains static grids and mat transformation files."
+    "description": "Land/Ice mask generation from OSI-SAF data. Input directory contains static grids and mat transformation files. Output files are written to output_dir/land/p011/YEAR/ and output_dir/land/p01/YEAR/ subdirectories."
   },
   "l2p": {
     "container_image": "mur-l2p:latest",
@@ -91,6 +91,7 @@
     "input_dir_bic": "./testing/preprocessing/output/l2p",
     "input_dir_iquam": "./testing/preprocessing/output/iquam",
     "input_dir_landice": "./testing/preprocessing/output/landice",
+    "_input_dir_landice_note": "MRVA uses the land/p011 subdirectory (1km resolution) from this path",
     "static_resources_dir": "./testing/static-resources",
     "output_dir_csp": "./testing/mrva/output/csp",
     "output_dir_netcdf": "./testing/mrva/output/netcdf",

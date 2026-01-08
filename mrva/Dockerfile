@@ -216,7 +216,7 @@ ENV PATH="/opt/mrva/bin:${PATH}"
 # The PCG solver uses large local arrays that can overflow the default stack
 # Setting unlimited stack and large OpenMP stack prevents segfaults
 # These can be overridden at runtime with -e flags
-ENV OMP_STACKSIZE=128M
+# Use KMP_STACKSIZE (Intel OpenMP runtime uses this; OMP_STACKSIZE would be ignored)
 ENV KMP_STACKSIZE=128M
 
 # Create data directories with proper structure
@@ -245,11 +245,10 @@ set -e
 # ========================================================================
 # The Fortran PCG solver uses large local arrays that can exceed default stack
 # Setting unlimited stack prevents segmentation faults during solver iterations
-# OMP_STACKSIZE/KMP_STACKSIZE set thread stack for OpenMP parallel regions
+# KMP_STACKSIZE sets thread stack for Intel OpenMP parallel regions
 ulimit -s unlimited 2>/dev/null || echo "Warning: Could not set unlimited stack size"
 
 # Ensure OpenMP stack is set (may have been set in Dockerfile ENV but ensure here)
-export OMP_STACKSIZE=${OMP_STACKSIZE:-128M}
 export KMP_STACKSIZE=${KMP_STACKSIZE:-128M}
 
 # Argument validation
@@ -304,7 +303,6 @@ echo "Mode:     $MODE"
 echo "Sensors:  ${SENSORS:-all (default)}"
 echo "-----------------------------------------"
 echo "Stack:    $(ulimit -s) (soft limit)"
-echo "OMP_STACKSIZE: $OMP_STACKSIZE"
 echo "KMP_STACKSIZE: $KMP_STACKSIZE"
 echo "========================================="
 echo ""

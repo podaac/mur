@@ -259,7 +259,9 @@ class MUROrchestrator:
 
         # Set up paths
         input_dir = pathlib.Path(config["input_dir"])
-        output_dir = pathlib.Path(config["output_dir"]) / str(year)
+        # Note: Don't append year here - the container creates the full path structure:
+        # /output/land/p011/YEAR/ and /output/land/p01/YEAR/
+        output_dir = pathlib.Path(config["output_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
 
         mode_str = "Interim" if is_nrt else "Final"
@@ -666,9 +668,13 @@ class MUROrchestrator:
         iquam_dir = pathlib.Path(
             config.get("input_dir_iquam", "testing/preprocessing/output/iquam")
         )
-        landice_dir = pathlib.Path(
+        # Landice container outputs to: output_dir/land/p011/YEAR/Global_ice_*.bip
+        # MRVA expects: /data/input/landice/YEAR/Global_ice_*.bip
+        # So we mount the land/p011 subdirectory to match MRVA's expected structure
+        landice_base_dir = pathlib.Path(
             config.get("input_dir_landice", "testing/preprocessing/output/landice")
         )
+        landice_dir = landice_base_dir / "land" / "p011"
         static_resources_dir = pathlib.Path(
             config.get("static_resources_dir", "testing/static-resources")
         )
@@ -730,7 +736,7 @@ class MUROrchestrator:
             "--memory=72g",                 # Observed max ~65GB, 72GB gives headroom
             "--memory-swap=72g",            # Equal to memory = no swap (cleaner)
             "--shm-size=2g",                # MATLAB Runtime cache
-            "--cpus=6.0",                   # OpenMP parallelization
+            "--cpus=32.0",                  # OpenMP parallelization
         ])
 
         # Pass simulated date to container if set (for historical reprocessing)

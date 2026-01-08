@@ -24,7 +24,17 @@ if ~exist('MURcsp','var'), MURcsp=''; end;
 % parameters:
 
 %% trimbip.f parameters:
-stdcspfile=' ';  % defaults to 1-degree if nonexistent file is given.
+%
+% TOLERANCE FILE (stdcspfile):
+% The tolerance file provides spatially-varying outlier detection thresholds.
+% When set to empty/space (as below), the Fortran trimbip3 code will:
+%   1. Print "readcoeff: Not opened: coefficient file" (this is EXPECTED)
+%   2. Print "trimbip: tolerance coefficient file not found" (this is EXPECTED)
+%   3. Fall back to a uniform 1-degree tolerance everywhere
+% These messages are informational warnings, NOT errors. Processing continues normally.
+% This is legacy behavior that has been used in production for years.
+%
+stdcspfile=' ';  % Empty = use default 1-degree tolerance (Fortran warnings are expected)
 
 sensparam={ % sensor_name, multiplier, wgtcutoff
     'WINSAT', 1.5, 0.001,
@@ -170,6 +180,10 @@ end;
     fclose(f);
 
     % run trimbip:
+    % NOTE: The Fortran trimbip3 will print warnings about "coefficient file not opened"
+    % and "tolerance coefficient file not found" - these are EXPECTED when stdcspfile
+    % is empty (which is the default). The code falls back to 1-degree tolerance.
+    fprintf('  (Note: Fortran warnings about tolerance file are expected - using 1-deg default)\n');
     system([fortran_bin, '/trimbip3']);
 
 
