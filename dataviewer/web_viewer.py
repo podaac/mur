@@ -649,6 +649,78 @@ def create_grid_data_plot(data: dict, format_type: str, filepath: Path) -> plt.F
     return fig
 
 
+def create_coefficient_plot(data: dict, format_type: str, filepath: Path) -> plt.Figure:
+    """
+    Create matplotlib figure for coefficient data (csp, usp).
+
+    Args:
+        data: Data dictionary from format reader
+        format_type: File format type
+        filepath: Path to file
+
+    Returns:
+        Matplotlib figure object
+    """
+    coef = data['coefficients']
+    scale = data.get('scale', 'unknown')
+
+    # Take a slice through the middle for 4D arrays
+    if coef.ndim == 4:
+        slice_z = coef.shape[2] // 2
+        slice_v = 0
+        coef_slice = coef[:, :, slice_z, slice_v]
+        slice_info = f"z={slice_z}, v={slice_v}"
+    else:
+        coef_slice = coef[:, :]
+        slice_info = "2D"
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    # 2D coefficient slice
+    # Center colormap around zero for diverging visualization
+    vmax = max(abs(coef_slice.min()), abs(coef_slice.max()))
+    im1 = axes[0].imshow(coef_slice.T, cmap='RdBu_r',
+                         aspect='equal', origin='lower',
+                         vmin=-vmax, vmax=vmax)
+    axes[0].set_xlabel('X index')
+    axes[0].set_ylabel('Y index')
+    axes[0].set_title(f'Coefficient Slice ({slice_info})')
+    plt.colorbar(im1, ax=axes[0], label='Coefficient Value')
+
+    # Histogram of all coefficients
+    axes[1].hist(coef.flatten(), bins=100, edgecolor='black', alpha=0.7)
+    axes[1].set_xlabel('Coefficient Value')
+    axes[1].set_ylabel('Count')
+    axes[1].set_title('Coefficient Distribution')
+    axes[1].grid(True, alpha=0.3)
+    axes[1].set_yscale('log')
+
+    # Add vertical line at zero
+    axes[1].axvline(x=0, color='r', linestyle='--', alpha=0.5, label='Zero')
+    axes[1].legend()
+
+    # Statistics text box
+    stats_text = (
+        f"Total: {coef.size:,}\n"
+        f"Mean: {coef.mean():.4f}\n"
+        f"Std: {coef.std():.4f}\n"
+        f"Min: {coef.min():.4f}\n"
+        f"Max: {coef.max():.4f}"
+    )
+    axes[1].text(0.98, 0.98, stats_text,
+                 transform=axes[1].transAxes,
+                 verticalalignment='top',
+                 horizontalalignment='right',
+                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
+                 fontsize=9, family='monospace')
+
+    type_label = "Coefficient" if format_type == 'csp' else "Uncertainty"
+    plt.suptitle(f'{filepath.name}\n{type_label} File (L={scale}): {coef.shape}')
+    plt.tight_layout()
+
+    return fig
+
+
 def create_interactive_point_plot(data: dict, format_type: str, filepath: Path):
     """
     Create interactive Plotly figure for point data with dynamic data loading.
@@ -1100,6 +1172,45 @@ def display_file_info(data: dict, format_type: str, filepath: Path):
                 st.metric("Min", f"{sst_valid.min():.2f} °C")
             with col4:
                 st.metric("Max", f"{sst_valid.max():.2f} °C")
+
+    elif format_type in ['csp', 'usp']:
+        coef = data['coefficients']
+        scale = data.get('scale', 'unknown')
+        with col2:
+            st.metric("Scale Level", f"L={scale}")
+        with col3:
+            st.metric("Total Coefficients", f"{coef.size:,}")
+
+        st.write("#### Grid Dimensions")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("mx", data['mx'])
+        with col2:
+            st.metric("my", data['my'])
+        with col3:
+            st.metric("mz", data['mz'])
+        with col4:
+            st.metric("nv", data['nv'])
+
+        st.write(f"**Coefficient array shape:** {coef.shape}")
+
+        st.write("#### Spatial Bounds")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write(f"**X range:** [{data['xmin']:.4f}, {data['xmax']:.4f}]")
+        with col2:
+            st.write(f"**Y range:** [{data['ymin']:.4f}, {data['ymax']:.4f}]")
+
+        st.write("#### Coefficient Statistics")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Min", f"{coef.min():.6f}")
+        with col2:
+            st.metric("Max", f"{coef.max():.6f}")
+        with col3:
+            st.metric("Mean", f"{coef.mean():.6f}")
+        with col4:
+            st.metric("Std Dev", f"{coef.std():.6f}")
 
 
 def compare_files_data(data1: dict, data2: dict, format_type: str, tolerance: float = 1e-6) -> dict:
@@ -1669,6 +1780,12 @@ def main():
                                 plt.close(fig)
                         elif format_type in ['gds', 'map']:
                             fig = create_grid_data_plot(
+                                data, format_type, selected_file
+                            )
+                            st.pyplot(fig)
+                            plt.close(fig)
+                        elif format_type in ['csp', 'usp']:
+                            fig = create_coefficient_plot(
                                 data, format_type, selected_file
                             )
                             st.pyplot(fig)
