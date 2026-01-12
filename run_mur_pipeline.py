@@ -668,13 +668,14 @@ class MUROrchestrator:
         iquam_dir = pathlib.Path(
             config.get("input_dir_iquam", "testing/preprocessing/output/iquam")
         )
-        # Landice container outputs to: output_dir/land/p011/YEAR/Global_ice_*.bip
-        # MRVA expects: /data/input/landice/YEAR/Global_ice_*.bip
-        # So we mount the land/p011 subdirectory to match MRVA's expected structure
+        # Landice container outputs to: output_dir/land/p01/YEAR/landiceP01_*.gds.gz
+        # MRVA expects: /data/input/landice/YEAR/landiceP01_*.gds.gz
+        # (used by csp2nc4a for NetCDF generation)
+        # So we mount the land/p01 subdirectory to match MRVA's expected structure
         landice_base_dir = pathlib.Path(
             config.get("input_dir_landice", "testing/preprocessing/output/landice")
         )
-        landice_dir = landice_base_dir / "land" / "p011"
+        landice_dir = landice_base_dir / "land" / "p01"
         static_resources_dir = pathlib.Path(
             config.get("static_resources_dir", "testing/static-resources")
         )
