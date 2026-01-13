@@ -349,22 +349,53 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
     system([fortran_bin, '/spgrid']);
 
     f=fopen(sprintf('./fort.%d',L+180),'r');
-    % Read dimensions
+    % Fortran unformatted files have record markers (4-byte size prefix/suffix)
+    % Record 1: nlon, nlat (two int32 values)
+    fread(f, 1, 'uint32');  % skip record marker
     ii = fread(f, 1, 'int32=>int32');
     jj = fread(f, 1, 'int32=>int32');
-    % Read scaling parameters
+    fread(f, 1, 'uint32');  % skip record marker
+
+    % Record 2: offset, sscale (two float32 values)
+    fread(f, 1, 'uint32');  % skip record marker
     offset = fread(f, 1, 'float32=>single');
     sscale = fread(f, 1, 'float32=>single');
-    % Read SST data and coordinates
+    fread(f, 1, 'uint32');  % skip record marker
+
+    % Record 3: msst, mlon, mlat (grid data + coordinates)
+    fread(f, 1, 'uint32');  % skip record marker
     msst = fread(f, [ii, jj], 'int16=>int16');
     mlon = fread(f, ii, 'float32=>single');
     mlat = fread(f, jj, 'float32=>single');
+    fread(f, 1, 'uint32');  % skip record marker
     fclose(f);
+
+    fprintf('  Grid dimensions from spgrid: [%d, %d]\n', ii, jj);
 
     %% sst anomaly:
     if anomalyIncluded,
       ssta = double(msst)*sscale+offset;
-      ssta = ssta - readSeasonal( day );
+      fprintf('  SST grid size: [%d, %d]\n', size(ssta,1), size(ssta,2));
+
+      % Read seasonal climatology with dimension validation
+      seasonal_sst = readSeasonal( day );
+      fprintf('  Seasonal climatology size: [%d, %d]\n', size(seasonal_sst,1), size(seasonal_sst,2));
+
+      % Validate dimensions match before subtraction
+      if ~isequal(size(ssta), size(seasonal_sst))
+          error('csp2nc4a:DimensionMismatch', ...
+                ['SST anomaly calculation failed: dimension mismatch.\n' ...
+                 '  SST grid size:      [%d, %d]\n' ...
+                 '  Seasonal file size: [%d, %d]\n' ...
+                 'The seasonal climatology file must match the output grid dimensions.\n' ...
+                 'Expected dimensions: [%d, %d] (lon x lat)'], ...
+                size(ssta,1), size(ssta,2), ...
+                size(seasonal_sst,1), size(seasonal_sst,2), ...
+                size(ssta,1), size(ssta,2));
+      end
+
+      ssta = ssta - seasonal_sst;
+      clear seasonal_sst;
     end;
 
 
@@ -392,16 +423,25 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
       system([fortran_bin, '/spgrid']);
 
       f=fopen(sprintf('./fort.%d',Lerr+180),'r');
-      % Read dimensions
+      % Fortran unformatted files have record markers (4-byte size prefix/suffix)
+      % Record 1: nlon, nlat (two int32 values)
+      fread(f, 1, 'uint32');  % skip record marker
       ii = fread(f, 1, 'int32=>int32');
       jj = fread(f, 1, 'int32=>int32');
-      % Read scaling parameters
+      fread(f, 1, 'uint32');  % skip record marker
+
+      % Record 2: offset, sscale (two float32 values)
+      fread(f, 1, 'uint32');  % skip record marker
       offset = fread(f, 1, 'float32=>single');
       sscale = fread(f, 1, 'float32=>single');
-      % Read error field and coordinates
+      fread(f, 1, 'uint32');  % skip record marker
+
+      % Record 3: err, elon, elat (error field + coordinates)
+      fread(f, 1, 'uint32');  % skip record marker
       err = fread(f, [ii, jj], 'int16=>int16');
       elon = fread(f, ii, 'float32=>single');
       elat = fread(f, jj, 'float32=>single');
+      fread(f, 1, 'uint32');  % skip record marker
       fclose(f);
       % Vectorized NaN assignment
       err(err == -32768) = NaN;

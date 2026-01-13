@@ -260,9 +260,27 @@ fprintf(1,'Year %04d, Day %03d\n',year,day);
       ! spgrid;
 
       f=fopen(sprintf('./fort.%d',Lerr+180),'r');
-      [ii,jj]=fortread(f,'int',1,'int',1);
-      [offset,sscale]=fortread(f,'real*4',1,'real*4',1);
-      [err,elon,elat]=fortread(f,'integer*2',[ii,jj],'real*4',ii,'real*4',jj);
+      % Read Fortran record header
+      rec_len1 = fread(f, 1, 'int32');
+      ii = fread(f, 1, 'int32');
+      jj = fread(f, 1, 'int32');
+      rec_len2 = fread(f, 1, 'int32');
+      assert(rec_len1 == rec_len2, 'Fortran record corruption detected in dimension read');
+
+      % Read offset and scale
+      rec_len1 = fread(f, 1, 'int32');
+      offset = fread(f, 1, 'single');
+      sscale = fread(f, 1, 'single');
+      rec_len2 = fread(f, 1, 'int32');
+      assert(rec_len1 == rec_len2, 'Fortran record corruption detected in offset/scale read');
+
+      % Read error grid with direct type mapping
+      rec_len1 = fread(f, 1, 'int32');
+      err = fread(f, [ii,jj], 'int16=>int16');
+      elon = fread(f, ii, 'single=>single');
+      elat = fread(f, jj, 'single=>single');
+      rec_len2 = fread(f, 1, 'int32');
+      assert(rec_len1 == rec_len2, 'Fortran record corruption detected in error grid read');
       fclose(f);
       enx=find(err(:)==-32768);if length(enx),err(enx)=NaN*ones(size(enx));end;
       clear elon elat enx;

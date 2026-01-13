@@ -196,13 +196,17 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
     %% landmask data:
     fprintf(1,'loading %s\n',landmaskfile);
     f=fopen(landmaskfile,'r');
-    % Read dimensions
+    % Record 1: dimensions
+    fread(f, 1, 'uint32');  % skip Fortran record marker
     ii = fread(f, 1, 'int32=>int32');
     jj = fread(f, 1, 'int32=>int32');
-    % Read mask and coordinates
+    fread(f, 1, 'uint32');  % skip Fortran record marker
+    % Record 2: mask and coordinates
+    fread(f, 1, 'uint32');  % skip Fortran record marker
     mask = fread(f, [ii, jj], 'int8=>int8');
     lon = fread(f, ii, 'float32=>single');
     lat = fread(f, jj, 'float32=>single');
+    fread(f, 1, 'uint32');  % skip Fortran record marker
     fclose(f);
     clear lon lat;
     mask=int8(mask);
@@ -253,16 +257,22 @@ end;
     ! spgrid;
 
     f=fopen(sprintf('./fort.%d',L+180),'r');
-    % Read dimensions
+    % Record 1: dimensions
+    fread(f, 1, 'uint32');  % skip Fortran record marker
     ii = fread(f, 1, 'int32=>int32');
     jj = fread(f, 1, 'int32=>int32');
-    % Read scaling parameters
+    fread(f, 1, 'uint32');  % skip Fortran record marker
+    % Record 2: scaling parameters
+    fread(f, 1, 'uint32');  % skip Fortran record marker
     offset = fread(f, 1, 'float32=>single');
     sscale = fread(f, 1, 'float32=>single');
-    % Read SST data and coordinates
+    fread(f, 1, 'uint32');  % skip Fortran record marker
+    % Record 3: SST data and coordinates
+    fread(f, 1, 'uint32');  % skip Fortran record marker
     msst = fread(f, [ii, jj], 'int16=>int16');
     mlon = fread(f, ii, 'float32=>single');
     mlat = fread(f, jj, 'float32=>single');
+    fread(f, 1, 'uint32');  % skip Fortran record marker
     fclose(f);
 
 
@@ -298,16 +308,22 @@ end;
       ! spgrid;
 
       f=fopen(sprintf('./fort.%d',Lerr+180),'r');
-      % Read dimensions
+      % Record 1: dimensions
+      fread(f, 1, 'uint32');  % skip Fortran record marker
       ii = fread(f, 1, 'int32=>int32');
       jj = fread(f, 1, 'int32=>int32');
-      % Read scaling parameters
+      fread(f, 1, 'uint32');  % skip Fortran record marker
+      % Record 2: scaling parameters
+      fread(f, 1, 'uint32');  % skip Fortran record marker
       offset = fread(f, 1, 'float32=>single');
       sscale = fread(f, 1, 'float32=>single');
-      % Read error field and coordinates
+      fread(f, 1, 'uint32');  % skip Fortran record marker
+      % Record 3: error field and coordinates
+      fread(f, 1, 'uint32');  % skip Fortran record marker
       err = fread(f, [ii, jj], 'int16=>int16');
       elon = fread(f, ii, 'float32=>single');
       elat = fread(f, jj, 'float32=>single');
+      fread(f, 1, 'uint32');  % skip Fortran record marker
       fclose(f);
       % Vectorized NaN assignment
       err(err == -32768) = NaN;

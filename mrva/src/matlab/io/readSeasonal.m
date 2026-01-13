@@ -1,5 +1,17 @@
 function [sst,lon,lat,dev]=readSeasonal(doy,vfv);
-% [sst,lon,lat,dev]=readNC(ncfile,vfv);
+% [sst,lon,lat,dev]=readSeasonal(doy,vfv);
+%
+% Read MUR seasonal climatology for specified day of year.
+%
+% INPUTS:
+%   doy - Day of year (1-366, 366 maps to 365)
+%   vfv - Fill value for bad pixels (default: NaN)
+%
+% OUTPUTS:
+%   sst - Sea surface temperature climatology [lon x lat]
+%   lon - Longitude coordinates
+%   lat - Latitude coordinates
+%   dev - Standard deviation
 
 % Container path for seasonal climatology data
 seasonal_root = '/data/static-resources/seasonal';
@@ -7,12 +19,22 @@ seasonal_root = '/data/static-resources/seasonal';
 if doy==366, doy=365; end;
 ncfile = sprintf('%s/mur_%03d.nc', seasonal_root, doy);
 
-
 % default fill value:
 if nargin<2, vfv=NaN; end;
 
+% Check file exists before attempting to open
+if ~exist(ncfile, 'file')
+    error('readSeasonal:FileNotFound', ...
+          'Seasonal climatology file not found: %s\nVerify static_resources_dir mount contains seasonal/ directory with mur_###.nc files.', ...
+          ncfile);
+end
 
-ncid=netcdf.open(ncfile,'nowrite');
+try
+    ncid=netcdf.open(ncfile,'nowrite');
+catch ME
+    error('readSeasonal:OpenFailed', ...
+          'Failed to open seasonal file: %s\nError: %s', ncfile, ME.message);
+end
 
 
 

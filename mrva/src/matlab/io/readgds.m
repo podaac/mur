@@ -1,21 +1,30 @@
 function [mask,lon,lat,icemap]=readgds(landicefile)
 % reads a "landice" file *.gds
+%
+% Fortran unformatted binary file with 3 records:
+%   Record 1: nlon, nlat (dimensions)
+%   Record 2: mask, lon, lat (grid data + coordinates)
+%   Record 3: icemap (ice map data)
 
 f=fopen(landicefile,'r');
 
-% Read dimensions with type preservation
+% Record 1: dimensions
+fread(f, 1, 'uint32');  % skip Fortran record marker
 nlon = fread(f, 1, 'int32=>int32');
 nlat = fread(f, 1, 'int32=>int32');
+fread(f, 1, 'uint32');  % skip Fortran record marker
 
-% Read mask grid data
+% Record 2: mask, lon, lat
+fread(f, 1, 'uint32');  % skip Fortran record marker
 mask = fread(f, [nlon, nlat], 'int8=>int8');
-
-% Read coordinate information
 lon = fread(f, nlon, 'float32=>single');
 lat = fread(f, nlat, 'float32=>single');
+fread(f, 1, 'uint32');  % skip Fortran record marker
 
-% Read ice map data
+% Record 3: icemap
+fread(f, 1, 'uint32');  % skip Fortran record marker
 icemap = fread(f, [nlon, nlat], 'int8=>int8');
+fread(f, 1, 'uint32');  % skip Fortran record marker
 
 fclose(f);
 
