@@ -68,10 +68,16 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
   flag = zeros(max_size, 1, 'single');
   current_idx = 0;
 
-  for k=1:length(names),
+  nfiles = length(names);
+  fprintf(1,'l2p2bic: processing %d files from %s\n', nfiles, indir);
+
+  for k=1:nfiles,
 
     file=sprintf('%s/%s',indir,names(k).name);
-    fprintf(1,'l2p2bic: reading %s\n',file);
+    % Only log first, last, and every 50th file to reduce output
+    if k == 1 || k == nfiles || mod(k, 50) == 0
+        fprintf(1,'l2p2bic: reading file %d/%d: %s\n', k, nfiles, names(k).name);
+    end
     fprintf(flist,'%s\n',file);
 
     % read L2P file:
@@ -172,6 +178,7 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
   end;
 
   fclose(flist);
+  fprintf(1,'l2p2bic: completed reading %d files, %d observations collected\n', nfiles, current_idx);
 
   % Trim arrays to actual size
   lon = lon(1:current_idx);

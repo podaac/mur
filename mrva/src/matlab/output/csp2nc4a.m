@@ -446,7 +446,9 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
       % Vectorized NaN assignment
       err(err == -32768) = NaN;
       clear elon elat enx;
-      err=sqrt(err*sscale+offset-273.15);  % spgrid adds 273.15.
+      % Convert err to double for arithmetic (MATLAB requires integers to combine
+      % only with same-class integers or scalar doubles, not single)
+      err=sqrt(double(err)*double(sscale)+double(offset)-273.15);  % spgrid adds 273.15.
       err = (err-uave)/udev*(targetMean-targetMin) + targetMean;
       err=single(err);
     end;
