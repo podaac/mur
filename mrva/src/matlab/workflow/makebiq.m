@@ -304,7 +304,7 @@ for isensor=1:size(sensors,1),
 
 
 
-        case '.bii', 
+        case '.bii',
           fprintf(1,'reading: %s\n',filename);
           f=fopen('makebiqinput.tmp','r');
           if f==-1,
@@ -312,17 +312,23 @@ for isensor=1:size(sensors,1),
             fprintf(flog,'%s %04d %03d 0 points (no file)\n',sensor,y,d);
             continue;  % move on to the next "for" iteration.
           end;
-          % Read header with type preservation
+          % Read header record with Fortran record markers
+          % Record structure: [4-byte marker] [N:int32] [nyear:int16] [nday:int16] [4-byte marker]
+          rec_len1 = fread(f, 1, 'int32');  % Leading record marker (should be 8)
           N = fread(f, 1, 'int32=>int32');
           nyear = fread(f, 1, 'int16=>int16');
           nday = fread(f, 1, 'int16=>int16');
+          rec_len2 = fread(f, 1, 'int32');  % Trailing record marker
 
-          % Read data arrays with type preservation
+          % Read data record with Fortran record markers
+          % Record structure: [4-byte marker] [sst] [lon] [lat] [hour] [qt] [4-byte marker]
+          rec_len1 = fread(f, 1, 'int32');  % Leading record marker
           sst = fread(f, N, 'int16=>int16');
           lon = fread(f, N, 'int16=>int16');
           lat = fread(f, N, 'int16=>int16');
           hour = fread(f, N, 'int16=>int16');
           qt = fread(f, N, 'int8=>int8');
+          rec_len2 = fread(f, 1, 'int32');  % Trailing record marker
           fclose(f);
 
           %% format conversion:

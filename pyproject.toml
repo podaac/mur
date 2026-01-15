@@ -15,6 +15,7 @@ dependencies = [
     "fsspec>=2024.0.0",
     "podaac-data-subscriber>=1.14.0",
     "certifi>=2024.0.0",
+    "netCDF4>=1.6.0",
 
     # Date/time utilities
     "python-dateutil>=2.8.0",

@@ -31,6 +31,8 @@ except ImportError:
     from format_readers import read_file, DataFileReader
     from dataviewer import compute_robust_stats, smart_downsample
 
+# Note: streamlit-file-browser component doesn't work in sidebar, so we use native widgets
+
 # Configure matplotlib to use non-interactive backend for Streamlit
 matplotlib.use('Agg')
 
@@ -649,6 +651,343 @@ def create_grid_data_plot(data: dict, format_type: str, filepath: Path) -> plt.F
     return fig
 
 
+def create_netcdf_plot(data: dict, filepath: Path) -> plt.Figure:
+    """
+    Create matplotlib figure for NetCDF MUR GHRSST data.
+
+    Args:
+        data: Data dictionary from NetCDFReader
+        filepath: Path to file
+
+    Returns:
+        Matplotlib figure object
+    """
+    variables = data['variables']
+    dimensions = data['dimensions']
+
+    # Check if this is a MUR GHRSST file
+    is_mur_ghrsst = 'analysed_sst' in variables
+
+    if not is_mur_ghrsst:
+        # Generic NetCDF - show what we can
+        fig, ax = plt.subplots(figsize=(10, 6))
+        info_text = "NetCDF file (non-GHRSST format)\n\nVariables:\n"
+        for var_name in list(variables.keys())[:10]:
+            var = variables[var_name]
+            shape = var['data'].shape if hasattr(var['data'], 'shape') else 'scalar'
+            info_text += f"  - {var_name}: {shape}\n"
+        if len(variables) > 10:
+            info_text += f"  ... and {len(variables) - 10} more\n"
+        info_text += f"\nDimensions: {dimensions}"
+        ax.text(0.1, 0.5, info_text, fontsize=12, family='monospace',
+                verticalalignment='center')
+        ax.axis('off')
+        plt.suptitle(f'{filepath.name}\nNetCDF file')
+        return fig
+
+    # Extract key variables for MUR GHRSST
+    sst_var = variables['analysed_sst']
+    lon = variables['lon']['data'][:]
+    lat = variables['lat']['data'][:]
+    sst_scaled = sst_var['data'][0, :, :] if sst_var['data'].ndim == 3 else sst_var['data'][:, :]
+
+    # Apply scaling to get actual SST in Kelvin
+    scale = sst_var['attributes'].get('scale_factor', 1.0)
+    offset = sst_var['attributes'].get('add_offset', 0.0)
+    sst_kelvin = sst_scaled * scale + offset
+
+    # Convert to Celsius
+    sst_celsius = sst_kelvin - 273.15
+
+    # Handle fill values
+    fill_value = sst_var['attributes'].get('_FillValue', -32768)
+    sst_celsius = np.ma.masked_where(sst_scaled == fill_value, sst_celsius)
+
+    # Get mask if available
+    mask = None
+    if 'mask' in variables:
+        mask_var = variables['mask']
+        mask = mask_var['data'][0, :, :] if mask_var['data'].ndim == 3 else mask_var['data'][:, :]
+
+    # Determine subsampling for large grids (MUR is 36000x17999)
+    max_display = 2000  # Smaller for web display
+    subsample = max(1, max(len(lon), len(lat)) // max_display)
+
+    if subsample > 1:
+        lon_plot = lon[::subsample]
+        lat_plot = lat[::subsample]
+        sst_plot = sst_celsius[::subsample, ::subsample]
+        if mask is not None:
+            mask_plot = mask[::subsample, ::subsample]
+    else:
+        lon_plot = lon
+        lat_plot = lat
+        sst_plot = sst_celsius
+        mask_plot = mask if mask is not None else None
+
+    # Check if cartopy is available
+    try:
+        import cartopy.crs as ccrs  # noqa: F401
+        has_cartopy = True
+    except ImportError:
+        has_cartopy = False
+
+    # Create figure with 2-3 panels depending on available data
+    n_panels = 3 if mask is not None else 2
+    fig = plt.figure(figsize=(20, 10))
+
+    # SST map
+    ax1 = fig.add_subplot(1, n_panels, 1)
+
+    # Fixed color scale for MUR SST (0 to 32°C)
+    sst_valid = sst_plot[~sst_plot.mask] if hasattr(sst_plot, 'mask') else sst_plot[~np.isnan(sst_plot)]
+    vmin, vmax = 0, 32
+
+    # Note: NetCDF data is in (lat, lon) order, pcolormesh expects C(lat, lon)
+    im1 = ax1.pcolormesh(lon_plot, lat_plot, sst_plot,
+                         cmap='RdYlBu_r', vmin=vmin, vmax=vmax,
+                         shading='nearest')
+    ax1.set_xlabel('Longitude (degrees)')
+    ax1.set_ylabel('Latitude (degrees)')
+    ax1.set_title('MUR SST Analysis (°C)')
+    ax1.set_aspect('equal', adjustable='box')
+    ax1.grid(True, alpha=0.3)
+    if has_cartopy:
+        add_coastlines_to_ax(ax1)
+    plt.colorbar(im1, ax=ax1, label='SST (°C)', shrink=0.8)
+
+    # SST histogram
+    ax2 = fig.add_subplot(1, n_panels, 2)
+    if len(sst_valid) > 0:
+        ax2.hist(sst_valid.flatten(), bins=100, edgecolor='black', alpha=0.7)
+        ax2.set_xlabel('SST (°C)')
+        ax2.set_ylabel('Count')
+        ax2.set_title('SST Distribution')
+        ax2.grid(True, alpha=0.3)
+
+        # Add statistics
+        stats_text = (
+            f"Valid pixels: {len(sst_valid):,}\n"
+            f"Mean: {sst_valid.mean():.2f} °C\n"
+            f"Std: {sst_valid.std():.2f} °C\n"
+            f"Min: {sst_valid.min():.2f} °C\n"
+            f"Max: {sst_valid.max():.2f} °C"
+        )
+        ax2.text(0.98, 0.98, stats_text,
+                transform=ax2.transAxes,
+                verticalalignment='top',
+                horizontalalignment='right',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
+                fontsize=9, family='monospace')
+
+    # Mask display if available
+    if mask is not None and n_panels == 3:
+        ax3 = fig.add_subplot(1, n_panels, 3)
+
+        # Create discrete colormap for mask
+        mask_labels = {
+            1: 'Open sea', 2: 'Land', 3: 'Coast',
+            5: 'Open lake', 9: 'Sea+ice', 11: 'Coast+ice',
+            13: 'Lake+ice', 15: 'Complex'
+        }
+        # Filter out fill values (-128) and get unique valid values
+        mask_flat = mask_plot.flatten()
+        valid_mask = mask_flat[mask_flat >= 0]
+        if len(valid_mask) > 0:
+            unique_vals = sorted(set(valid_mask.astype(int)))
+            n_colors = len(unique_vals)
+            tab10 = plt.colormaps.get_cmap('tab10')
+            colors = [tab10(i / 10) for i in range(n_colors)]
+            cmap_mask = ListedColormap(colors)
+            bounds = [unique_vals[0] - 0.5] + [v + 0.5 for v in unique_vals]
+            norm = BoundaryNorm(bounds, cmap_mask.N)
+
+            # Mask out invalid values for display
+            mask_display = np.ma.masked_where(mask_plot < 0, mask_plot)
+            im3 = ax3.pcolormesh(lon_plot, lat_plot, mask_display,
+                                cmap=cmap_mask, norm=norm, shading='nearest')
+            ax3.set_xlabel('Longitude (degrees)')
+            ax3.set_ylabel('Latitude (degrees)')
+            ax3.set_title('Land/Sea/Ice Mask')
+            ax3.set_aspect('equal', adjustable='box')
+            ax3.grid(True, alpha=0.3)
+
+            cbar3 = plt.colorbar(im3, ax=ax3, label='Surface Type',
+                                ticks=unique_vals, shrink=0.8)
+            cbar3.set_ticklabels([mask_labels.get(v, str(v)) for v in unique_vals])
+        else:
+            ax3.text(0.5, 0.5, 'No valid mask data', ha='center', va='center')
+            ax3.axis('off')
+
+    title_str = data['attributes'].get('title', 'MUR SST L4 Analysis')
+    resolution = f"{len(lon)}×{len(lat)}"
+    if subsample > 1:
+        resolution += f" (displayed at {len(lon_plot)}×{len(lat_plot)})"
+
+    plt.suptitle(f'{filepath.name}\n{title_str}\nResolution: {resolution}')
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    return fig
+
+
+def create_interactive_netcdf_plot(data: dict, filepath: Path):
+    """
+    Create interactive Plotly figure for NetCDF MUR GHRSST data.
+
+    Args:
+        data: Data dictionary from NetCDFReader
+        filepath: Path to file
+
+    Returns:
+        Plotly figure object
+    """
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError:
+        raise ImportError("Plotly not installed. Install with: pip install plotly")
+
+    variables = data['variables']
+
+    # Check if this is a MUR GHRSST file
+    is_mur_ghrsst = 'analysed_sst' in variables
+
+    if not is_mur_ghrsst:
+        # Generic NetCDF - show info
+        fig = go.Figure()
+        info_text = "NetCDF file (non-GHRSST format)<br><br>Variables:<br>"
+        for var_name in list(variables.keys())[:10]:
+            var = variables[var_name]
+            shape = var['data'].shape if hasattr(var['data'], 'shape') else 'scalar'
+            info_text += f"  - {var_name}: {shape}<br>"
+        fig.add_annotation(
+            text=info_text,
+            xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False,
+            font=dict(size=14, family="monospace"),
+            align="left"
+        )
+        fig.update_layout(title=f"{filepath.name} - NetCDF file")
+        return fig
+
+    # Extract key variables for MUR GHRSST
+    sst_var = variables['analysed_sst']
+    lon = variables['lon']['data'][:]
+    lat = variables['lat']['data'][:]
+    sst_scaled = sst_var['data'][0, :, :] if sst_var['data'].ndim == 3 else sst_var['data'][:, :]
+
+    # Apply scaling to get actual SST in Kelvin
+    scale = sst_var['attributes'].get('scale_factor', 1.0)
+    offset = sst_var['attributes'].get('add_offset', 0.0)
+    sst_kelvin = sst_scaled * scale + offset
+
+    # Convert to Celsius
+    sst_celsius = sst_kelvin - 273.15
+
+    # Handle fill values
+    fill_value = sst_var['attributes'].get('_FillValue', -32768)
+    sst_celsius = np.where(sst_scaled == fill_value, np.nan, sst_celsius)
+
+    # Subsample for interactive display (Plotly heatmap can handle ~2000x2000)
+    max_display = 1500
+    subsample = max(1, max(len(lon), len(lat)) // max_display)
+
+    if subsample > 1:
+        lon_plot = lon[::subsample]
+        lat_plot = lat[::subsample]
+        sst_plot = sst_celsius[::subsample, ::subsample]
+    else:
+        lon_plot = lon
+        lat_plot = lat
+        sst_plot = sst_celsius
+
+    # Fixed color scale for MUR SST (0 to 32°C)
+    sst_valid = sst_plot[~np.isnan(sst_plot)]
+    vmin, vmax = 0, 32
+
+    # Create figure with subplots
+    fig = make_subplots(
+        rows=1, cols=2,
+        column_widths=[0.7, 0.3],
+        subplot_titles=["SST Map (°C)", "SST Distribution"],
+        specs=[[{"type": "heatmap"}, {"type": "histogram"}]]
+    )
+
+    # SST heatmap
+    fig.add_trace(
+        go.Heatmap(
+            z=sst_plot,
+            x=lon_plot,
+            y=lat_plot,
+            colorscale='RdYlBu_r',
+            zmin=vmin,
+            zmax=vmax,
+            colorbar=dict(title="SST (°C)", x=0.45),
+            hovertemplate="Lon: %{x:.2f}<br>Lat: %{y:.2f}<br>SST: %{z:.2f}°C<extra></extra>"
+        ),
+        row=1, col=1
+    )
+
+    # SST histogram
+    if len(sst_valid) > 0:
+        # Sample for histogram if too many points
+        if len(sst_valid) > 100000:
+            hist_data = np.random.choice(sst_valid, 100000, replace=False)
+        else:
+            hist_data = sst_valid
+
+        fig.add_trace(
+            go.Histogram(
+                x=hist_data,
+                nbinsx=100,
+                marker_color='steelblue',
+                opacity=0.7,
+                hovertemplate="SST: %{x:.1f}°C<br>Count: %{y}<extra></extra>"
+            ),
+            row=1, col=2
+        )
+
+    # Update layout
+    title_str = data['attributes'].get('title', 'MUR SST L4 Analysis')
+    resolution = f"{len(lon)}×{len(lat)}"
+    if subsample > 1:
+        resolution += f" (displayed at {len(lon_plot)}×{len(lat_plot)})"
+
+    fig.update_layout(
+        title=f"{filepath.name}<br><sup>{title_str} | Resolution: {resolution}</sup>",
+        height=700,
+        showlegend=False,
+    )
+
+    # Update axes
+    fig.update_xaxes(title_text="Longitude", row=1, col=1)
+    fig.update_yaxes(title_text="Latitude", scaleanchor="x", row=1, col=1)
+    fig.update_xaxes(title_text="SST (°C)", row=1, col=2)
+    fig.update_yaxes(title_text="Count", row=1, col=2)
+
+    # Add statistics annotation
+    if len(sst_valid) > 0:
+        stats_text = (
+            f"Valid pixels: {len(sst_valid):,}<br>"
+            f"Mean: {sst_valid.mean():.2f}°C<br>"
+            f"Std: {sst_valid.std():.2f}°C<br>"
+            f"Range: [{sst_valid.min():.2f}, {sst_valid.max():.2f}]°C"
+        )
+        fig.add_annotation(
+            text=stats_text,
+            xref="paper", yref="paper",
+            x=0.98, y=0.98,
+            showarrow=False,
+            font=dict(size=11, family="monospace"),
+            align="right",
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="gray",
+            borderwidth=1
+        )
+
+    return fig
+
+
 def create_coefficient_plot(data: dict, format_type: str, filepath: Path) -> plt.Figure:
     """
     Create matplotlib figure for coefficient data (csp, usp).
@@ -1212,8 +1551,91 @@ def display_file_info(data: dict, format_type: str, filepath: Path):
         with col4:
             st.metric("Std Dev", f"{coef.std():.6f}")
 
+    elif format_type == 'nc':
+        variables = data['variables']
+        dimensions = data['dimensions']
+        attributes = data['attributes']
 
-def compare_files_data(data1: dict, data2: dict, format_type: str, tolerance: float = 1e-6) -> dict:
+        # Check if MUR GHRSST format
+        is_mur_ghrsst = 'analysed_sst' in variables
+
+        with col2:
+            if is_mur_ghrsst:
+                st.metric("Product", "MUR GHRSST L4")
+            else:
+                st.metric("Product", "Generic NetCDF")
+        with col3:
+            dim_str = " x ".join([f"{v:,}" for v in dimensions.values()])
+            st.metric("Dimensions", dim_str)
+
+        # Show title if available
+        if 'title' in attributes:
+            st.write(f"**Title:** {attributes['title']}")
+
+        st.write("#### Dimensions")
+        dim_cols = st.columns(len(dimensions))
+        for i, (dim_name, dim_size) in enumerate(dimensions.items()):
+            with dim_cols[i]:
+                st.metric(dim_name, f"{dim_size:,}")
+
+        st.write("#### Variables")
+        var_names = list(variables.keys())
+        # Show key variables first for MUR GHRSST
+        if is_mur_ghrsst:
+            key_vars = ['analysed_sst', 'analysis_error', 'mask',
+                        'sea_ice_fraction', 'sst_anomaly']
+            sorted_vars = [v for v in key_vars if v in var_names]
+            sorted_vars += [v for v in var_names if v not in key_vars]
+        else:
+            sorted_vars = var_names
+
+        for var_name in sorted_vars[:8]:  # Limit to 8 variables
+            var = variables[var_name]
+            shape = var['data'].shape if hasattr(var['data'], 'shape') else 'scalar'
+            units = var['attributes'].get('units', '')
+            long_name = var['attributes'].get('long_name', '')
+            st.write(f"- **{var_name}**: {shape} {units}")
+            if long_name:
+                st.caption(f"  {long_name}")
+
+        if len(sorted_vars) > 8:
+            st.write(f"*... and {len(sorted_vars) - 8} more variables*")
+
+        # SST statistics for MUR GHRSST
+        if is_mur_ghrsst:
+            st.write("#### SST Statistics")
+            sst_var = variables['analysed_sst']
+            sst_data = sst_var['data']
+            fill_val = sst_var['attributes'].get('_FillValue', -32768)
+            scale = sst_var['attributes'].get('scale_factor', 1.0)
+            offset = sst_var['attributes'].get('add_offset', 0.0)
+
+            # Get valid data (sample for speed)
+            sample_size = min(1000000, sst_data.size)
+            flat = sst_data.flatten()
+            if len(flat) > sample_size:
+                indices = np.random.choice(len(flat), sample_size, replace=False)
+                sample = flat[indices]
+            else:
+                sample = flat
+            valid = sample[sample != fill_val]
+            if len(valid) > 0:
+                sst_celsius = (valid * scale + offset) - 273.15
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Mean SST", f"{sst_celsius.mean():.2f} °C")
+                with col2:
+                    st.metric("Std Dev", f"{sst_celsius.std():.2f} °C")
+                with col3:
+                    st.metric("Min SST", f"{sst_celsius.min():.2f} °C")
+                with col4:
+                    st.metric("Max SST", f"{sst_celsius.max():.2f} °C")
+                st.caption(f"(Based on {len(valid):,} sampled points)")
+
+
+def compare_files_data(
+    data1: dict, data2: dict, format_type: str, tolerance: float = 1e-6
+) -> dict:
     """
     Compare two data dictionaries of the same format.
 
@@ -1560,35 +1982,15 @@ def main():
     """Main Streamlit application."""
 
     # Title and description
-    st.title("🌊 MUR Data Viewer")
-    st.markdown("### Web-based interface for MUR SST processing data files")
+    st.title("MUR Data Viewer")
+    st.markdown("Web-based interface for MUR SST processing data files")
 
-    # Mode selector at the top
-    mode = st.radio(
-        "Mode:",
-        ["📊 View Single File", "🔄 Compare Two Files"],
-        horizontal=True
-    )
-
-    # Sidebar for file browsing
-    st.sidebar.header("📁 File Browser")
-
-    # Get base directory (don't display it)
+    # Get base directory
     base_dir = get_base_directory()
 
     # Initialize session state
-    if 'current_dir' not in st.session_state:
-        st.session_state.current_dir = base_dir
-    if 'selected_file' not in st.session_state:
-        st.session_state.selected_file = None
-    if 'should_visualize' not in st.session_state:
-        st.session_state.should_visualize = False
-    if 'compare_file1' not in st.session_state:
-        st.session_state.compare_file1 = None
-    if 'compare_file2' not in st.session_state:
-        st.session_state.compare_file2 = None
-    if 'should_compare' not in st.session_state:
-        st.session_state.should_compare = False
+    if 'selected_file_path' not in st.session_state:
+        st.session_state.selected_file_path = None
     if 'reference_file' not in st.session_state:
         st.session_state.reference_file = None
     if 'reference_data' not in st.session_state:
@@ -1596,389 +1998,339 @@ def main():
     if 'reference_format' not in st.session_state:
         st.session_state.reference_format = None
 
-    # Ensure current directory is safe
-    if not is_safe_path(base_dir, st.session_state.current_dir):
-        st.session_state.current_dir = base_dir
+    # Sidebar options
+    st.sidebar.header("Options")
 
-    current_dir = Path(st.session_state.current_dir)
+    # Mode selector
+    mode = st.sidebar.radio(
+        "Mode:",
+        ["View File", "Compare Files"],
+    )
 
-    # Directory navigation
-    rel_path = current_dir.relative_to(base_dir) if current_dir != base_dir else '/'
-    st.sidebar.write(f"**Current:** `{rel_path}`")
-
-    # Parent directory button
-    if current_dir != base_dir:
-        if st.sidebar.button("⬆️ Parent Directory"):
-            parent = current_dir.parent
-            if is_safe_path(base_dir, parent):
-                st.session_state.current_dir = parent
-                st.rerun()
-
-    # List subdirectories
-    subdirs = list_subdirectories(current_dir)
-    if subdirs:
-        st.sidebar.write("**Subdirectories:**")
-        for subdir in subdirs:
-            if st.sidebar.button(f"📁 {subdir.name}", key=f"dir_{subdir}"):
-                if is_safe_path(base_dir, subdir):
-                    st.session_state.current_dir = subdir
-                    st.rerun()
-
-    # File pattern selector
+    # Display options
     st.sidebar.write("---")
-    st.sidebar.write("**File Filter:**")
+    st.sidebar.write("**Display Options:**")
+    show_info = st.sidebar.checkbox("Show file info", value=True)
 
-    supported_formats = {
-        "All files": "*",
-        "Point data (.bip, .biq, .bii, .bic, .bin)": "*.bi[pqic]",
-        "Grid data (.gds, .map)": "*.{gds,map}",
-        "NetCDF (.nc, .nc4)": "*.nc*",
-        "Coefficients (.c*, .u*)": "*.[cu]*",
-    }
-
-    selected_filter = st.sidebar.selectbox(
-        "Select file type:",
-        list(supported_formats.keys())
+    plot_type = st.sidebar.radio(
+        "Plot type:",
+        ["Matplotlib (Fast)", "Plotly (Interactive)"],
+        help="Matplotlib is faster. Plotly allows zoom/pan."
     )
+    use_plotly = plot_type.startswith("Plotly")
 
-    pattern = supported_formats[selected_filter]
-
-    # List files
-    files = list_files_in_directory(current_dir, pattern)
-
-    # Also check for compressed files
-    if pattern != "*":
-        gz_pattern = pattern + ".gz"
-        files.extend(list_files_in_directory(current_dir, gz_pattern))
-        files = sorted(set(files))
-
-    if not files:
-        st.warning("No files found in current directory with selected filter.")
-        st.info("Use the sidebar file browser to navigate to MUR data files.")
-        return
-
-    # File search/filter
-    st.sidebar.write(f"**Found {len(files)} file(s)**")
-    search_term = st.sidebar.text_input(
-        "🔍 Search files:",
-        placeholder="Type to filter..."
-    )
-
-    # Filter files based on search term
-    if search_term:
-        filtered_files = [
-            f for f in files if search_term.lower() in f.name.lower()
-        ]
-        st.sidebar.write(f"**Showing {len(filtered_files)} matching file(s)**")
-    else:
-        filtered_files = files
-
-    if not filtered_files:
-        st.sidebar.warning("No files match your search.")
-        # Still show reference file status in compare mode even with no files
-        if mode == "🔄 Compare Files" and st.session_state.reference_file:
-            st.sidebar.write("---")
-            ref_path = st.session_state.reference_file
-            try:
-                rel_path = ref_path.relative_to(base_dir)
-            except ValueError:
-                rel_path = ref_path.name
-            st.sidebar.success(f"📌 **Reference:**\n`{rel_path}`")
-            if st.sidebar.button(
-                "🗑️ Clear Reference",
-                use_container_width=True,
-                key="clear_ref_no_files"
-            ):
-                st.session_state.reference_file = None
-                st.session_state.reference_data = None
-                st.session_state.reference_format = None
-                st.session_state.should_compare = False
-                st.rerun()
-            st.info(
-                f"📌 **Reference set:** `{rel_path}`\n\n"
-                "Navigate to a folder with files to select comparison files."
-            )
-        return
-
-    # =========== SINGLE FILE MODE ===========
-    if mode == "📊 View Single File":
-        # File selector
-        selected_file = st.sidebar.selectbox(
-            "Select a file:",
-            filtered_files,
-            format_func=lambda x: x.name,
-            key="file_selector"
-        )
-
-        if selected_file:
-            st.sidebar.write("---")
-
-            # Visualization button (explicit action)
-            st.sidebar.write("**Actions:**")
-            viz_btn = st.sidebar.button(
-                "📊 Visualize File",
-                type="primary",
-                use_container_width=True
-            )
-            if viz_btn:
-                st.session_state.selected_file = selected_file
-                st.session_state.should_visualize = True
-
-            # Rendering options
-            st.sidebar.write("---")
-            st.sidebar.write("**Display Options:**")
-            show_info = st.sidebar.checkbox("Show file info", value=True)
-
-            # Plot type selector
-            plot_type = st.sidebar.radio(
-                "Plot type:",
-                ["Matplotlib (Fast)", "Plotly (Interactive)"],
-                help="Matplotlib is faster. Plotly allows zoom/pan."
-            )
-            use_plotly = plot_type.startswith("Plotly")
-
-            # Only load and display if visualize button was clicked
-            should_viz = st.session_state.should_visualize
-            same_file = st.session_state.selected_file == selected_file
-            if should_viz and same_file:
-                try:
-                    # Detect format
-                    format_type = DataFileReader.detect_format(selected_file)
-
-                    with st.spinner(f"Reading {format_type.upper()} file..."):
-                        data = read_file(selected_file)
-
-                    # Display info
-                    if show_info:
-                        display_file_info(data, format_type, selected_file)
-
-                    # Display plot
-                    st.write("---")
-                    st.subheader("📊 Visualization")
-
-                    with st.spinner("Creating visualization..."):
-                        if format_type in ['bip', 'biq', 'bii', 'bic', 'bin']:
-                            if use_plotly:
-                                try:
-                                    fig = create_interactive_point_plot(
-                                        data, format_type, selected_file
-                                    )
-                                    st.plotly_chart(fig, use_container_width=True)
-                                except Exception as e:
-                                    st.error(f"Plotly failed: {e}")
-                                    st.info("Falling back to Matplotlib...")
-                                    fig = create_point_data_plot(
-                                        data, format_type, selected_file
-                                    )
-                                    st.pyplot(fig)
-                                    plt.close(fig)
-                            else:
-                                fig = create_point_data_plot(
-                                    data, format_type, selected_file
-                                )
-                                st.pyplot(fig)
-                                plt.close(fig)
-                        elif format_type in ['gds', 'map']:
-                            fig = create_grid_data_plot(
-                                data, format_type, selected_file
-                            )
-                            st.pyplot(fig)
-                            plt.close(fig)
-                        elif format_type in ['csp', 'usp']:
-                            fig = create_coefficient_plot(
-                                data, format_type, selected_file
-                            )
-                            st.pyplot(fig)
-                            plt.close(fig)
-                        else:
-                            st.info(
-                                f"Visualization not implemented for "
-                                f"{format_type} format."
-                            )
-
-                except Exception as e:
-                    st.error(f"Error processing file: {e}")
-                    import traceback
-                    with st.expander("Show error details"):
-                        st.code(traceback.format_exc())
-            else:
-                st.info("👆 Select a file and click **Visualize File**.")
-
-    # =========== COMPARE MODE ===========
-    else:
-        # Show reference file status in sidebar
+    # Compare mode: reference file status
+    if mode == "Compare Files":
         st.sidebar.write("---")
+        st.sidebar.write("**Reference File:**")
         if st.session_state.reference_file:
-            ref_path = st.session_state.reference_file
-            try:
-                ref_rel_path = ref_path.relative_to(base_dir)
-            except ValueError:
-                ref_rel_path = ref_path.name
-            st.sidebar.success(f"📌 **Reference:**\n`{ref_rel_path}`")
-            if st.sidebar.button(
-                "🗑️ Clear Reference",
-                use_container_width=True
-            ):
+            st.sidebar.success(f"`{Path(st.session_state.reference_file).name}`")
+            if st.sidebar.button("Clear Reference", use_container_width=True):
                 st.session_state.reference_file = None
                 st.session_state.reference_data = None
                 st.session_state.reference_format = None
-                st.session_state.should_compare = False
                 st.rerun()
         else:
-            st.sidebar.info("📌 No reference file set")
+            st.sidebar.info("No reference set")
 
-        st.sidebar.write("---")
-        st.sidebar.write("**Select file to compare:**")
-
-        # File selector for comparison
-        selected_file = st.sidebar.selectbox(
-            "File:",
-            filtered_files,
-            format_func=lambda x: x.name,
-            key="compare_file_selector"
-        )
-
-        st.sidebar.write("---")
-
-        # Tolerance setting
         tolerance = st.sidebar.number_input(
             "Comparison tolerance:",
             min_value=1e-10,
             max_value=1.0,
             value=1e-6,
             format="%.2e",
-            help="Numerical tolerance for float comparisons"
         )
 
-        st.sidebar.write("---")
-        st.sidebar.write("**Actions:**")
+    # Initialize directory navigation state
+    if 'current_dir' not in st.session_state:
+        st.session_state.current_dir = str(base_dir)
 
-        # Set as Reference button
-        set_ref_btn = st.sidebar.button(
-            "📌 Set as Reference",
-            use_container_width=True,
-            help="Set the selected file as the reference for comparisons"
+    current_dir = Path(st.session_state.current_dir)
+    if not current_dir.exists():
+        current_dir = base_dir
+        st.session_state.current_dir = str(base_dir)
+
+    # Sidebar file browser
+    st.sidebar.write("---")
+    st.sidebar.write("**File Browser:**")
+
+    # Show data root with expander to change it
+    with st.sidebar.expander("Data Root", expanded=False):
+        st.caption(f"Current: `{base_dir}`")
+        st.caption("Set via MUR_BASE_DIR environment variable")
+        new_root = st.text_input(
+            "Change root:",
+            value=str(base_dir),
+            key="new_base_dir",
+            label_visibility="collapsed",
         )
-        if set_ref_btn and selected_file:
-            with st.spinner("Loading reference file..."):
-                try:
-                    ref_fmt = DataFileReader.detect_format(selected_file)
-                    ref_data = read_file(selected_file)
-                    st.session_state.reference_file = selected_file
-                    st.session_state.reference_data = ref_data
-                    st.session_state.reference_format = ref_fmt
-                    st.session_state.should_compare = False
+        if new_root and Path(new_root).exists() and Path(new_root).is_dir():
+            if str(Path(new_root).resolve()) != str(base_dir):
+                if st.button("Apply", use_container_width=True):
+                    st.session_state.current_dir = new_root
+                    os.environ['MUR_BASE_DIR'] = new_root
                     st.rerun()
-                except Exception as e:
-                    st.sidebar.error(f"Error loading reference: {e}")
 
-        # Compare to Reference button (only enabled if reference is set)
-        compare_btn = st.sidebar.button(
-            "🔄 Compare to Reference",
-            type="primary",
-            use_container_width=True,
-            disabled=st.session_state.reference_file is None
+    # Show current path relative to base
+    try:
+        rel_path = current_dir.relative_to(base_dir)
+        current_path_display = "/" if str(rel_path) == '.' else f"/{rel_path}"
+    except ValueError:
+        current_path_display = str(current_dir)
+    st.sidebar.caption(f"Path: `{current_path_display}`")
+
+    # Folder dropdown - build list of navigation options
+    folder_options = []
+    folder_paths = []
+
+    # Add parent option if not at root
+    if current_dir != base_dir:
+        parent = current_dir.parent
+        try:
+            parent.relative_to(base_dir)
+            folder_options.append(".. (parent)")
+            folder_paths.append(parent)
+        except ValueError:
+            pass
+
+    # Add subdirectories
+    try:
+        subdirs = sorted([d for d in current_dir.iterdir() if d.is_dir()])
+        for subdir in subdirs:
+            folder_options.append(f"{subdir.name}/")
+            folder_paths.append(subdir)
+    except PermissionError:
+        pass
+
+    # Folder selector dropdown
+    if folder_options:
+        folder_names = ["(current folder)"] + folder_options
+        folder_idx = st.sidebar.selectbox(
+            "Folder:",
+            range(len(folder_names)),
+            format_func=lambda i: folder_names[i],
+            key="folder_select",
         )
-        if compare_btn and selected_file:
-            st.session_state.compare_file2 = selected_file
-            st.session_state.should_compare = True
+        if folder_idx > 0:
+            new_dir = folder_paths[folder_idx - 1]
+            if str(new_dir) != st.session_state.current_dir:
+                st.session_state.current_dir = str(new_dir)
+                st.rerun()
+    else:
+        st.sidebar.caption("No subfolders")
 
-        # Main content area
-        if st.session_state.reference_file is None:
-            st.info(
-                "👆 **Step 1:** Select a file in the sidebar and click "
-                "**Set as Reference** to begin comparisons."
-            )
-        elif not st.session_state.should_compare:
-            st.info(
-                f"📌 **Reference set:** `{ref_rel_path}`\n\n"
-                "👆 **Step 2:** Select another file and click "
-                "**Compare to Reference** to see the comparison.\n\n"
-                "You can compare multiple files to this reference without resetting."
-            )
-        else:
-            # Perform comparison
-            ref_file = st.session_state.reference_file
-            cmp_file = st.session_state.compare_file2
+    # List files with supported extensions
+    supported_patterns = [
+        "*.nc", "*.nc4",
+        "*.bip", "*.biq", "*.bii", "*.bic", "*.bin",
+        "*.gds", "*.map",
+        "*.c[0-9]*", "*.u[0-9]*",
+        "*.gz",
+    ]
+    files = []
+    for pattern in supported_patterns:
+        files.extend(current_dir.glob(pattern))
+    # Sort by modification time (newest first)
+    files = sorted(set(files), key=lambda f: f.stat().st_mtime, reverse=True)
 
-            if ref_file == cmp_file:
-                st.warning("The selected file is the same as the reference file.")
-            else:
-                try:
-                    # Use cached reference data
-                    ref_data = st.session_state.reference_data
-                    ref_fmt = st.session_state.reference_format
+    # File selector dropdown
+    selected_file = None
+    if files:
+        file_names = ["(select a file)"] + [f.name for f in files]
+        selected_idx = st.sidebar.selectbox(
+            "File:",
+            range(len(file_names)),
+            format_func=lambda i: file_names[i],
+            key="file_select",
+        )
+        if selected_idx > 0:
+            selected_file = files[selected_idx - 1]
+            st.session_state.selected_file_path = str(selected_file)
+    else:
+        st.sidebar.info("No supported files here")
 
-                    # Detect format for comparison file
-                    cmp_fmt = DataFileReader.detect_format(cmp_file)
+    # Check session state for previously selected file
+    if not selected_file and st.session_state.selected_file_path:
+        prev_file = Path(st.session_state.selected_file_path)
+        if prev_file.exists():
+            # Only keep if it's still in the current directory
+            if prev_file.parent == current_dir:
+                selected_file = prev_file
 
-                    if ref_fmt != cmp_fmt:
-                        st.error(
-                            f"Cannot compare different formats: "
-                            f"{ref_fmt.upper()} (reference) vs "
-                            f"{cmp_fmt.upper()} (comparison)"
-                        )
-                    else:
-                        # Read comparison file
-                        with st.spinner("Reading comparison file..."):
-                            cmp_data = read_file(cmp_file)
+    # Show selected file and action buttons in sidebar
+    if selected_file:
+        st.sidebar.write("---")
+        st.sidebar.success(f"**Selected:**\n{selected_file.name}")
 
-                        # Display comparison results
-                        st.subheader("🔄 Comparison Results")
+        if mode == "Compare Files":
+            if st.sidebar.button("Set as Reference", use_container_width=True):
+                with st.spinner("Loading..."):
+                    try:
+                        fmt = DataFileReader.detect_format(selected_file)
+                        data = read_file(selected_file)
+                        st.session_state.reference_file = str(selected_file)
+                        st.session_state.reference_data = data
+                        st.session_state.reference_format = fmt
+                        st.rerun()
+                    except Exception as e:
+                        st.sidebar.error(f"Error: {e}")
 
-                        # File info with relative paths
-                        try:
-                            cmp_rel_path = cmp_file.relative_to(base_dir)
-                        except ValueError:
-                            cmp_rel_path = cmp_file.name
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.write(f"**Reference:** `{ref_rel_path}`")
-                        with col2:
-                            st.write(f"**Comparison:** `{cmp_rel_path}`")
+            compare_disabled = st.session_state.reference_file is None
+            if st.sidebar.button("Compare to Reference", use_container_width=True,
+                                 disabled=compare_disabled):
+                st.session_state.compare_target = str(selected_file)
 
-                        st.write(f"**Format:** {ref_fmt.upper()}")
-                        st.write(f"**Tolerance:** {tolerance:.2e}")
-                        st.write("---")
+    # Main content area for visualization
+    st.subheader("Visualization")
 
-                        # Run comparison
-                        results = compare_files_data(
-                            ref_data, cmp_data, ref_fmt, tolerance
-                        )
+    if mode == "View File":
+        # Single file visualization
+        if selected_file:
+            try:
+                format_type = DataFileReader.detect_format(selected_file)
 
-                        # Display results table
-                        st.write("**Field Comparison:**")
-                        for comp in results['comparisons']:
-                            icon = "✅" if comp['match'] else "❌"
-                            st.write(
-                                f"{icon} **{comp['field']}**: {comp['message']}"
-                            )
+                with st.spinner(f"Reading {format_type.upper()} file..."):
+                    data = read_file(selected_file)
 
-                        st.write("---")
+                if show_info:
+                    display_file_info(data, format_type, selected_file)
 
-                        # Summary
-                        if results['all_match']:
-                            st.success("🎉 All fields match within tolerance!")
+                st.write("---")
+
+                with st.spinner("Creating visualization..."):
+                    if format_type in ['bip', 'biq', 'bii', 'bic', 'bin']:
+                        if use_plotly:
+                            try:
+                                fig = create_interactive_point_plot(
+                                    data, format_type, selected_file
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
+                            except Exception as e:
+                                st.warning(f"Plotly failed: {e}")
+                                fig = create_point_data_plot(
+                                    data, format_type, selected_file
+                                )
+                                st.pyplot(fig)
+                                plt.close(fig)
                         else:
-                            st.warning("❌ Some differences found.")
-
-                        # Visualization
-                        st.write("---")
-                        st.subheader("📊 Comparison Visualization")
-
-                        with st.spinner("Creating comparison plots..."):
-                            fig = create_comparison_plot(
-                                ref_data, cmp_data, ref_fmt,
-                                ref_file.name, cmp_file.name
+                            fig = create_point_data_plot(
+                                data, format_type, selected_file
                             )
                             st.pyplot(fig)
                             plt.close(fig)
+                    elif format_type in ['gds', 'map']:
+                        fig = create_grid_data_plot(
+                            data, format_type, selected_file
+                        )
+                        st.pyplot(fig)
+                        plt.close(fig)
+                    elif format_type in ['csp', 'usp']:
+                        fig = create_coefficient_plot(
+                            data, format_type, selected_file
+                        )
+                        st.pyplot(fig)
+                        plt.close(fig)
+                    elif format_type == 'nc':
+                        st.info("NetCDF files are large. Rendering...")
+                        if use_plotly:
+                            try:
+                                fig = create_interactive_netcdf_plot(
+                                    data, selected_file
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
+                            except Exception as e:
+                                st.warning(f"Plotly failed: {e}. Using matplotlib.")
+                                fig = create_netcdf_plot(data, selected_file)
+                                st.pyplot(fig)
+                                plt.close(fig)
+                        else:
+                            fig = create_netcdf_plot(data, selected_file)
+                            st.pyplot(fig)
+                            plt.close(fig)
+                    else:
+                        st.info(f"No visualization for {format_type} format.")
 
-                except Exception as e:
-                    st.error(f"Error comparing files: {e}")
-                    import traceback
-                    with st.expander("Show error details"):
-                        st.code(traceback.format_exc())
+            except Exception as e:
+                st.error(f"Error: {e}")
+                import traceback
+                with st.expander("Details"):
+                    st.code(traceback.format_exc())
+        else:
+            st.info("Select a file from the browser to visualize it.")
+
+    else:  # Compare mode
+        ref_file = st.session_state.reference_file
+        cmp_file = getattr(st.session_state, 'compare_target', None)
+
+        if not ref_file:
+            st.info("Set a reference file first, then select a file to compare.")
+        elif not cmp_file:
+            st.info(
+                f"Reference: **{Path(ref_file).name}**\n\n"
+                "Select another file and click Compare."
+            )
+        elif ref_file == cmp_file:
+            st.warning("Cannot compare a file to itself.")
+        else:
+            # Perform comparison
+            try:
+                ref_data = st.session_state.reference_data
+                ref_fmt = st.session_state.reference_format
+                cmp_path = Path(cmp_file)
+
+                cmp_fmt = DataFileReader.detect_format(cmp_path)
+
+                if ref_fmt != cmp_fmt:
+                    st.error(
+                        f"Cannot compare different formats: "
+                        f"{ref_fmt.upper()} vs {cmp_fmt.upper()}"
+                    )
+                else:
+                    with st.spinner("Reading comparison file..."):
+                        cmp_data = read_file(cmp_path)
+
+                    st.write(f"**Reference:** {Path(ref_file).name}")
+                    st.write(f"**Comparison:** {cmp_path.name}")
+                    st.write(f"**Format:** {ref_fmt.upper()}")
+                    st.write(f"**Tolerance:** {tolerance:.2e}")
+                    st.write("---")
+
+                    results = compare_files_data(
+                        ref_data, cmp_data, ref_fmt, tolerance
+                    )
+
+                    st.write("**Field Comparison:**")
+                    for comp in results['comparisons']:
+                        icon = "✅" if comp['match'] else "❌"
+                        st.write(
+                            f"{icon} **{comp['field']}**: {comp['message']}"
+                        )
+
+                    st.write("---")
+
+                    # Summary
+                    if results['all_match']:
+                        st.success("All fields match within tolerance!")
+                    else:
+                        st.warning("Some differences found.")
+
+                    # Visualization
+                    st.write("---")
+                    st.subheader("Comparison Visualization")
+
+                    with st.spinner("Creating comparison plots..."):
+                        fig = create_comparison_plot(
+                            ref_data, cmp_data, ref_fmt,
+                            Path(ref_file).name, cmp_path.name
+                        )
+                        st.pyplot(fig)
+                        plt.close(fig)
+
+            except Exception as e:
+                st.error(f"Error comparing files: {e}")
+                import traceback
+                with st.expander("Show error details"):
+                    st.code(traceback.format_exc())
 
 
 if __name__ == '__main__':
