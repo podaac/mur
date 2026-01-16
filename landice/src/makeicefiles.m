@@ -44,6 +44,9 @@ fprintf(1, 'makeicefiles: resolution - %s\n', resolution);
 
 if ~exist('resolution','var'), resolution='p01'; end;
 
+% Ensure day is zero-padded to 3 digits for consistent file naming
+day = sprintf('%03d', str2double(day));
+
 
 %% parameter:
 
