@@ -282,27 +282,37 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
       landmaskfile=tmpmaskfile;
       fprintf(1,'loading %s\n',landmaskfile);
       f=fopen(landmaskfile,'r');
-      % Read dimensions
+      % Record 1: dimensions
+      fread(f, 1, 'uint32');  % skip Fortran record marker
       ii = fread(f, 1, 'int32=>int32');
       jj = fread(f, 1, 'int32=>int32');
-      % Read mask and coordinates
+      fread(f, 1, 'uint32');  % skip Fortran record marker
+      % Record 2: mask and coordinates
+      fread(f, 1, 'uint32');  % skip Fortran record marker
       mask = fread(f, [ii, jj], 'int8=>int8');
       lon = fread(f, ii, 'float32=>single');
       lat = fread(f, jj, 'float32=>single');
-      % Read ice map
+      fread(f, 1, 'uint32');  % skip Fortran record marker
+      % Record 3: ice map
+      fread(f, 1, 'uint32');  % skip Fortran record marker
       icemap = fread(f, [ii, jj], 'int8=>int8');
+      fread(f, 1, 'uint32');  % skip Fortran record marker
       fclose(f);
     else,
       landmaskfile=gridfile;
       fprintf(1,'loading %s\n',landmaskfile);
       f=fopen(landmaskfile,'r');
-      % Read dimensions
+      % Record 1: dimensions
+      fread(f, 1, 'uint32');  % skip Fortran record marker
       ii = fread(f, 1, 'int32=>int32');
       jj = fread(f, 1, 'int32=>int32');
-      % Read mask and coordinates
+      fread(f, 1, 'uint32');  % skip Fortran record marker
+      % Record 2: mask and coordinates
+      fread(f, 1, 'uint32');  % skip Fortran record marker
       mask = fread(f, [ii, jj], 'int8=>int8');
       lon = fread(f, ii, 'float32=>single');
       lat = fread(f, jj, 'float32=>single');
+      fread(f, 1, 'uint32');  % skip Fortran record marker
       fclose(f);
     end;
     clear lon lat;
@@ -314,11 +324,15 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
       if hiresgridfile_provided,  % should have been passed via config
           if exist(hiresgridfile,'file'),
             f=fopen(hiresgridfile,'r');
-            % Read hires grid dimensions
+            % Record 1: dimensions
+            fread(f, 1, 'uint32');  % skip Fortran record marker
             nhireslon = fread(f, 1, 'int32=>int32');
             nhireslat = fread(f, 1, 'int32=>int32');
-            % Read hires grid data
+            fread(f, 1, 'uint32');  % skip Fortran record marker
+            % Record 2: hires grid data
+            fread(f, 1, 'uint32');  % skip Fortran record marker
             dt_1km_data = fread(f, [nhireslon, nhireslat], 'int8=>int8');
+            fread(f, 1, 'uint32');  % skip Fortran record marker
             clear nhireslon nhireslat;
             disp(['HiResGrid to be included: ',hiresgridfile]);
             fclose(f);
