@@ -52,7 +52,7 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
   tref=int64(julian(day,1,year,3)-julian(1,1,1981,3))*86400;
 
   %% fill data by reading each file:
-  listfile=append(filedir,'/L2Plist_',region,'_',sensor,'_',string(year),'_',string(day),'.txt')
+  listfile=sprintf('%s/L2Plist_%s_%s_%04d_%03d.txt',filedir,region,sensor,year,day);
   fprintf(1,'l2p2bic: writing %s\n',listfile);
   flist=fopen(listfile,'w');
 
@@ -260,6 +260,6 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
   %filedir=sprintf('%s/%04d',bicdir,year);
   if ~exist(filedir,'dir'), eval(sprintf('!mkdir -p %s',filedir)); end;
 
-  bicfile=append(filedir,'/',region,'_',sensor,'_',string(year),'_',string(day),'.bic');
+  bicfile=sprintf('%s/%s_%s_%04d_%03d.bic',filedir,region,sensor,year,day);
   writebic(bicfile,year,day,lon,lat,sst,bias,rms,hour,flag);
   % writebic does gzipping.
