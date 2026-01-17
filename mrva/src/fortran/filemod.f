@@ -372,12 +372,47 @@
       read(7) grid,lon,lat
       close(7)
 
+      ! DEBUG: Print grid file coordinate ranges
+      print*,'DEBUG outscaledgds: Grid file info:'
+      print*,'  gridfile = ', trim(gridfile)
+      print*,'  nlon,nlat = ', nlon, nlat
+      print*,'  lon range = ', lon(1), ' to ', lon(nlon)
+      print*,'  lat range = ', lat(1), ' to ', lat(nlat)
+      print*,'  land pixels (grid==2) count = ', count(grid==2)
+      print*,'  water pixels count = ', count(grid/=2)
+
       allocate(out(nlon,nlat))
 
       dx=(lon(nlon)-lon(1))/(nlon-1)
       dy=(lat(nlat)-lat(1))/(nlat-1)
-      
+      print*,'  dx,dy = ', dx, dy
+
+      ! DEBUG: Check if grid lon/lat falls within coefficient domain
+      print*,'DEBUG outscaledgds: Domain check:'
+      print*,'  Coeff domain: x=[',xmin,',',xmax,'] y=[',ymin,',',ymax,']'
+      print*,'  Grid domain:  x=[',lon(1),',',lon(nlon),
+     &       '] y=[',lat(1),',',lat(nlat),']'
+      if(lon(1).lt.xmin .or. lon(nlon).gt.xmax) then
+        print*,'  WARNING: Grid lon outside coeff domain!'
+      end if
+      if(lat(1).lt.ymin .or. lat(nlat).gt.ymax) then
+        print*,'  WARNING: Grid lat outside coeff domain!'
+      end if
+
       ! apply netCDF-like transformation to SST; save to "grid(:,:)":
+      ! DEBUG: Sample spmPoint at a few test locations before main loop
+      print*,'DEBUG outscaledgds: Testing spmPoint at sample locations:'
+      print*,'  Module state: mx,my = ', mx, my
+      print*,'  Module state: xmin,xmax = ', xmin, xmax
+      print*,'  Module state: ymin,ymax = ', ymin, ymax
+      print*,'  Module state: hx,hy = ', hx, hy
+      call spmPoint(1,1,csp,0.0,0.0,0,0,dx,dy,sst)
+      print*,'  spmPoint(0,0) raw = ', sst, ' +sstref = ', sst+sstref
+      call spmPoint(1,1,csp,-120.0,30.0,0,0,dx,dy,sst)
+      print*,'  spmPoint(-120,30) raw = ', sst, ' +sstref = ', sst+sstref
+      call spmPoint(1,1,csp,0.0,-60.0,0,0,dx,dy,sst)
+      print*,'  spmPoint(0,-60) raw = ', sst, ' +sstref = ', sst+sstref
+
       do j=1,nlat
         y=lat(j)
         do i=1,nlon
@@ -392,6 +427,19 @@
           end if
         end do
       end do
+
+      ! DEBUG: Print SST range statistics after computation
+      print*,'DEBUG outscaledgds: Output statistics:'
+      print*,'  offset = ', offset, ' sscale = ', sscale
+      print*,'  sstref = ', sstref, ' minsst = ', minsst
+      print*,'  int16 range (excl -32768) = ',
+     &       minval(out, out.ne.-32768), maxval(out, out.ne.-32768)
+      print*,'  SST range (K) = ',
+     &       minval(out, out.ne.-32768)*sscale+offset,
+     &       maxval(out, out.ne.-32768)*sscale+offset
+      print*,'  SST range (C) = ',
+     &       minval(out, out.ne.-32768)*sscale+offset-273.15,
+     &       maxval(out, out.ne.-32768)*sscale+offset-273.15
 
       write(180+L) nlon,nlat
       write(180+L) offset,sscale

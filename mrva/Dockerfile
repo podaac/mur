@@ -234,7 +234,7 @@ WORKDIR /data
 
 # Create entrypoint wrapper script
 # This wrapper validates arguments and calls MATLAB with Fortran binaries available
-# Arguments: year doy mode [sensors]
+# Arguments: [--debug] year doy mode [sensors]
 RUN cat > /opt/mrva/bin/entrypoint.sh <<'EOF' && chmod +x /opt/mrva/bin/entrypoint.sh
 #!/bin/bash
 # MRVA Container Entrypoint Wrapper
@@ -251,10 +251,29 @@ ulimit -s unlimited 2>/dev/null || echo "Warning: Could not set unlimited stack 
 # Ensure OpenMP stack is set (may have been set in Dockerfile ENV but ensure here)
 export KMP_STACKSIZE=${KMP_STACKSIZE:-128M}
 
+# ========================================================================
+# Debug Mode Detection
+# ========================================================================
+DEBUG_MODE=0
+if [ "$1" = "--debug" ]; then
+    DEBUG_MODE=1
+    shift  # Remove --debug from arguments
+    echo "========================================="
+    echo "DEBUG MODE ENABLED"
+    echo "========================================="
+    echo "Enhanced diagnostic output will be shown."
+    echo "For maximum debugging, rebuild with DEBUG=1:"
+    echo "  docker build --build-arg DEBUG=1 -t mrva:debug ..."
+    echo "========================================="
+    echo ""
+fi
+export MRVA_DEBUG=$DEBUG_MODE
+
 # Argument validation
 if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
     echo "ERROR: Expected 3-4 arguments, got $#"
-    echo "Usage: docker run ... YEAR DOY MODE [SENSORS]"
+    echo "Usage: docker run ... [--debug] YEAR DOY MODE [SENSORS]"
+    echo "  --debug: Optional flag to enable enhanced diagnostic output"
     echo "  YEAR:    4-digit year (e.g., 2025)"
     echo "  DOY:     Day of year (1-366)"
     echo "  MODE:    nrt (near-real-time) or rea (reanalysis)"
@@ -267,6 +286,9 @@ if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
     echo "    -v /local/landice:/data/input/landice \\"
     echo "    -v /local/output:/data/output \\"
     echo "    mrva:latest 2025 220 nrt"
+    echo ""
+    echo "Debug example:"
+    echo "  docker run --rm ... mrva:latest --debug 2025 220 nrt"
     exit 1
 fi
 
@@ -301,6 +323,7 @@ echo "Year:     $YEAR"
 echo "DOY:      $DOY"
 echo "Mode:     $MODE"
 echo "Sensors:  ${SENSORS:-all (default)}"
+echo "Debug:    $([ $DEBUG_MODE -eq 1 ] && echo 'ENABLED' || echo 'disabled')"
 echo "-----------------------------------------"
 echo "Stack:    $(ulimit -s) (soft limit)"
 echo "KMP_STACKSIZE: $KMP_STACKSIZE"

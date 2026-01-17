@@ -101,11 +101,11 @@ else
     version = '04.1';
 end
 
-% PODAAC push flag
+% PODAAC push flag (disabled by default for containerized operation)
 if isfield(config, 'podaacpush')
     podaacpush = config.podaacpush;
 else
-    podaacpush = 1;
+    podaacpush = 0;
 end
 
 % NetCDF4 deflation level
