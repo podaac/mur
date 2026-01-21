@@ -253,7 +253,8 @@ for year = year0:year2
             % Adjust day with offset
             [d, y] = adjustDoy(day + dt, year);
 
-            % Skip future dates
+            % Skip future dates (relative to simulated run day)
+            % This matches production behavior where data wasn't available yet
             dataDatenum = datenum(y, 1, 0) + d;
             if dataDatenum > todayDatenum
                 continue;

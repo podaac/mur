@@ -510,10 +510,9 @@ class MUROrchestrator:
         for dt in range(-dayrange[0], dayrange[1] + 1):
             data_day = process_date + datetime.timedelta(days=dt)
 
-            # Skip genuinely future dates (relative to actual today, not simulated)
-            # For historical reruns, all dates in window should be processable
-            actual_today = datetime.date.today()
-            if data_day > actual_today:
+            # Skip future dates (relative to simulated run day)
+            # This matches production behavior where data wasn't available yet
+            if data_day > reference_today:
                 continue
 
             days_processed += 1
@@ -1050,19 +1049,21 @@ Examples:
   # Process yesterday with full pipeline (preprocessing + MRVA)
   uv run run_mur_pipeline.py --config config.json
 
-  # Process full 9-day window with MRVA
-  uv run run_mur_pipeline.py --config config.json --all-stages
+  # Simulate production run on Jan 20, processing yesterday (Jan 19)
+  uv run run_mur_pipeline.py --config config.json --date 2026-01-20
 
-  # Process specific date with full pipeline
-  uv run run_mur_pipeline.py --config config.json --date 2024-08-08
+  # Simulate production run on Jan 20, processing the REA boundary day (Jan 16)
+  uv run run_mur_pipeline.py --config config.json --date 2026-01-20 --process-days -4
+
+  # Simulate production run on Jan 20, processing full 9-day window
+  uv run run_mur_pipeline.py --config config.json --date 2026-01-20 --process-days -9:-1
+  uv run run_mur_pipeline.py --config config.json --date 2026-01-20 --all-stages
 
   # Preprocessing only (skip MRVA)
-  uv run run_mur_pipeline.py --config config.json --date 2024-08-08 --preprocess-only
+  uv run run_mur_pipeline.py --config config.json --date 2026-01-20 --preprocess-only
 
-  # Execute only specific stages (comma-separated or multiple flags)
-  uv run run_mur_pipeline.py --config config.json --execute iquam
-  uv run run_mur_pipeline.py --config config.json --execute iquam,landice
-  uv run run_mur_pipeline.py --config config.json --execute iquam --execute l2p
+  # Execute only specific stages
+  uv run run_mur_pipeline.py --config config.json --execute iquam,l2p
 
   # Use custom .netrc location
   uv run run_mur_pipeline.py --config config.json --netrc-path mur/.netrc
@@ -1079,15 +1080,24 @@ Examples:
     parser.add_argument(
         "--date",
         type=str,
-        help="Simulate running on this date (YYYY-MM-DD). Following production "
-             "behavior, MRVA will process YESTERDAY relative to this date. "
-             "E.g., --date 2025-11-13 processes Nov 12. Default: process yesterday"
+        help="Simulate running on this date (YYYY-MM-DD). This is the 'run day' - "
+             "the date when production would have executed. Future date checks use "
+             "this date. Default: actual today"
+    )
+
+    parser.add_argument(
+        "--process-days",
+        type=str,
+        default="-1",
+        help="Analysis day(s) to process as offset(s) from run day. Single offset "
+             "(e.g., '-1') or range (e.g., '-9:-1'). Default: -1 (yesterday/NRT). "
+             "Examples: '-1'=yesterday, '-4'=REA boundary, '-9:-1'=full window"
     )
 
     parser.add_argument(
         "--all-stages",
         action="store_true",
-        help="Process full 9-day window (REA + NRT modes)"
+        help="Process full 9-day window (REA + NRT modes). Equivalent to --process-days -9:-1"
     )
 
     parser.add_argument(
@@ -1157,6 +1167,43 @@ def parse_execute_stages(execute_args: List[str]) -> Optional[List[str]]:
                 stages.append(stage)
 
     return stages if stages else None
+
+
+def parse_process_days(process_days_arg: str) -> List[int]:
+    """
+    Parse --process-days argument into a list of day offsets.
+
+    Args:
+        process_days_arg: String like "-1", "-4", or "-9:-1"
+
+    Returns:
+        List of integer offsets (e.g., [-1] or [-9, -8, -7, ..., -1])
+    """
+    process_days_arg = process_days_arg.strip()
+
+    if ":" in process_days_arg:
+        # Range format: "-9:-1"
+        parts = process_days_arg.split(":")
+        if len(parts) != 2:
+            logger.error(f"Invalid process-days range: {process_days_arg}")
+            logger.error("Expected format: START:END (e.g., '-9:-1')")
+            sys.exit(1)
+        try:
+            start = int(parts[0])
+            end = int(parts[1])
+            if start > end:
+                start, end = end, start  # Swap if reversed
+            return list(range(start, end + 1))
+        except ValueError:
+            logger.error(f"Invalid process-days range: {process_days_arg}")
+            sys.exit(1)
+    else:
+        # Single offset: "-1"
+        try:
+            return [int(process_days_arg)]
+        except ValueError:
+            logger.error(f"Invalid process-days value: {process_days_arg}")
+            sys.exit(1)
 
 
 def create_output_directories(config: Dict) -> None:
@@ -1248,36 +1295,37 @@ def main():
 
     # Determine processing mode
     try:
-        if args.date:
-            # Single date specified - run as if "today" is that date
-            # Following original nrtMRVA.py: process yesterday relative to simulated today
-            # The env var is already set, so calculate_processing_window()
-            # will use mur_date.today() for the correct NRT/REA boundary (day1)
-            reference_today = orchestrator.get_reference_today()
-            process_date = reference_today - datetime.timedelta(days=1)
-            _, day1, _ = orchestrator.calculate_processing_window()
-            logger.info(f"Simulated today: {reference_today}")
-            logger.info(f"Processing date (yesterday): {process_date}")
-            logger.info(f"NRT/REA boundary (day1): {day1}")
-            success = orchestrator.run_single_day(
+        # Get reference "today" (run day) - either simulated or actual
+        reference_today = orchestrator.get_reference_today()
+        _, day1, _ = orchestrator.calculate_processing_window()
+
+        # Parse process days - which analysis days to process (offsets from run day)
+        if args.all_stages:
+            # --all-stages is equivalent to --process-days -9:-1
+            day_offsets = list(range(-9, 0))  # -9 to -1 inclusive
+            logger.info("Processing full 9-day window (--all-stages)")
+        else:
+            day_offsets = parse_process_days(args.process_days)
+
+        logger.info(f"Run day (simulated today): {reference_today}")
+        logger.info(f"NRT/REA boundary (day1): {day1}")
+        logger.info(f"Processing day offsets: {day_offsets}")
+
+        # Process each analysis day
+        success = True
+        for offset in day_offsets:
+            process_date = reference_today + datetime.timedelta(days=offset)
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Processing analysis day: {process_date} (run_day{offset:+d})")
+            logger.info(f"{'='*60}")
+
+            day_success = orchestrator.run_single_day(
                 process_date, day1, args.preprocess_only, execute_stages
             )
+            success = success and day_success
 
-        elif args.all_stages:
-            # Full window (mimics nrtMRVA.py full run)
-            # Uses mur_date.today() via get_reference_today() for window calculation
-            success = orchestrator.run_date_range(
-                preprocess_only=args.preprocess_only, execute_stages=execute_stages
-            )
-
-        else:
-            # Default: just yesterday (relative to simulated or actual today)
-            reference_today = orchestrator.get_reference_today()
-            yesterday = reference_today - datetime.timedelta(days=1)
-            _, day1, _ = orchestrator.calculate_processing_window()
-            success = orchestrator.run_single_day(
-                yesterday, day1, args.preprocess_only, execute_stages
-            )
+            if not day_success:
+                logger.warning(f"Processing failed for {process_date}")
 
         sys.exit(0 if success else 1)
 
