@@ -43,7 +43,8 @@ static-resources/
 ├── grids/                    # Land/sea mask files
 │   ├── maskGLOBp01deg.gds    # 0.01° resolution (36000×17999)
 │   ├── maskGlob1km.gds       # 0.011° resolution (1km)
-│   └── Glob1km.mask          # Alternative 1km mask format
+│   ├── Glob1km.mask          # Alternative 1km mask format
+│   └── MUR25grid.gds         # 0.25° resolution (1440×720) - for MUR25 product
 │
 ├── mat/                      # MATLAB transformation matrices
 │   ├── landindexNH.mat       # Northern hemisphere land indices
@@ -89,6 +90,25 @@ Grid mask files define the land/sea/lake classification for each pixel in the ou
 | `maskGLOBp01deg.gds` | 0.01° | 36000×17999 | 648 MB | Primary MUR grid |
 | `maskGlob1km.gds` | 0.011° | ~32727×16363 | 537 MB | 1km grid variant |
 | `Glob1km.mask` | 0.011° | ~32727×16363 | 1 GB | Alternative format |
+| `MUR25grid.gds` | 0.25° | 1440×720 | ~1 MB | MUR25 product grid |
+
+### MUR25 Grid File
+
+The `MUR25grid.gds` file is required for generating the MUR25 (0.25-degree) product. This is a lower-resolution "sibling" product that is derived from the same MRVA analysis as the full MUR SST.
+
+**Product Comparison:**
+
+| Product | Resolution | Grid Size | Filename Pattern |
+|---------|------------|-----------|------------------|
+| MUR (Full) | 0.01° | 36000×17999 | `...-MUR-GLOB-...fv04.1.nc` |
+| MUR25 | 0.25° | 1440×720 | `...-MUR25-GLOB-...fv04.2.nc` |
+
+**To obtain the MUR25 grid file:**
+
+1. Copy from production: `/home/tmchin/grids/MUR25grid.gds`
+2. Or generate by downsampling the 0.01° mask using the `MURto25` function
+
+**Note:** If the MUR25 grid file is not present, the container workflow will skip MUR25 generation but still produce the full-resolution MUR product.
 
 ### Mask Value Encoding
 

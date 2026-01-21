@@ -510,8 +510,10 @@ class MUROrchestrator:
         for dt in range(-dayrange[0], dayrange[1] + 1):
             data_day = process_date + datetime.timedelta(days=dt)
 
-            # Skip future dates (relative to simulated "today")
-            if data_day > reference_today:
+            # Skip genuinely future dates (relative to actual today, not simulated)
+            # For historical reruns, all dates in window should be processable
+            actual_today = datetime.date.today()
+            if data_day > actual_today:
                 continue
 
             days_processed += 1

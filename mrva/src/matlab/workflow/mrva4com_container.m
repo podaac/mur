@@ -578,8 +578,55 @@ function mrva4com_container(year, day, realtime, varargin)
         end
     end
 
+    %% Generate MUR25 (0.25 degree) product
+    fprintf('Stage 10: Generating MUR25 (0.25 degree) product...\n');
+
+    mur25Flag = 1;  % Set to 0 to skip MUR25 generation
+
+    % Check if MUR25 grid file exists
+    mur25_gridfile = sprintf('%s/grids/MUR25grid.gds', static_resources_root);
+    if ~exist(mur25_gridfile, 'file')
+        warning(['MUR25 grid file not found: %s\n', ...
+                 'MUR25 product will not be generated.\n', ...
+                 'To enable MUR25, add MUR25grid.gds to static-resources/grids/'], ...
+                 mur25_gridfile);
+        mur25Flag = 0;
+    end
+
+    if mur25Flag
+        try
+            % Build configuration struct for makeMUR25_container
+            mur25_config = struct();
+            mur25_config.cspdir = cspdir;
+            mur25_config.cspfmt = cspfmt;
+            mur25_config.netcdf_dir = netcdf_dir;
+            mur25_config.landice_root = landice_root;
+            mur25_config.static_resources_root = static_resources_root;
+            mur25_config.fortran_bin = fortran_bin;
+            mur25_config.region = region;
+            mur25_config.hourAna = hourAna;
+
+            % Execute MUR25 generation
+            tic;
+            makeMUR25_container(year, day, realtime, mur25_config);
+            elapsed = toc;
+
+            fprintf('  ✓ MUR25 generation completed in %.1f minutes\n\n', elapsed/60);
+
+        catch ME
+            warning('MUR25 generation failed: %s', ME.message);
+            fprintf('  Error details:\n');
+            for k = 1:length(ME.stack)
+                fprintf('    %s (line %d)\n', ME.stack(k).name, ME.stack(k).line);
+            end
+            fprintf('  MUR25 product was not generated, but full MUR product is available.\n\n');
+        end
+    else
+        fprintf('  Skipping MUR25 generation (grid file not available)\n\n');
+    end
+
     %% Clean up temporary files
-    fprintf('Stage 10: Cleaning up temporary files...\n');
+    fprintf('Stage 11: Cleaning up temporary files...\n');
 
     if delbipFlag
         system('rm -f ./bip/*.bip ./bip/*.biq');
@@ -596,6 +643,10 @@ function mrva4com_container(year, day, realtime, varargin)
     fprintf('Coefficient files: %s\n', cspdir);
     if netcdfFlag
         fprintf('NetCDF output:     %s\n', netcdf_dir);
+        fprintf('  Full MUR (0.01 deg): GLOB/JPL/MUR/v4/%04d/%03d%s/\n', year, day, iif(realtime, 'nrt', ''));
+        if mur25Flag
+            fprintf('  MUR25 (0.25 deg):    GLOB/JPL/MUR/v4/%04d/%03d%s/\n', year, day, iif(realtime, 'nrt', ''));
+        end
     end
     fprintf('========================================\n');
 

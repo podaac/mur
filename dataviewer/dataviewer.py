@@ -1120,19 +1120,22 @@ def plot_data(data: dict, format_type: str, filepath: Path,
         sst_var = variables['analysed_sst']
         lon = variables['lon']['data'][:]
         lat = variables['lat']['data'][:]
-        sst_scaled = sst_var['data'][0, :, :] if sst_var['data'].ndim == 3 else sst_var['data'][:, :]
+        # NOTE: netCDF4 auto-applies scale_factor and add_offset when reading data
+        # So sst_data is already in Kelvin (NOT raw int16 values)
+        sst_data = sst_var['data'][0, :, :] if sst_var['data'].ndim == 3 else sst_var['data'][:, :]
 
-        # Apply scaling to get actual SST in Kelvin
-        scale = sst_var['attributes'].get('scale_factor', 1.0)
-        offset = sst_var['attributes'].get('add_offset', 0.0)
-        sst_kelvin = sst_scaled * scale + offset
+        # Data is already in Kelvin from netCDF4 auto-scaling, just convert to Celsius
+        # DO NOT apply scale_factor/add_offset again - that causes double-scaling bug!
+        sst_celsius = sst_data - 273.15
 
-        # Convert to Celsius
-        sst_celsius = sst_kelvin - 273.15
-
-        # Handle fill values
-        fill_value = sst_var['attributes'].get('_FillValue', -32768)
-        sst_celsius = np.ma.masked_where(sst_scaled == fill_value, sst_celsius)
+        # netCDF4 auto-masking handles fill values, but ensure we have a masked array
+        if not isinstance(sst_celsius, np.ma.MaskedArray):
+            fill_value = sst_var['attributes'].get('_FillValue', -32768)
+            # If not auto-masked, the fill value would be scaled: fill * scale + offset
+            scale = sst_var['attributes'].get('scale_factor', 1.0)
+            offset = sst_var['attributes'].get('add_offset', 0.0)
+            scaled_fill = fill_value * scale + offset - 273.15
+            sst_celsius = np.ma.masked_where(np.isclose(sst_celsius, scaled_fill), sst_celsius)
 
         # Get mask if available
         mask = None
@@ -1160,35 +1163,42 @@ def plot_data(data: dict, format_type: str, filepath: Path,
         print(f"   Creating MUR SST visualization...")
         print(f"   Display grid: {len(lon_plot)}×{len(lat_plot)}")
 
-        # Create figure with 2-3 panels depending on available data
-        n_panels = 3 if mask is not None else 2
-        fig = plt.figure(figsize=(18, 6))
-
-        # SST map
-        ax1 = fig.add_subplot(1, n_panels, 1)
-
         # Compute robust colorbar limits
-        sst_valid = sst_plot[~sst_plot.mask] if hasattr(sst_plot, 'mask') else sst_plot[~np.isnan(sst_plot)]
+        sst_valid = (sst_plot[~sst_plot.mask] if hasattr(sst_plot, 'mask')
+                     else sst_plot[~np.isnan(sst_plot)])
         if len(sst_valid) > 0:
             vmin = np.percentile(sst_valid, 1)
             vmax = np.percentile(sst_valid, 99)
         else:
             vmin, vmax = -2, 35
 
+        # Create figure with 2 rows:
+        # Row 1: Large SST map (full width)
+        # Row 2: Histogram and mask side-by-side
+        has_mask = mask is not None
+        # Use constrained_layout for GridSpec compatibility (avoids tight_layout issues)
+        fig = plt.figure(figsize=(18, 12), constrained_layout=True)
+
+        # Use GridSpec for flexible layout
+        gs = fig.add_gridspec(2, 2, height_ratios=[1.5, 1])
+
+        # SST map - spans full width of top row
+        ax1 = fig.add_subplot(gs[0, :])
+
         im1 = ax1.pcolormesh(lon_plot, lat_plot, sst_plot.T,
                              cmap='RdYlBu_r', vmin=vmin, vmax=vmax,
                              shading='auto')
-        ax1.set_xlabel('Longitude (degrees)')
-        ax1.set_ylabel('Latitude (degrees)')
-        ax1.set_title('MUR SST Analysis (°C)')
+        ax1.set_xlabel('Longitude (degrees)', fontsize=11)
+        ax1.set_ylabel('Latitude (degrees)', fontsize=11)
+        ax1.set_title('MUR SST Analysis (°C)', fontsize=14, fontweight='bold')
         ax1.set_aspect('equal', adjustable='box')
         ax1.grid(True, alpha=0.3)
         if has_cartopy:
             add_coastlines(ax1)
-        plt.colorbar(im1, ax=ax1, label='SST (°C)', shrink=0.8)
+        plt.colorbar(im1, ax=ax1, label='SST (°C)', shrink=0.6, pad=0.02)
 
-        # SST histogram
-        ax2 = fig.add_subplot(1, n_panels, 2)
+        # SST histogram - bottom left
+        ax2 = fig.add_subplot(gs[1, 0])
         if len(sst_valid) > 0:
             ax2.hist(sst_valid.flatten(), bins=100, edgecolor='black', alpha=0.7)
             ax2.set_xlabel('SST (°C)')
@@ -1211,9 +1221,9 @@ def plot_data(data: dict, format_type: str, filepath: Path,
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
                     fontsize=9, family='monospace')
 
-        # Mask display if available
-        if mask is not None and n_panels == 3:
-            ax3 = fig.add_subplot(1, n_panels, 3)
+        # Mask display - bottom right (if available)
+        if has_mask:
+            ax3 = fig.add_subplot(gs[1, 1])
 
             # Create discrete colormap for mask
             from matplotlib.colors import BoundaryNorm
@@ -1240,7 +1250,8 @@ def plot_data(data: dict, format_type: str, filepath: Path,
 
             cbar3 = plt.colorbar(im3, ax=ax3, label='Surface Type',
                                 ticks=unique_vals, shrink=0.8)
-            cbar3.set_ticklabels([mask_labels.get(v, str(v)) for v in unique_vals])
+            cbar3.set_ticklabels([mask_labels.get(v, str(v))
+                                  for v in unique_vals])
 
         # Add help text
         coastline_note = (
@@ -1275,7 +1286,7 @@ def plot_data(data: dict, format_type: str, filepath: Path,
 
         plt.suptitle(f'{filepath.name}\n{title_str}')
         print("   Rendering plot...")
-        plt.tight_layout(rect=[0, 0.12, 1, 0.98])
+        # Note: No tight_layout needed - using constrained_layout=True
         print("✅ Opening plot window...")
         plt.show()
 

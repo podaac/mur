@@ -10,8 +10,10 @@
       ! spm data:
       real, allocatable:: csp(:)
 
-      ! test interpolation variable:
+#ifdef DEBUG
+      ! test interpolation variable (only needed for debug):
       real :: test_sst
+#endif
 
       ! output grid file:
       character*128 :: coeffilelist(2,20),coeffile,gridfile
@@ -32,6 +34,7 @@
       read(7,nml=input)
       close(7)
 
+#ifdef DEBUG
       ! DEBUG: Print namelist parameters
       print*,'========================================'
       print*,'SPGRID DEBUG: Namelist parameters:'
@@ -42,10 +45,11 @@
       print*,'  gridfile= ', trim(gridfile)
       print*,'  cix (compile-time) = ', cix
       print*,'========================================'
+#endif
 
 
 
-!      
+!
 ! spm domain:
 !
 
@@ -55,6 +59,7 @@
         print*,'Reading ',coeffile
         call readcoeff(ios,csp,coeffile)
 
+#ifdef DEBUG
         ! DEBUG: Verify module state after readcoeff
         print*,'----------------------------------------'
         print*,'DEBUG: Module state after readcoeff:'
@@ -96,6 +101,7 @@
           print*,'  (Expected: tropical ~27C, S.Ocean ~2C, Arctic ~0C)'
           print*,'----------------------------------------'
         end if
+#endif
 
         if(ios==0)
      &    call outscaledgds(csp,L,gridfile,offset,sscale,minsst)

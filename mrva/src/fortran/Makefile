@@ -58,7 +58,7 @@ FCOPT_DEBUG = -g -traceback -check bounds -check uninit -fpe0 -warn all -O0
 
 # Select flags based on DEBUG setting
 ifeq ($(DEBUG),1)
-    FCOPT = $(FCOPT_BASE) $(FCOPT_DEBUG)
+    FCOPT = $(FCOPT_BASE) $(FCOPT_DEBUG) -DDEBUG
     $(info *** DEBUG BUILD: Debug symbols, bounds checking, and tracebacks enabled ***)
 else
     FCOPT = $(FCOPT_BASE) $(FCOPT_PROD)

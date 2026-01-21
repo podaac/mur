@@ -578,6 +578,213 @@ If reprocessing:
   Ice: 0% cache (always fresh)
 ```
 
+## NRT/REA Coefficient File Lifecycle
+
+### Overview
+
+In operational production, each date is processed **twice**:
+1. **NRT (Near Real-Time)**: First pass, 1 day after observation
+2. **REA (Reanalysis)**: Second pass, 4 days after observation
+
+This dual-processing approach balances timeliness (NRT) with accuracy (REA), using a sophisticated coefficient file chain for continuity.
+
+### Coefficient File Scales
+
+MRVA produces coefficient files at multiple B-spline scales (L values):
+
+| Scale (L) | Description | Grid Spacing | Purpose |
+|-----------|-------------|--------------|---------|
+| L=2 | Coarsest | ~100 km | REA starting point |
+| L=6 | Medium | ~6 km | NRT starting point (background) |
+| L=7-10 | Fine | ~3-0.4 km | Progressive refinement |
+| L=11 | Finest | ~0.2 km | Final high-resolution |
+
+### File Naming Convention
+
+```
+YYYYDDDHH_MRVA4_Global.cXX[.gz]
+
+Where:
+  YYYY  = Year
+  DDD   = Day of year (001-366)
+  HH    = Analysis hour (typically 09)
+  XX    = Scale level (02-11)
+```
+
+**Examples:**
+```
+2025042009_MRVA4_Global.c06    # Scale 6, day 042, hour 09
+2025042009_MRVA4_Global.c11    # Scale 11 (finest), day 042
+```
+
+### NRT Mode (realtime=1)
+
+**Latency:** 1 day after observation date
+
+**Starting Scale:** L0=7 (skips coarse scales)
+
+**Coefficient Files Produced:** `.c07`, `.c08`, `.c09`, `.c10`, `.c11`
+
+**Background Field:** Looks for previous day's `.c06` file
+
+**Directory:** `coef/YYYY/nrt/` (with "nrt" suffix)
+
+```
+coef/
+└── 2025/
+    └── nrt/
+        ├── 2025041009_MRVA4_Global.c07
+        ├── 2025041009_MRVA4_Global.c08
+        ├── ...
+        ├── 2025042009_MRVA4_Global.c07
+        ├── 2025042009_MRVA4_Global.c08
+        └── ...
+```
+
+### REA Mode (realtime=0)
+
+**Latency:** 4 days after observation date (allows complete data accumulation)
+
+**Starting Scale:** L0=2 (full multi-scale analysis)
+
+**Coefficient Files Produced:** `.c02`, `.c03`, `.c04`, `.c05`, `.c06`, `.c07`, `.c08`, `.c09`, `.c10`, `.c11`
+
+**Background Field:** None (starts fresh from coarse scale)
+
+**Directory:** `coef/YYYY/` (no suffix)
+
+```
+coef/
+└── 2025/
+    ├── 2025038009_MRVA4_Global.c02  # Includes .c06
+    ├── 2025038009_MRVA4_Global.c03
+    ├── 2025038009_MRVA4_Global.c04
+    ├── 2025038009_MRVA4_Global.c05
+    ├── 2025038009_MRVA4_Global.c06  # ← Created by REA
+    ├── 2025038009_MRVA4_Global.c07
+    └── ...
+```
+
+### The .c06 Background Lookup
+
+When NRT runs, it attempts to use the previous day's `.c06` coefficient as a starting background field. This provides a "warm start" that helps maintain spatial coherence.
+
+**Lookup Logic (trimbip3a.m):**
+
+```matlab
+% Try to find previous day's .c06 file for background
+MURcsp = sprintf('%s/%04d/YYYYDDDHH_MRVA4_Global.c06', coefdir, prev_year);
+
+if exist(MURcsp, 'file')
+    % Use MUR reference - fast path
+    refcspfile = 'MUR.csp';
+    eval(sprintf('!ln -sf %s %s', MURcsp, refcspfile));
+else
+    % Fallback: Use L4 AVHRR_OI reference or build from scratch
+    % Look for L4 GHRSST file...
+end
+```
+
+### The Key Insight: .c06 Is Only Created by REA
+
+**Critical Understanding:**
+
+| Mode | Creates .c06? | Uses .c06? |
+|------|---------------|------------|
+| **NRT** | ❌ No (starts at L=7) | ✅ Yes (from previous day) |
+| **REA** | ✅ Yes (runs L=2-11) | ❌ No (starts from scratch) |
+
+**Timeline Implication:**
+
+Since REA runs with a 4-day latency, the `.c06` file for day N is created 4 days after day N. This means:
+
+- Day N+1 (NRT): Looks for day N's `.c06` → **Not available yet** (REA hasn't run)
+- Day N+2 (NRT): Looks for day N+1's `.c06` → **Not available yet**
+- Day N+3 (NRT): Looks for day N+2's `.c06` → **Not available yet**
+- Day N+4 (NRT): Looks for day N+3's `.c06` → **Not available yet**
+- Day N+5 (NRT): Looks for day N+4's `.c06` → **Available!** (REA for day N+4 just ran)
+
+### Steady-State Production Behavior
+
+In operational production with continuous NRT+REA processing:
+
+```
+Timeline for Day 042:
+─────────────────────────────────────────────────────────────────
+Day 042:  [Observations collected]
+Day 043:  NRT for 042 runs → outputs .c07-.c11, looks for 041's .c06 (missing)
+Day 046:  REA for 042 runs → outputs .c02-.c11 including .c06 ← FINAL PRODUCT
+─────────────────────────────────────────────────────────────────
+
+Coefficient availability when NRT runs for day 046:
+  └── Looks for day 045's .c06 → Day 045 REA ran on day 049 → NOT YET AVAILABLE
+
+Therefore: Most NRT runs fall back to building reference from scratch
+```
+
+**This is expected behavior.** The `.c06` background is a performance optimization, not a requirement. When unavailable, the system:
+
+1. Falls back to L4 AVHRR_OI data if available
+2. Or builds the reference field from the current data
+
+Production logs confirm this with "not opened" messages for `.c06` files:
+
+```
+Checking coef/2025/2025045009_MRVA4_Global.c06: not opened  ← Normal
+```
+
+### When .c06 Background IS Available
+
+The `.c06` background is available only when NRT runs immediately after a REA run for a nearby date. This happens in specific scenarios:
+
+1. **First NRT after catchup:** If REA processing catches up (e.g., after an outage), subsequent NRT runs benefit from recently-created `.c06` files.
+
+2. **Reprocessing:** When reprocessing historical dates, REA runs first, making `.c06` available for any subsequent NRT testing.
+
+### Practical Implications
+
+**For Container Testing:**
+
+If you only run NRT mode, you'll only see `.c07-.c11` files. This is correct. To generate `.c06` files, run in REA mode (`realtime=0`).
+
+**For Pipeline Operations:**
+
+- NRT products are interim/preliminary
+- REA products are the final, authoritative versions
+- Storage planning should account for both sets of coefficient files
+- Downstream consumers should prefer REA products when available
+
+### Directory Structure Summary
+
+```
+coef/
+└── YYYY/
+    ├── YYYYDDDHH_MRVA4_Global.c02   # REA only
+    ├── YYYYDDDHH_MRVA4_Global.c03   # REA only
+    ├── YYYYDDDHH_MRVA4_Global.c04   # REA only
+    ├── YYYYDDDHH_MRVA4_Global.c05   # REA only
+    ├── YYYYDDDHH_MRVA4_Global.c06   # REA only ← Key for NRT background
+    ├── YYYYDDDHH_MRVA4_Global.c07   # Both modes
+    ├── ...
+    ├── YYYYDDDHH_MRVA4_Global.c11   # Both modes (final resolution)
+    │
+    └── nrt/                         # NRT-specific outputs
+        ├── YYYYDDDHH_MRVA4_Global.c07
+        ├── ...
+        └── YYYYDDDHH_MRVA4_Global.c11
+```
+
+### Output Product Generation
+
+Both NRT and REA modes use the finest coefficient file (`.c11`) to generate the final MUR SST NetCDF product. The difference is:
+
+| Product | Source | Quality | Use Case |
+|---------|--------|---------|----------|
+| NRT MUR | `.c11` from NRT | Preliminary | Real-time applications |
+| REA MUR | `.c11` from REA | Final | Archives, reanalysis |
+
+The REA product replaces/supersedes the NRT product for the same date.
+
 ## Storage Requirements
 
 ### Input Data

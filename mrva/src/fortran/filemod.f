@@ -372,6 +372,12 @@
       read(7) grid,lon,lat
       close(7)
 
+      allocate(out(nlon,nlat))
+
+      dx=(lon(nlon)-lon(1))/(nlon-1)
+      dy=(lat(nlat)-lat(1))/(nlat-1)
+
+#ifdef DEBUG
       ! DEBUG: Print grid file coordinate ranges
       print*,'DEBUG outscaledgds: Grid file info:'
       print*,'  gridfile = ', trim(gridfile)
@@ -380,11 +386,6 @@
       print*,'  lat range = ', lat(1), ' to ', lat(nlat)
       print*,'  land pixels (grid==2) count = ', count(grid==2)
       print*,'  water pixels count = ', count(grid/=2)
-
-      allocate(out(nlon,nlat))
-
-      dx=(lon(nlon)-lon(1))/(nlon-1)
-      dy=(lat(nlat)-lat(1))/(nlat-1)
       print*,'  dx,dy = ', dx, dy
 
       ! DEBUG: Check if grid lon/lat falls within coefficient domain
@@ -399,7 +400,6 @@
         print*,'  WARNING: Grid lat outside coeff domain!'
       end if
 
-      ! apply netCDF-like transformation to SST; save to "grid(:,:)":
       ! DEBUG: Sample spmPoint at a few test locations before main loop
       print*,'DEBUG outscaledgds: Testing spmPoint at sample locations:'
       print*,'  Module state: mx,my = ', mx, my
@@ -412,7 +412,9 @@
       print*,'  spmPoint(-120,30) raw = ', sst, ' +sstref = ', sst+sstref
       call spmPoint(1,1,csp,0.0,-60.0,0,0,dx,dy,sst)
       print*,'  spmPoint(0,-60) raw = ', sst, ' +sstref = ', sst+sstref
+#endif
 
+      ! apply netCDF-like transformation to SST; save to "out(:,:)":
       do j=1,nlat
         y=lat(j)
         do i=1,nlon
@@ -428,6 +430,7 @@
         end do
       end do
 
+#ifdef DEBUG
       ! DEBUG: Print SST range statistics after computation
       print*,'DEBUG outscaledgds: Output statistics:'
       print*,'  offset = ', offset, ' sscale = ', sscale
@@ -440,6 +443,7 @@
       print*,'  SST range (C) = ',
      &       minval(out, out.ne.-32768)*sscale+offset-273.15,
      &       maxval(out, out.ne.-32768)*sscale+offset-273.15
+#endif
 
       write(180+L) nlon,nlat
       write(180+L) offset,sscale

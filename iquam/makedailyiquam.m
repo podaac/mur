@@ -112,6 +112,40 @@ function makedailyiquam(year, doy, rewrite, outputDir, cacheDir, sourceUrl)
       fprintf('Processing %04d/%03d: Using cached data from %s\n', year, doy, localfile);
       load(localfile);
 
+      %% Validate cache - check for empty or corrupt data
+      if ~exist('dayf', 'var') || isempty(dayf) || length(dayf) == 0
+          fprintf('  WARNING: Cache file is empty or corrupt, deleting and re-downloading...\n');
+          delete(localfile);
+
+          %% Re-download:
+          system(sprintf('wget -nH --cut-dirs 6 -r -l1 -np "%s" -A "%s"',sourceUrl,ifile),'-echo');
+
+          %% read:
+          ddir = dir( ifile );
+          if length(ddir)
+              ncfile = ddir(1).name;
+          else
+              fprintf('ERROR: IQUAM re-download failed for %04d/%03d\n', year, doy);
+              return;
+          end
+
+          [dayf, hour, minute, lon, lat, sst, qual, pt] = readnc( ncfile );
+          delete( ncfile );
+
+          %% conversion:
+          hour = hour+minute/60;
+          sst = sst - 273.15;  % ncfile uses Kelvin.
+
+          %% quality control:
+          knx=find( qual>=5 );
+          fprintf('  QC: Retained %d of %d observations (qual>=5)\n', length(knx), length(dayf));
+          dayf=dayf(knx); hour=hour(knx); pt=pt(knx);
+          sst=sst(knx); lon=lon(knx); lat=lat(knx);
+
+          %% save the new cache:
+          save(localfile,'dayf','hour','pt','sst','lon','lat');
+      end
+
     end
 
     %% extract daily components:
