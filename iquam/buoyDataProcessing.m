@@ -1,4 +1,4 @@
-function buoyDataProcessing(workDir, logDir, outputDir, cacheDir, sourceUrl, ...
+function buoyDataProcessing(workDir, logDir, outputDir, sourceUrl, ...
                             enableREA, testing, nrtLatency, reaLatency, ...
                             scanLatency, buoyDayRange, buoyStabilityLatency, ...
                             reaAggregationWindow, reaOutputDir, simulatedToday)
@@ -41,17 +41,12 @@ function buoyDataProcessing(workDir, logDir, outputDir, cacheDir, sourceUrl, ...
 %                      Output files: buoy.log
 %                      Container mount: /data/logs
 %
-% TEMPORARY/CACHE DIRECTORIES (mount as read-write volumes):
-%   cacheDir         - Cache directory for monthly .mat files
-%                      Default: './cache/iquam'
-%                      Format: iquam.YYYY.MM.mat
-%                      Purpose: Avoid re-downloading NetCDF files
-%                      Container mount: /data/cache/iquam
-%
+% TEMPORARY DIRECTORIES (mount as read-write volumes):
 %   workDir          - Temporary working directory for processing
 %                      Default: './tmp/makebic'
 %                      Note: Cleaned at start of each run
 %                      Container mount: /tmp/makebic (ephemeral)
+%                      Downloads are deleted after processing (no cache)
 
 % ========================================================================
 % ARGUMENTS VALIDATION - Using Modern MATLAB Arguments Block
@@ -61,7 +56,6 @@ arguments
     workDir {mustBeTextScalar} = './tmp/makebic'
     logDir {mustBeTextScalar} = './logs'
     outputDir {mustBeTextScalar} = './output/iquam'
-    cacheDir {mustBeTextScalar} = './cache/iquam'
     sourceUrl {mustBeTextScalar} = 'https://www.star.nesdis.noaa.gov/pub/socd/sst/iquam/v2.10/'
 
     % Processing Mode
@@ -106,7 +100,6 @@ fprintf('=== DEBUG: buoyDataProcessing STARTED ===\n');
 fprintf('buoyDataProcessing: workDir - %s\n', workDir);
 fprintf('buoyDataProcessing: logDir - %s\n', logDir);
 fprintf('buoyDataProcessing: outputDir - %s\n', outputDir);
-fprintf('buoyDataProcessing: cacheDir - %s\n', cacheDir);
 fprintf('buoyDataProcessing: sourceUrl - %s\n', sourceUrl);
 fprintf('buoyDataProcessing: enableREA - %d\n', enableREA);
 fprintf('buoyDataProcessing: testing - %d\n', testing);
@@ -131,13 +124,6 @@ if exist(workDir, 'dir')
 end
 fprintf('DEBUG: Creating workDir...\n');
 mkdir(workDir);
-
-% Create cache directory if needed
-fprintf('DEBUG: Checking cacheDir: %s\n', cacheDir);
-if ~exist(cacheDir, 'dir')
-    fprintf('DEBUG: Creating cacheDir...\n');
-    mkdir(cacheDir);
-end
 
 % Create log directory if needed
 fprintf('DEBUG: Checking logDir: %s\n', logDir);
@@ -289,12 +275,12 @@ for year = year0:year2
                 if testing == 0
                     % Call makedailyiquam with all path parameters
                     fprintf('DEBUG: About to call makedailyiquam...\n');
-                    makedailyiquam(y, d, rewrite, outputDir, cacheDir, sourceUrl);
+                    makedailyiquam(y, d, rewrite, outputDir, sourceUrl);
                     fprintf('DEBUG: makedailyiquam returned successfully\n');
                 else
                     % Testing mode - just log the command
-                    fprintf(flog, '[TESTING] Would call: makedailyiquam(%d, %d, %d, %s, %s, %s)\n', ...
-                        y, d, rewrite, outputDir, cacheDir, sourceUrl);
+                    fprintf(flog, '[TESTING] Would call: makedailyiquam(%d, %d, %d, %s, %s)\n', ...
+                        y, d, rewrite, outputDir, sourceUrl);
                     fprintf('DEBUG: [TESTING] Skipped makedailyiquam call\n');
                 end
             end

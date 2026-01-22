@@ -569,10 +569,9 @@ class MUROrchestrator:
         # Set up paths
         # Note: Don't append year here - the container creates the year subdirectory internally
         output_dir = pathlib.Path(config["output_dir"])
-        cache_dir = pathlib.Path(config["cache_dir"])
         logs_dir = pathlib.Path(config["logs_dir"])
 
-        for directory in [output_dir, cache_dir, logs_dir]:
+        for directory in [output_dir, logs_dir]:
             directory.mkdir(parents=True, exist_ok=True)
 
         # Check if output exists (files will be in year subdirectory created by container)
@@ -599,7 +598,6 @@ class MUROrchestrator:
             "--memory-swap=8g",
             "--shm-size=2g",
             "-v", f"{output_dir.resolve()}:/data/output/iquam",
-            "-v", f"{cache_dir.resolve()}:/data/cache/iquam",
             "-v", f"{logs_dir.resolve()}:/data/logs",
         ])
 
@@ -612,8 +610,7 @@ class MUROrchestrator:
             container_image,
             "/tmp/makebic",
             "/data/logs",
-            "/data/output/iquam",
-            "/data/cache/iquam"
+            "/data/output/iquam"
         ])
 
         try:
@@ -1235,7 +1232,7 @@ def create_output_directories(config: Dict) -> None:
     # iQUAM directories
     if "iquam" in config:
         iquam_config = config["iquam"]
-        for key in ["output_dir", "cache_dir", "logs_dir"]:
+        for key in ["output_dir", "logs_dir"]:
             if key in iquam_config:
                 path = pathlib.Path(iquam_config[key])
                 path.mkdir(parents=True, exist_ok=True)

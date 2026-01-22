@@ -1,36 +1,32 @@
-function makedailyiquam(year, doy, rewrite, outputDir, cacheDir, sourceUrl)
+function makedailyiquam(year, doy, rewrite, outputDir, sourceUrl)
 % makedailyiquam - Download and process IQUAM NetCDF data to daily binary files
 %
 % USAGE:
-%   makedailyiquam(year, doy, rewrite, outputDir, cacheDir, sourceUrl)
+%   makedailyiquam(year, doy, rewrite, outputDir, sourceUrl)
 %
 % INPUTS:
 %   year      - Year (e.g., 2024)
 %   doy       - Day of year (1-366)
 %   rewrite   - Force rewrite existing files (0=no, 1=yes) [optional, default: 0]
 %   outputDir - Base directory for .bii output files [optional, default: './output/iquam']
-%   cacheDir  - Directory for temporary .mat cache files [optional, default: pwd]
 %   sourceUrl - URL for IQUAM NetCDF downloads [optional, default: NOAA STAR server]
 %
 % OUTPUTS:
 %   Creates: <outputDir>/YYYY/Global_IQUAM0_YYYY_DDD.bii
-%   Caches:  <cacheDir>/iquam.YYYY.MM.mat (monthly data for reuse)
 %
 % PROCESSING:
-%   1. Downloads monthly IQUAM NetCDF file (if not cached)
+%   1. Downloads monthly IQUAM NetCDF file (fresh each time - no caching)
 %   2. Reads and quality-controls data (qual >= 5)
 %   3. Extracts observations for specified day
 %   4. Calls writeiquambii() to write binary output
 %
-% NOTE: This function now calls external writeiquambii() - no inline duplication
+% NOTE: Downloads to ephemeral /tmp - no persistent cache needed.
+%       This matches production behavior and avoids cache staleness issues.
 
   %% Handle optional parameters
   if ~exist('rewrite','var'), rewrite = 0; end
   if ~exist('outputDir','var') || isempty(outputDir)
       outputDir = './output/iquam';
-  end
-  if ~exist('cacheDir','var') || isempty(cacheDir)
-      cacheDir = pwd;
   end
   if ~exist('sourceUrl','var') || isempty(sourceUrl)
       sourceUrl = 'https://www.star.nesdis.noaa.gov/pub/socd/sst/iquam/v2.10/';
@@ -43,122 +39,73 @@ function makedailyiquam(year, doy, rewrite, outputDir, cacheDir, sourceUrl)
       if ~status, error('Failed to create output dir: %s', msg); end
   end
 
-  %% Ensure cache directory exists
-  if ~exist(cacheDir,'dir')
-      [status, msg] = mkdir(cacheDir);
-      if ~status, error('Failed to create cache dir: %s', msg); end
-  end
-
   filename = sprintf('%s/Global_IQUAM0_%04d_%03d.bii', edir, year, doy);
 
   if (~rewrite) && exist(filename,'file')
+      fprintf('Processing %04d/%03d: Output exists, skipping\n', year, doy);
       return
   end
 
+  %% Determine which monthly NetCDF file to download
+  [day, month] = julian(doy, year);
+  ifile = sprintf('%04d%02d-STAR-L2i_GHRSST-SST-iQuam-*.nc', year, month);
 
-    %% netCDF file:
-    [day,month]=julian(doy,year);
-    ifile=sprintf('%04d%02d-STAR-L2i_GHRSST-SST-iQuam-*.nc',year,month);
-    localfile=sprintf('%s/iquam.%04d.%02d.mat',cacheDir,year,month);
+  fprintf('Processing %04d/%03d: Downloading IQUAM data for %04d-%02d\n', year, doy, year, month);
 
-    %% download, read HDF file, and quality control:
-    if ~exist(localfile,'file')
-      fprintf('Processing %04d/%03d: Downloading IQUAM data for %04d-%02d\n', year, doy, year, month);
+  %% Download fresh (no caching - simpler and matches production)
+  system(sprintf('wget -nH --cut-dirs 6 -r -l1 -np "%s" -A "%s"', sourceUrl, ifile), '-echo');
 
-      %% download:
-      system(sprintf('wget -nH --cut-dirs 6 -r -l1 -np "%s" -A "%s"',sourceUrl,ifile),'-echo');
+  %% Find the downloaded file
+  ddir = dir(ifile);
+  if isempty(ddir)
+      fprintf('ERROR: IQUAM download failed for %04d/%03d\n', year, doy);
+      return;
+  end
+  ncfile = ddir(1).name;
 
-      %% read:
-      ddir = dir( ifile );
-      if length(ddir),
-        ncfile = ddir(1).name;
-      else,
-        fprintf('ERROR: IQUAM download failed for %04d/%03d\n', year, doy);
-        return;
-      end;
+  %% Read NetCDF data
+  [dayf, hour, minute, lon, lat, sst, qual, pt] = readnc(ncfile);
 
-      [dayf, hour, minute, lon, lat, sst, qual, pt] = readnc( ncfile );
-      delete( ncfile );
+  %% Clean up downloaded file
+  delete(ncfile);
 
-      %f=hdfreadopen(ifile);
-      %  dayf=hdfreadvariable(f,'Day');
-      %  hour=hdfreadvariable(f,'Hour');
-      %  minute=hdfreadvariable(f,'Minute');
-      %  lon=hdfreadvariable(f,'Longitude');
-      %  lat=hdfreadvariable(f,'Latitude');
-      %  sst=hdfreadvariable(f,'Sea_Surface_Temperature');
-      %  qual=hdfreadvariable(f,'Quality_Flag');
-      %  pt=hdfreadvariable(f,'Type');
-      %hdfreadclose(f);
-      %delete(ifile);
+  %% Data conversion
+  hour = hour + minute/60;
+  sst = sst - 273.15;  % NetCDF uses Kelvin
 
-      %% conversion:
-      hour = hour+minute/60;
-      %knx=find(lon>180);  if length(knx), lon(knx)=lon(knx)-360; end;
-      sst = sst - 273.15;  % ncfile uses Kelvin.
+  %% Quality control (qual >= 5)
+  %% http://www.star.nesdis.noaa.gov/sod/sst/iquam/index.html
+  knx = find(qual >= 5);
+  fprintf('  QC: Retained %d of %d observations (qual>=5)\n', length(knx), length(dayf));
+  dayf = dayf(knx);
+  hour = hour(knx);
+  pt = pt(knx);
+  sst = sst(knx);
+  lon = lon(knx);
+  lat = lat(knx);
 
-      %% quality control:
-      %% http://www.star.nesdis.noaa.gov/sod/sst/iquam/index.html
-      %knx=find( mod(qual,4)==0 );
-      knx=find( qual>=5 );
-      fprintf('  QC: Retained %d of %d observations (qual>=5)\n', length(knx), length(dayf));
-      dayf=dayf(knx); hour=hour(knx); pt=pt(knx);
-      sst=sst(knx); lon=lon(knx); lat=lat(knx);
+  %% Extract this day's observations
+  knx = find(dayf == day);
 
-      %% save the contents:
-      save(localfile,'dayf','hour','pt','sst','lon','lat');
+  if isempty(knx)
+      fprintf('  WARNING: No observations found for day %d in monthly file\n', day);
+      fprintf('  Writing 0 observations to %s\n', filename);
+  else
+      fprintf('  Writing %d observations to %s\n', length(knx), filename);
+  end
 
-    else  % read from mat file:
-      fprintf('Processing %04d/%03d: Using cached data from %s\n', year, doy, localfile);
-      load(localfile);
+  hour = hour(knx);
+  pt = pt(knx);
+  sst = sst(knx);
+  lon = lon(knx);
+  lat = lat(knx);
 
-      %% Validate cache - check for empty or corrupt data
-      if ~exist('dayf', 'var') || isempty(dayf) || length(dayf) == 0
-          fprintf('  WARNING: Cache file is empty or corrupt, deleting and re-downloading...\n');
-          delete(localfile);
-
-          %% Re-download:
-          system(sprintf('wget -nH --cut-dirs 6 -r -l1 -np "%s" -A "%s"',sourceUrl,ifile),'-echo');
-
-          %% read:
-          ddir = dir( ifile );
-          if length(ddir)
-              ncfile = ddir(1).name;
-          else
-              fprintf('ERROR: IQUAM re-download failed for %04d/%03d\n', year, doy);
-              return;
-          end
-
-          [dayf, hour, minute, lon, lat, sst, qual, pt] = readnc( ncfile );
-          delete( ncfile );
-
-          %% conversion:
-          hour = hour+minute/60;
-          sst = sst - 273.15;  % ncfile uses Kelvin.
-
-          %% quality control:
-          knx=find( qual>=5 );
-          fprintf('  QC: Retained %d of %d observations (qual>=5)\n', length(knx), length(dayf));
-          dayf=dayf(knx); hour=hour(knx); pt=pt(knx);
-          sst=sst(knx); lon=lon(knx); lat=lat(knx);
-
-          %% save the new cache:
-          save(localfile,'dayf','hour','pt','sst','lon','lat');
-      end
-
-    end
-
-    %% extract daily components:
-    knx=find(dayf==day);
-    fprintf('  Writing %d observations to %s\n', length(knx), filename);
-    hour=hour(knx); pt=pt(knx);
-    sst=sst(knx); lon=lon(knx); lat=lat(knx);
-
-    %% write file: Call external writeiquambii function (no more code duplication!)
-    writeiquambii(year, doy, lon, lat, sst, hour, pt, outputDir);
+  %% Write output file
+  writeiquambii(year, doy, lon, lat, sst, hour, pt, outputDir);
 
 
-
+%%%%%%%%%%
+% Helper functions (kept for potential HDF4 compatibility)
 %%%%%%%%%%
 
 function fileID=hdfreadopen(filename,contents)
@@ -261,4 +208,3 @@ ncid=netcdf.open(ncfile,'nowrite');
 
 
 netcdf.close(ncid);
-
