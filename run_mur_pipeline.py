@@ -746,11 +746,11 @@ class MUROrchestrator:
             cmd.extend(["-e", f"MUR_SIMULATED_DATE={simulated.strftime('%Y-%m-%d')}"])
 
         cmd.extend([
-            # Volume mounts for inputs
-            "-v", f"{bic_dir.resolve()}:/data/input/bic",
-            "-v", f"{iquam_dir.resolve()}:/data/input/iquam",
-            "-v", f"{landice_dir.resolve()}:/data/input/landice",
-            "-v", f"{static_resources_dir.resolve()}:/data/static-resources",
+            # Volume mounts for inputs (read-only)
+            "-v", f"{bic_dir.resolve()}:/data/input/bic:ro",
+            "-v", f"{iquam_dir.resolve()}:/data/input/iquam:ro",
+            "-v", f"{landice_dir.resolve()}:/data/input/landice:ro",
+            "-v", f"{static_resources_dir.resolve()}:/data/static-resources:ro",
             # Volume mounts for outputs
             "-v", f"{csp_dir.resolve()}:/data/output/csp",
             "-v", f"{netcdf_dir.resolve()}:/data/output/netcdf",

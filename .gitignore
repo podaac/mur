@@ -39,6 +39,9 @@ config.json
 landice/tests/in
 landice/tests/out
 landice/tests/truth-data
+mrva-data/
+ops-data/
+
 
 # IDE
 .vscode/
