@@ -332,9 +332,10 @@ function mrva4com_container(year, day, realtime, varargin)
 
         if ~exist(coefile, 'file')
             warning('Previous day coefficient file not found: %s', coefile);
-            warning('Will create reference field from scratch');
+            warning('Will create reference field from scratch (starting at L=%d)', Lref0);
             coefile = '';
-            Lref0 = L0;
+            % Keep Lref0=Lnrt0=6 - do NOT fall back to L0=2
+            % Fortran handles missing coefile gracefully
         end
     end
 

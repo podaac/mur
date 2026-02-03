@@ -216,20 +216,10 @@ for isensor=1:size(sensors,1),
             fprintf(flog,'%s %04d %03d 0 points (no file)\n',sensor,y,d);
             continue;  % move on to the next "for" iteration.
           end;
-         % Read header with type preservation
-         nyear = fread(f, 1, 'int32=>int32');
-         nday = fread(f, 1, 'int32=>int32');
-         N = fread(f, 1, 'int32=>int32');
-
-         % Read data arrays with type preservation
-         lon = fread(f, N, 'float32=>single');
-         lat = fread(f, N, 'float32=>single');
-         sst = fread(f, N, 'float32=>single');
-         bias = fread(f, N, 'float32=>single');
-         rms = fread(f, N, 'float32=>single');
-         hour = fread(f, N, 'float32=>single');
-         qt = fread(f, N, 'int32=>int32');
-         sun = fread(f, N, 'float32=>single');
+          % Use fortread to handle Fortran record markers correctly
+          [nyear,nday,N]=fortread(f,'integer*4',1,'integer*4',1,'integer*4',1);
+          [lon,lat,sst,bias,rms,hour,qt,sun]=fortread(f,'real*4',N,'real*4',N,...
+            'real*4',N,'real*4',N,'real*4',N,'real*4',N,'integer*4',N,'real*4',N);
           fclose(f);
 
           %% add back the common reference time [hours]:

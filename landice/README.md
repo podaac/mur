@@ -285,9 +285,23 @@ docker run --rm \
 
 ---
 
-## Notes
+## Resolution Notes
 
-- The application processes both P01 and P11 grid resolutions automatically for each run
+The landice container generates two grid resolutions per run:
+
+| Resolution | Grid | Output directory | Filename pattern | Used by |
+| --- | --- | --- | --- | --- |
+| **p01** (0.01°) | `maskGLOBp01deg.gds` | `land/p01/YYYY/` | `landiceP01_YYYY_DDD.gds.gz` | **MUR v4** (current) |
+| **p011** (0.011°/~1km) | `maskGlob1km.gds` | `land/p011/YYYY/` | `landice_YYYY_DDD.gds.gz` | MUR v3 (legacy, not used) |
+
+**Only p01 output is used by the current MUR v4 pipeline.** The p011 resolution is a legacy artifact from MUR v3 (0.011° product). The MRVA container mounts only the `land/p01/` subdirectory and expects `landiceP01_` prefixed filenames. The p011 output is generated but not consumed by any current processing stage.
+
+In the original production system, both resolutions were written to the same flat directory (`/nas2/landice/YYYY/`), so the `P01` filename prefix was necessary to distinguish them. In the containerized setup, they are separated into `land/p01/` and `land/p011/` subdirectories, making the prefix redundant — but it is retained for compatibility with the MRVA MATLAB code that expects it.
+
+---
+
+## General Notes
+
 - Execution time is logged for monitoring purposes
 - Container uses MATLAB Runtime R2024b - no MATLAB license required for execution
 - Shared memory (`--shm-size=512M`) is mandatory for MATLAB Runtime
