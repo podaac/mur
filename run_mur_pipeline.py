@@ -137,7 +137,7 @@ class MUROrchestrator:
         self,
         config_path: pathlib.Path,
         netrc_path: Optional[pathlib.Path] = None,
-        use_rea: bool = False,
+        force_nrt: bool = False,
         keep_containers: bool = False
     ):
         """Initialize orchestrator with configuration.
@@ -145,10 +145,15 @@ class MUROrchestrator:
         Args:
             config_path: Path to configuration JSON file
             netrc_path: Optional path to .netrc file for NASA Earthdata auth
-            use_rea: Enable REA mode based on date boundaries (default: NRT only)
+            force_nrt: Force NRT mode for all dates (override auto-detection)
             keep_containers: If True, don't auto-remove containers (for debugging)
 
         Note:
+            By default, mode (NRT vs REA) is automatically determined based on
+            production time deltas:
+              - T-4 and older: REA mode (L0=2, "Final" run)
+              - T-3, T-2, T-1: NRT mode (L0=6, "Interim" run)
+
             Historical reprocessing is controlled via MUR_SIMULATED_DATE env var.
             Use mur_date.set_simulated_date() before creating the orchestrator,
             or pass --date to the CLI which sets the env var automatically.
@@ -157,7 +162,7 @@ class MUROrchestrator:
         self.config = self._load_config()
         self.base_dir = pathlib.Path(__file__).parent
         self.netrc_path = netrc_path
-        self.use_rea = use_rea
+        self.force_nrt = force_nrt
         self.keep_containers = keep_containers
 
         # Track processing stats
@@ -222,11 +227,14 @@ class MUROrchestrator:
         """
         Determine if date should be processed in NRT (interim) vs REA (final) mode.
 
-        By default, always uses NRT mode (treats all dates as "today").
-        If use_rea=True, uses production logic based on date boundaries.
+        Uses production logic based on date boundaries:
+          - process_date > day1 (T-4): NRT mode (L0=6, "Interim" run)
+          - process_date <= day1 (T-4): REA mode (L0=2, "Final" run)
+
+        If force_nrt=True, always uses NRT mode regardless of date.
         """
-        if not self.use_rea:
-            return True  # Default: always NRT mode
+        if self.force_nrt:
+            return True  # Override: always NRT mode
         return process_date > day1
 
     def _ordinal_day(self, date: datetime.date) -> int:
@@ -1043,27 +1051,27 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Process yesterday with full pipeline (preprocessing + MRVA)
+  # Process yesterday (mode auto-determined: NRT for T-1)
   uv run run_mur_pipeline.py --config config.json
 
-  # Simulate production run on Jan 20, processing yesterday (Jan 19)
+  # Simulate run on Jan 20, processing yesterday (Jan 19 = T-1 = NRT)
   uv run run_mur_pipeline.py --config config.json --date 2026-01-20
 
-  # Simulate production run on Jan 20, processing the REA boundary day (Jan 16)
-  uv run run_mur_pipeline.py --config config.json --date 2026-01-20 --process-days -4
+  # Process REA boundary day (Jan 16 = T-4 = REA mode)
+  uv run run_mur_pipeline.py --config config.json --date 2026-01-20 -p -4
 
-  # Simulate production run on Jan 20, processing full 9-day window
-  uv run run_mur_pipeline.py --config config.json --date 2026-01-20 --process-days -9:-1
+  # Full 9-day window (auto: REA for T-9..T-4, NRT for T-3..T-1)
+  uv run run_mur_pipeline.py --config config.json --date 2026-01-20 -p -9:-1
   uv run run_mur_pipeline.py --config config.json --date 2026-01-20 --all-stages
 
+  # Force NRT mode for old dates (override auto-detection)
+  uv run run_mur_pipeline.py --config config.json --date 2026-01-20 --force-nrt
+
   # Preprocessing only (skip MRVA)
-  uv run run_mur_pipeline.py --config config.json --date 2026-01-20 --preprocess-only
+  uv run run_mur_pipeline.py --config config.json --preprocess-only
 
   # Execute only specific stages
   uv run run_mur_pipeline.py --config config.json --execute iquam,l2p
-
-  # Use custom .netrc location
-  uv run run_mur_pipeline.py --config config.json --netrc-path mur/.netrc
         """
     )
 
@@ -1083,7 +1091,7 @@ Examples:
     )
 
     parser.add_argument(
-        "--process-days",
+        "-p", "--process-days",
         type=str,
         default="-1",
         help="Analysis day(s) to process as offset(s) from run day. Single offset "
@@ -1126,12 +1134,11 @@ Examples:
     )
 
     parser.add_argument(
-        "--use-rea",
+        "--force-nrt",
         action="store_true",
-        help="Enable REA (reanalysis) mode based on date boundaries. By default, "
-             "all processing uses NRT (near real-time) mode, treating past dates "
-             "as if they are 'today'. Use this flag to enable production-style "
-             "REA/NRT boundary logic (not fully implemented yet)."
+        help="Force NRT (near real-time) mode for all dates, overriding automatic "
+             "mode detection. By default, mode is determined based on production "
+             "time deltas: T-4 and older uses REA (L0=2), T-3 to T-1 uses NRT (L0=6)."
     )
 
     parser.add_argument(
@@ -1280,7 +1287,7 @@ def main():
         orchestrator = MUROrchestrator(
             args.config,
             netrc_path=args.netrc_path,
-            use_rea=args.use_rea,
+            force_nrt=args.force_nrt,
             keep_containers=args.keep_containers
         )
     except Exception as e:
@@ -1305,7 +1312,11 @@ def main():
             day_offsets = parse_process_days(args.process_days)
 
         logger.info(f"Run day (simulated today): {reference_today}")
-        logger.info(f"NRT/REA boundary (day1): {day1}")
+        logger.info(f"NRT/REA boundary: {day1} (T-{orchestrator.REA_LATENCY})")
+        logger.info(f"  - Dates > {day1}: NRT mode (L0=6, Interim)")
+        logger.info(f"  - Dates <= {day1}: REA mode (L0=2, Final)")
+        if args.force_nrt:
+            logger.info("  - --force-nrt: All dates will use NRT mode")
         logger.info(f"Processing day offsets: {day_offsets}")
 
         # Process each analysis day
