@@ -65,29 +65,33 @@ Processing in a coarse-to-fine hierarchy provides several advantages:
 
 ### What are B-splines?
 
-B-splines are **purely mathematical basis functions**—they have no inherent connection to temperature or ocean physics. They serve the same role as sine/cosine waves in Fourier analysis: providing a flexible set of "building blocks" for representing smooth fields.
+B-splines are **purely mathematical basis functions**—they have no inherent connection to temperature or ocean physics. They provide a smooth, local "building block" for representing continuous fields.
 
-The SST field is represented as a weighted sum of these basis functions:
+Unlike Fourier analysis (which uses many different basis shapes—sin(x), sin(2x), sin(3x), etc.), MRVA uses **a single basis function shape**: the cubic B-spline. Copies of this one function are placed at each point on a **coefficient grid**, and the SST field is reconstructed as their weighted sum:
 
 ```
-SST(x,y) = Σ c_ij · B_i(x) · B_j(y)
+SST(x,y) = Σ c_ij · B(x - x_i) · B(y - y_j)
 ```
 
-Where the **coefficients c_ij are the unknowns** we solve for, and the B-splines B_i, B_j are fixed mathematical functions.
+Where:
+- `c_ij` are the coefficient values at coefficient grid point (i,j) — **the unknowns we solve for**
+- `B(t)` is the single cubic B-spline function, evaluated at distance t from the center
+- `x_i, y_j` are the coefficient grid positions where B-splines are centered
 
 ### Key Properties
 
 | Property | Description | Benefit for MRVA |
 |----------|-------------|------------------|
-| **Local support** | Each B-spline is non-zero over only 4 grid cells | Sparse matrices, O(N) computation |
+| **Local support** | Non-zero only within 2 grid spacings of its center | Sparse matrices, O(N) computation |
 | **Smoothness** | C² continuous (continuous 2nd derivative) | No artificial discontinuities in SST |
-| **Partition of unity** | All basis functions sum to 1 at any point | Proper interpolation, unbiased averaging |
+| **Partition of unity** | At any point, the nearby B-splines sum to 1 | Unbiased interpolation between grid points |
+| **Symmetric** | B(t) = B(-t) | Distance is all that matters, not direction |
 | **Non-negative** | Always ≥ 0 | Numerically stable |
-| **Tensor product** | 2D basis = B_i(x) · B_j(y) | Separable, efficient computation |
+| **Tensor product** | 2D evaluation = B(dx) · B(dy) | Separable, efficient computation |
 
-### Single B-spline Basis Function
+### The B-spline Function
 
-A cubic B-spline centered at the origin has the piecewise formula:
+There is **one function**, the cubic B-spline, evaluated at a distance `t` from its center:
 
 ```
 B(t) = (4 - 6|t|² + 3|t|³) / 6    for |t| < 1
@@ -97,17 +101,59 @@ B(t) = 0                           for |t| ≥ 2
 
 ![Single B-spline basis function](figures/bspline_single.png)
 
-*A single cubic B-spline: smooth, bell-shaped, and non-zero only over 4 grid cells.*
+*The cubic B-spline: smooth, symmetric, and zero beyond 2 grid spacings from its center.*
+
+The input `t` is the **distance** (in coefficient grid spacings) from the evaluation point to the B-spline center. This is the only function needed—every B-spline in the system is just this function evaluated at a different distance.
+
+### Coefficient Grid vs Output Grid
+
+An important distinction: the B-spline centers sit on the **coefficient grid**, which is much coarser than the 0.01° output grid:
+
+| Scale | Coefficient grid spacing | Output grid (0.01°) | Ratio |
+|-------|--------------------------|---------------------|-------|
+| L=6 | ~0.70° | 0.01° | ~70x coarser |
+| L=8 | ~0.17° | 0.01° | ~17x coarser |
+| L=10 | ~0.045° | 0.01° | ~4.5x coarser |
+| L=11 | ~0.022° | 0.01° | ~2.2x coarser |
+
+Observations from satellites and buoys fall at arbitrary lat/lon positions that are almost never aligned with the coefficient grid. Likewise, the 0.01° output grid points sit between coefficient grid centers. This is why the partition of unity property matters.
 
 ### Partition of Unity
 
-When B-splines are placed at each grid point, they **always sum to 1** at any location:
+At any arbitrary position on the domain, the B-splines from the nearest coefficient grid points sum to exactly 1. This is visualized by drawing a vertical line anywhere on the family plot—it intersects at most 4 non-zero B-splines, and their values always sum to 1:
 
 ![Family of B-splines showing partition of unity](figures/bspline_family.png)
 
-*Multiple B-splines covering the domain. The dashed line shows their sum equals 1 everywhere.*
+*B-splines centered at coefficient grid points (integers). The red vertical line shows an observation at position 3.7—it intersects 4 B-splines whose values sum to 1. This ensures unbiased interpolation at any position between grid centers.*
 
-This property ensures that the representation has no gaps or biases—it's a proper weighted average of nearby coefficients.
+This property guarantees:
+- **No information is lost or invented** when projecting observations onto the coefficient grid
+- **Constant fields are exact**: if all coefficients equal 20°C, the field evaluates to exactly 20°C everywhere
+- **No systematic bias** at positions between coefficient grid centers
+
+### How Observations Enter the System
+
+When an observation at position `x_obs` is projected onto the coefficient grid, there is no "assignment" to a single grid point. Instead:
+
+1. Compute `floor(x_obs)` to identify the 4 nearby coefficient grid points: `floor(x_obs) + {-1, 0, 1, 2}`
+2. Compute the **distance** from `x_obs` to each of those 4 grid points
+3. Evaluate the B-spline function `B(distance)` for each — these are the weights
+4. The observation contributes to all 4 grid points simultaneously, proportional to these weights
+
+```
+Example: observation at coefficient grid position 3.7
+
+  Grid point:  2       3       4       5
+  Distance:    1.7     0.7     0.3     1.3
+  B(distance): 0.005   0.348   0.590   0.057    (sum = 1.0)
+                                 ↑
+                          closest grid point gets
+                          the largest weight
+```
+
+Due to the B-spline's **symmetry**, this is mathematically equivalent to centering a B-spline at the observation and evaluating it at each grid point. The `floor` operation is just bookkeeping to identify which 4 grid points are nearby—the B-spline function and distances do all the actual work.
+
+In 2D, the same process applies independently in x and y (tensor product), affecting a 4×4 = 16-point neighborhood.
 
 ### Field Reconstruction
 
@@ -115,17 +161,17 @@ The coefficients c_ij determine the SST field. Each coefficient multiplies its a
 
 ![How coefficients combine with B-splines to reconstruct a field](figures/bspline_reconstruction.png)
 
-*Top-left: Individual weighted basis functions c_i·B_i(x). Top-right: Progressive summation. Bottom-left: Final reconstructed field (blue) from coefficient values (red points).*
+*Top-left: Individual weighted basis functions c_i·B_i(x). Top-right: Progressive summation. Bottom-left: Final reconstructed field (blue) from coefficient values (red points). Because B-splines partition unity, the coefficients approximate the field values at each grid point.*
 
 ### Multi-Scale B-splines
 
-At each scale L, the grid spacing halves and the number of basis functions doubles:
+At each scale L, the coefficient grid spacing halves and the number of basis functions doubles:
 
 ![Multi-scale B-spline grids](figures/bspline_multiscale.png)
 
-*B-spline grids at different scales. Finer scales have more, narrower basis functions to capture smaller features.*
+*Coefficient grids at different scales. Finer scales have more, narrower basis functions to capture smaller features.*
 
-This is the "wavelet-like" aspect of MRVA—the hierarchical multi-resolution structure—though the B-splines themselves are **not wavelets** (they don't have zero mean or the strict frequency localization properties of wavelets).
+This is the "wavelet-like" aspect of MRVA—the hierarchical multi-resolution structure—though the B-splines themselves are **not wavelets** (they don't have zero mean or the strict frequency localization properties of wavelets). The multi-resolution comes from the grid density, not from different basis function shapes.
 
 ### Why B-splines (not wavelets)?
 
@@ -133,7 +179,7 @@ While MRVA's multi-resolution approach is inspired by wavelet analysis, it uses 
 
 1. **Non-negativity**: B-splines are always ≥ 0, simplifying physical interpretation
 2. **Interpolation**: B-splines naturally interpolate between grid points
-3. **Simplicity**: The tensor-product structure B_i(x)·B_j(y) is straightforward
+3. **Simplicity**: The tensor-product structure B(dx)·B(dy) is straightforward
 4. **Smoothness**: Cubic B-splines provide C² continuity without oscillations
 
 Wavelets (which oscillate and have zero mean) would require more complex handling for a physical field like SST that is inherently positive and smooth.
@@ -165,25 +211,71 @@ This is the **Euler-Lagrange equation** (normal equations) derived from minimizi
 
 For each observation (latitude, longitude, SST_obs, error, time):
 
-1. **Locate grid cell** containing the observation
-2. **Evaluate B-spline basis functions** at the observation location
-3. **Accumulate contributions** to system matrix and right-hand side:
+1. **Identify** the 4×4 coefficient grid neighborhood around the observation
+2. **Compute distances** from the observation to each of the 16 nearby coefficient grid points
+3. **Evaluate B(distance)** for each — these are the basis weights
+4. **Accumulate contributions** to the system matrix and right-hand side:
 
 ```
-weight = error_weight * exp(-(t/decay)²) * spatial_scaling
+For each observation:
 
-For each nearby coefficient (4×4 neighborhood due to B-spline support):
+  combined_weight = (1/rms²) × exp(-(t/decay)²) × density_scaling
+                    ├─────┘    ├───────────────┘   ├──────────────┘
+                    error      temporal decay       rho (prevents dense
+                    confidence (recent obs count     clusters from
+                               more)                dominating)
 
-  b_ij   += B_i(x_obs) · B_j(y_obs) · SST_obs · weight
-           ↑                          ↑
-           basis functions            ACTUAL MEASUREMENT (only place SST values appear)
+  For each of the 16 nearby coefficient grid points (i,j) and (k,l):
 
-  A_ij,kl += B_i(x_obs) · B_j(y_obs) · B_k(x_obs) · B_l(y_obs) · weight
-             ↑                         ↑
-             basis function products   (NO SST values—purely geometric)
+    dx_i = distance from obs to grid point i (in x)
+    dy_j = distance from obs to grid point j (in y)
+
+    b_ij   += B(dx_i) · B(dy_j) · SST_obs · combined_weight
+                                   ↑
+                                   ACTUAL MEASUREMENT
+                                   (only place SST values appear)
+
+    A_ij,kl += B(dx_i) · B(dy_j) · B(dx_k) · B(dy_l) · combined_weight
+               ↑                                ↑
+               products of B-spline distances   (NO SST values)
 ```
 
-**Key insight:** The matrix A is the weighted sum of outer products of basis function vectors. It captures *where* and *how densely* observations constrain each coefficient, but not *what* the observations measured. The vector b captures the actual temperature information.
+**Multiple observations in the same grid cell are accumulated (summed), not averaged.** The rho density scaling factor prevents clusters from having disproportionate influence:
+
+```
+density_scaling(i,j) = 1 / (rho × (count(i,j) - 1) + 1)
+```
+
+Where `count(i,j)` is the number of observations in that coefficient grid cell.
+
+**Key insight:** The matrix A does NOT contain observation values. It encodes the *geometry* of the observation configuration—specifically, products of B-spline values based on distances to coefficient grid points. The actual measured SST values appear **only** in the right-hand side vector b.
+
+### Three Phases of the Algorithm
+
+The full process has three distinct phases:
+
+**Phase 1 — Build the system** (subroutine `spmDataScale` in `spmm.f`):
+```
+For each observation:
+  compute distances to 4×4 coefficient grid neighborhood
+  evaluate B(distance) for each grid point
+  accumulate into A (basis products × weight) and b (basis × SST_obs × weight)
+```
+
+**Phase 2 — Solve** (PCG/SOR iterative solver):
+```
+(A + R) c = b  →  find optimal coefficients c
+```
+
+**Phase 3 — Evaluate** (output generation):
+```
+For each output grid point (0.01° spacing):
+  compute distances to 4×4 coefficient grid neighborhood
+  SST = Σ c_ij × B(dx_i) × B(dy_j)
+  (No scaling factors — just coefficients × basis values)
+```
+
+The scaling factors (error weight, temporal decay, density correction) only exist in Phase 1. Phase 3 is purely coefficients multiplied by B-spline distance values.
 
 ### Smoothness Regularization
 
@@ -630,5 +722,5 @@ For detailed mathematical derivations and implementation specifics, see:
 
 ---
 
-*Last Updated: 2025-02-05*
-*Documentation Version: 1.1*
+*Last Updated: 2026-02-05*
+*Documentation Version: 1.2*

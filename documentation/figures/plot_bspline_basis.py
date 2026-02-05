@@ -58,9 +58,9 @@ def plot_single_bspline():
         ax.axvline(x=knot, color='gray', linestyle='--', linewidth=0.5, alpha=0.7)
         ax.plot(knot, cubic_bspline_basis(knot), 'ro', markersize=6)
 
-    ax.set_xlabel('t (grid units)', fontsize=12)
+    ax.set_xlabel('t (distance from center, in coefficient grid spacings)', fontsize=12)
     ax.set_ylabel('B(t)', fontsize=12)
-    ax.set_title('Single Cubic B-spline Basis Function\n(non-zero only over 4 grid cells)', fontsize=14)
+    ax.set_title('Single Cubic B-spline Basis Function\n(non-zero only within 2 grid spacings of center)', fontsize=14)
     ax.set_xlim(-3, 3)
     ax.set_ylim(-0.05, 0.75)
     ax.legend(loc='upper right')
@@ -79,30 +79,46 @@ def plot_single_bspline():
 
 def plot_bspline_family():
     """Plot multiple translated B-splines showing how they tile the domain."""
-    fig, ax = plt.subplots(figsize=(12, 5))
+    fig, ax = plt.subplots(figsize=(12, 5.5))
 
     t = np.linspace(-1, 8, 1000)
     colors = plt.cm.tab10(np.linspace(0, 1, 8))
 
-    # Plot B-splines centered at different grid points
+    # Plot B-splines centered at different coefficient grid points
     total = np.zeros_like(t)
     for i, center in enumerate(range(-1, 7)):
         B = cubic_bspline_basis(t - center)
-        ax.plot(t, B, color=colors[i], linewidth=1.5, label=f'B_{i}(t) centered at {center}')
+        ax.plot(t, B, color=colors[i], linewidth=1.5, label=f'B centered at coeff grid {center}')
         total += B
 
     # Plot the sum (should be 1 everywhere in the interior)
     ax.plot(t, total, 'k--', linewidth=2, label='Sum of all B-splines = 1')
 
+    # Show an observation between grid points
+    obs_pos = 3.7
+    ax.axvline(x=obs_pos, color='red', linestyle='-', linewidth=2, alpha=0.7, label=f'Observation at x={obs_pos}')
+
+    # Mark the 4 basis values at the observation location
+    for center in [2, 3, 4, 5]:
+        bval = cubic_bspline_basis(obs_pos - center)[0]
+        if bval > 0.001:
+            ax.plot(obs_pos, bval, 'ro', markersize=8, zorder=10)
+            ax.annotate(f'B({obs_pos - center:.1f})={bval:.3f}',
+                       xy=(obs_pos, bval), xytext=(obs_pos + 0.3, bval + 0.03),
+                       fontsize=9, color='red',
+                       arrowprops=dict(arrowstyle='->', color='red', lw=0.8))
+
     ax.axhline(y=1, color='gray', linestyle=':', linewidth=1)
     ax.axhline(y=0, color='k', linewidth=0.5)
 
-    ax.set_xlabel('t (grid position)', fontsize=12)
+    ax.set_xlabel('Coefficient grid position (B-spline centers at integer positions)', fontsize=12)
     ax.set_ylabel('B(t)', fontsize=12)
-    ax.set_title('Family of Cubic B-splines: Partition of Unity\n(They always sum to 1 at any point)', fontsize=14)
+    ax.set_title('Family of Cubic B-splines: Partition of Unity\n'
+                 'Any vertical line intersects at most 4 non-zero B-splines, and their values sum to 1',
+                 fontsize=13)
     ax.set_xlim(-1, 8)
     ax.set_ylim(-0.05, 1.15)
-    ax.legend(loc='upper right', fontsize=8, ncol=2)
+    ax.legend(loc='upper right', fontsize=7, ncol=2)
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -185,7 +201,7 @@ def plot_field_reconstruction():
         ax.plot(x, B_weighted, color=colors[i], linewidth=1, alpha=0.7,
                 label=f'c_{i}·B_{i}' if i < 5 else None)
     ax.set_title('Individual weighted basis functions: c_i · B_i(x)', fontsize=12)
-    ax.set_xlabel('x (grid position)')
+    ax.set_xlabel('x (coefficient grid position)')
     ax.set_ylabel('Contribution to field')
     ax.legend(loc='upper right', fontsize=8)
     ax.grid(True, alpha=0.3)
@@ -199,7 +215,7 @@ def plot_field_reconstruction():
         if i in [0, 2, 4, 6, 9]:
             ax.plot(x, cumulative, linewidth=1.5, alpha=0.7, label=f'Sum up to B_{i}')
     ax.set_title('Progressive reconstruction: Σ c_i · B_i(x)', fontsize=12)
-    ax.set_xlabel('x (grid position)')
+    ax.set_xlabel('x (coefficient grid position)')
     ax.set_ylabel('Reconstructed field')
     ax.legend(loc='upper right', fontsize=8)
     ax.grid(True, alpha=0.3)
@@ -214,7 +230,7 @@ def plot_field_reconstruction():
     ax.scatter(range(n_coeffs), coefficients, c='red', s=50, zorder=5,
                label='Coefficient values c_i')
     ax.set_title('Final result: SST(x) = Σ c_i · B_i(x)', fontsize=12)
-    ax.set_xlabel('x (grid position)')
+    ax.set_xlabel('x (coefficient grid position)')
     ax.set_ylabel('Temperature (°C)')
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
