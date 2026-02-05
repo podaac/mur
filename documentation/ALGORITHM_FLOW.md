@@ -7,13 +7,14 @@ This document describes the Multi-Resolution Variational Analysis (MRVA) algorit
 ## Table of Contents
 
 1. [Algorithm Overview](#algorithm-overview)
-2. [Mathematical Formulation](#mathematical-formulation)
-3. [Multi-Scale Processing Flow](#multi-scale-processing-flow)
-4. [Scale Parameter Interpretation](#scale-parameter-interpretation)
-5. [Data Incorporation Strategy](#data-incorporation-strategy)
-6. [Temporal Weighting](#temporal-weighting)
-7. [Solver Details](#solver-details)
-8. [Output Products](#output-products)
+2. [B-spline Basis Functions](#b-spline-basis-functions)
+3. [Mathematical Formulation](#mathematical-formulation)
+4. [Multi-Scale Processing Flow](#multi-scale-processing-flow)
+5. [Scale Parameter Interpretation](#scale-parameter-interpretation)
+6. [Data Incorporation Strategy](#data-incorporation-strategy)
+7. [Temporal Weighting](#temporal-weighting)
+8. [Solver Details](#solver-details)
+9. [Output Products](#output-products)
 
 ## Algorithm Overview
 
@@ -60,6 +61,83 @@ Processing in a coarse-to-fine hierarchy provides several advantages:
 - **Data fusion:** Use coarse sensors at large scales, high-res sensors at fine scales
 - **Gap filling:** Coarse scales provide background where fine-scale data is sparse
 
+## B-spline Basis Functions
+
+### What are B-splines?
+
+B-splines are **purely mathematical basis functions**—they have no inherent connection to temperature or ocean physics. They serve the same role as sine/cosine waves in Fourier analysis: providing a flexible set of "building blocks" for representing smooth fields.
+
+The SST field is represented as a weighted sum of these basis functions:
+
+```
+SST(x,y) = Σ c_ij · B_i(x) · B_j(y)
+```
+
+Where the **coefficients c_ij are the unknowns** we solve for, and the B-splines B_i, B_j are fixed mathematical functions.
+
+### Key Properties
+
+| Property | Description | Benefit for MRVA |
+|----------|-------------|------------------|
+| **Local support** | Each B-spline is non-zero over only 4 grid cells | Sparse matrices, O(N) computation |
+| **Smoothness** | C² continuous (continuous 2nd derivative) | No artificial discontinuities in SST |
+| **Partition of unity** | All basis functions sum to 1 at any point | Proper interpolation, unbiased averaging |
+| **Non-negative** | Always ≥ 0 | Numerically stable |
+| **Tensor product** | 2D basis = B_i(x) · B_j(y) | Separable, efficient computation |
+
+### Single B-spline Basis Function
+
+A cubic B-spline centered at the origin has the piecewise formula:
+
+```
+B(t) = (4 - 6|t|² + 3|t|³) / 6    for |t| < 1
+B(t) = (2 - |t|)³ / 6              for 1 ≤ |t| < 2
+B(t) = 0                           for |t| ≥ 2
+```
+
+![Single B-spline basis function](figures/bspline_single.png)
+
+*A single cubic B-spline: smooth, bell-shaped, and non-zero only over 4 grid cells.*
+
+### Partition of Unity
+
+When B-splines are placed at each grid point, they **always sum to 1** at any location:
+
+![Family of B-splines showing partition of unity](figures/bspline_family.png)
+
+*Multiple B-splines covering the domain. The dashed line shows their sum equals 1 everywhere.*
+
+This property ensures that the representation has no gaps or biases—it's a proper weighted average of nearby coefficients.
+
+### Field Reconstruction
+
+The coefficients c_ij determine the SST field. Each coefficient multiplies its associated basis function, and the sum produces the continuous field:
+
+![How coefficients combine with B-splines to reconstruct a field](figures/bspline_reconstruction.png)
+
+*Top-left: Individual weighted basis functions c_i·B_i(x). Top-right: Progressive summation. Bottom-left: Final reconstructed field (blue) from coefficient values (red points).*
+
+### Multi-Scale B-splines
+
+At each scale L, the grid spacing halves and the number of basis functions doubles:
+
+![Multi-scale B-spline grids](figures/bspline_multiscale.png)
+
+*B-spline grids at different scales. Finer scales have more, narrower basis functions to capture smaller features.*
+
+This is the "wavelet-like" aspect of MRVA—the hierarchical multi-resolution structure—though the B-splines themselves are **not wavelets** (they don't have zero mean or the strict frequency localization properties of wavelets).
+
+### Why B-splines (not wavelets)?
+
+While MRVA's multi-resolution approach is inspired by wavelet analysis, it uses B-splines rather than true wavelets because:
+
+1. **Non-negativity**: B-splines are always ≥ 0, simplifying physical interpretation
+2. **Interpolation**: B-splines naturally interpolate between grid points
+3. **Simplicity**: The tensor-product structure B_i(x)·B_j(y) is straightforward
+4. **Smoothness**: Cubic B-splines provide C² continuity without oscillations
+
+Wavelets (which oscillate and have zero mean) would require more complex handling for a physical field like SST that is inherently positive and smooth.
+
 ## Mathematical Formulation
 
 ### Variational Problem
@@ -70,29 +148,42 @@ At each scale L, MRVA solves:
 (A + R) c = b
 
 Where:
-  A = data term matrix (contributions from observations)
-  R = regularization term matrix (thin-plate smoothness)
-  c = coefficient vector (unknowns)
-  b = right-hand side vector (data values projected onto basis functions)
+  A = Gram matrix of basis functions evaluated at observation locations
+      (contains NO actual SST values—only geometric information about
+       where observations constrain the solution)
+  R = regularization term matrix (thin-plate smoothness penalty)
+  c = coefficient vector (the unknowns we solve for)
+  b = right-hand side vector (actual SST observations projected onto
+      the basis functions—this is where measured values enter)
 ```
 
-This is the **Euler-Lagrange equation** derived from minimizing the cost function J.
+This is the **Euler-Lagrange equation** (normal equations) derived from minimizing the cost function J.
+
+**Important clarification:** The matrix A does NOT contain observation values. It encodes the *geometry* of the observation configuration in coefficient space—specifically, products of basis functions evaluated at observation locations. The actual measured SST values appear **only** in the right-hand side vector b.
 
 ### Data Term
 
-For each observation (latitude, longitude, SST, error, time):
+For each observation (latitude, longitude, SST_obs, error, time):
 
 1. **Locate grid cell** containing the observation
 2. **Evaluate B-spline basis functions** at the observation location
 3. **Accumulate contributions** to system matrix and right-hand side:
 
 ```
-weight = error * exp(-(t/decay)²) * spatial_scaling
+weight = error_weight * exp(-(t/decay)²) * spatial_scaling
 
-For each nearby coefficient c_ij (4×4 neighborhood due to B-spline support):
-  b_ij += basis_i(x) * basis_j(y) * SST_obs * weight
-  A_ij,kl += basis_i(x) * basis_j(y) * basis_k(x) * basis_l(y) * weight
+For each nearby coefficient (4×4 neighborhood due to B-spline support):
+
+  b_ij   += B_i(x_obs) · B_j(y_obs) · SST_obs · weight
+           ↑                          ↑
+           basis functions            ACTUAL MEASUREMENT (only place SST values appear)
+
+  A_ij,kl += B_i(x_obs) · B_j(y_obs) · B_k(x_obs) · B_l(y_obs) · weight
+             ↑                         ↑
+             basis function products   (NO SST values—purely geometric)
 ```
+
+**Key insight:** The matrix A is the weighted sum of outer products of basis function vectors. It captures *where* and *how densely* observations constrain each coefficient, but not *what* the observations measured. The vector b captures the actual temperature information.
 
 ### Smoothness Regularization
 
@@ -539,5 +630,5 @@ For detailed mathematical derivations and implementation specifics, see:
 
 ---
 
-*Last Updated: 2025-01-18*
-*Documentation Version: 1.0*
+*Last Updated: 2025-02-05*
+*Documentation Version: 1.1*
