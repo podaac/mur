@@ -180,8 +180,11 @@ Value 13 (ice lake):  <0.01% (frozen Great Lakes)
    ```
 
 **Output:**
-- `.gds` file: `landiceP01_YYYY_DDD.gds.gz` (land/ice mask)
+
+- `.gds` file: `landiceP01_YYYY_DDD.gds.gz` (land/ice mask, p01 / 0.01° resolution)
 - `.bip` file: `G10_YYYY_DDD.bip` (ice SST points for MRVA)
+
+**Resolution note:** The landice container also generates a legacy p011 (0.011° / ~1km) variant named `landice_YYYY_DDD.gds.gz` in the `land/p011/` directory. This was used by MUR v3 but is **not consumed by the current MUR v4 pipeline**. Only the p01 output (`landiceP01_` prefix, `land/p01/` directory) is used.
 
 **Daily Update:** Ice mask regenerated every day (no caching)
 

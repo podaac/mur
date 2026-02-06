@@ -3,11 +3,12 @@ function mrva4com_container(year, day, realtime, varargin)
 %
 % Container entry point for MRVA processing with path mapping
 %
-% Usage: mrva4com_container(year, day, realtime, [sensors_cell])
+% Usage: mrva4com_container(year, day, realtime, [sensors], [debug])
 %   year:        4-digit year (numeric or string)
 %   day:         Day of year (numeric or string, 1-366)
 %   realtime:    'nrt' or 'rea' or 0/1 (NRT=1, REA=0)
-%   sensors_cell: Optional cell array of sensor structs
+%   sensors:     Optional sensor list (comma-separated string or cell array)
+%   debug:       Optional debug flag (1=enabled, or set MRVA_DEBUG=1 env var)
 %
 % Container paths (mounted from host):
 %   /data/input/bic/     - L2P satellite data (BIC.gz files by sensor)
@@ -47,12 +48,21 @@ function mrva4com_container(year, day, realtime, varargin)
         error('Invalid day of year: %d', day);
     end
 
+    % Parse debug flag (from argument or environment variable)
+    debugMode = false;
+    if nargin > 4 && ~isempty(varargin{2})
+        debugMode = logical(varargin{2});
+    elseif ~isempty(getenv('MRVA_DEBUG'))
+        debugMode = str2double(getenv('MRVA_DEBUG')) == 1;
+    end
+
     fprintf('========================================\n');
     fprintf('MRVA Container Processing\n');
     fprintf('========================================\n');
     fprintf('Year:     %d\n', year);
     fprintf('DOY:      %d\n', day);
     fprintf('Mode:     %s\n', iif(realtime, 'NRT (Near Real-Time)', 'REA (Reanalysis)'));
+    fprintf('Debug:    %s\n', iif(debugMode, 'ENABLED', 'disabled'));
     fprintf('========================================\n\n');
 
     %% Container path mapping
@@ -344,6 +354,17 @@ function mrva4com_container(year, day, realtime, varargin)
     [~, inx] = setdiff(sensors(:,1), excludelist);
     inx = sort(inx);
 
+    % Debug: show sensors used for makeref vs excluded
+    if debugMode
+        fprintf('\n=== DEBUG: makeref sensor configuration ===\n');
+        fprintf('Excluded from makeref: %s\n', strjoin(excludelist, ', '));
+        fprintf('Sensors for makeref (%d):\n', length(inx));
+        for i = 1:length(inx)
+            fprintf('  %s (La=%d, Lb=%d)\n', sensors{inx(i),1}, sensors{inx(i),4}, sensors{inx(i),5});
+        end
+        fprintf('===========================================\n\n');
+    end
+
     reffile = makeref(year, day, sensors(inx,:), Lref0, Lref, ...
                       bipdir, decay, icesstfile, polarcap, coefile);
 
@@ -383,6 +404,21 @@ function mrva4com_container(year, day, realtime, varargin)
     %% Run MRVA (Fortran core)
     fprintf('Stage 5: MRVA multi-scale analysis (L=%d to %d)...\n', L0, LF);
     fprintf('  This may take 30-60 minutes...\n');
+
+    % Debug: show all sensors for main MRVA run
+    if debugMode
+        fprintf('\n=== DEBUG: Main MRVA sensor configuration ===\n');
+        fprintf('L0=%d, LF=%d, coefile=%s\n', L0, LF, coefile);
+        fprintf('Sensors for main MRVA (%d total):\n', size(sensors, 1));
+        for n = 1:size(sensors, 1)
+            bipfile = sprintf('%s/%s_%s_%04d_%03d.biq', bipdir, region, sensors{n,1}, year, day);
+            fileExists = exist(bipfile, 'file') > 0;
+            fprintf('  %d. %s (La=%d, Lb=%d) -> %s [%s]\n', ...
+                n, sensors{n,1}, sensors{n,4}, sensors{n,5}, bipfile, ...
+                iif(fileExists, 'EXISTS', 'MISSING'));
+        end
+        fprintf('=============================================\n\n');
+    end
 
     % Write MRVA namelist
     f = fopen('mrva.nml', 'w');
@@ -428,10 +464,24 @@ function mrva4com_container(year, day, realtime, varargin)
     fprintf(f, ' $end\n');
     fclose(f);
 
+    % Debug: show namelist contents before running MRVA
+    if debugMode
+        fprintf('\n=== DEBUG: mrva.nml contents (main MRVA run) ===\n');
+        type('mrva.nml');
+        fprintf('=== END mrva.nml ===\n\n');
+    end
+
     % Execute Fortran MRVA
     tic;
     [status, result] = system([fortran_bin, '/mrva']);
     elapsed = toc;
+
+    % Debug: show Fortran output
+    if debugMode
+        fprintf('\n=== DEBUG: Fortran MRVA output ===\n');
+        fprintf('%s\n', result);
+        fprintf('=== END Fortran output ===\n\n');
+    end
 
     if status == 99
         % NaN detected by Fortran code
