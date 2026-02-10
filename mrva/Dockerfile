@@ -142,6 +142,13 @@ RUN cd /app/matlab && \
 # ========================================================================
 FROM debian:bookworm-slim
 
+# Re-declare DEBUG arg from build to persist in runtime image
+ARG DEBUG=0
+
+# Persist DEBUG flag as environment variable for runtime detection
+# If built with DEBUG=1, runtime will automatically enable debug output
+ENV MRVA_DEBUG_BUILD=${DEBUG}
+
 # Install runtime dependencies
 # libxt6, libxmu6: Required by MATLAB Runtime for X11 components even in headless mode
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -254,19 +261,40 @@ export KMP_STACKSIZE=${KMP_STACKSIZE:-128M}
 # ========================================================================
 # Debug Mode Detection
 # ========================================================================
+# Debug mode is enabled if:
+#   1. Container was built with DEBUG=1 (MRVA_DEBUG_BUILD env var)
+#   2. Runtime --debug flag is passed
+#   3. MRVA_DEBUG=1 environment variable is set
 DEBUG_MODE=0
-if [ "$1" = "--debug" ]; then
+
+# Check if this is a debug build (set at build time via ARG DEBUG=1)
+if [ "${MRVA_DEBUG_BUILD:-0}" = "1" ]; then
     DEBUG_MODE=1
-    shift  # Remove --debug from arguments
     echo "========================================="
-    echo "DEBUG MODE ENABLED"
+    echo "DEBUG BUILD DETECTED"
     echo "========================================="
-    echo "Enhanced diagnostic output will be shown."
-    echo "For maximum debugging, rebuild with DEBUG=1:"
-    echo "  docker build --build-arg DEBUG=1 -t mrva:debug ..."
+    echo "This container was built with DEBUG=1."
+    echo "Enhanced diagnostic output is automatically enabled."
     echo "========================================="
     echo ""
 fi
+
+# Runtime --debug flag overrides (or enables if not a debug build)
+if [ "$1" = "--debug" ]; then
+    DEBUG_MODE=1
+    shift  # Remove --debug from arguments
+    if [ "${MRVA_DEBUG_BUILD:-0}" != "1" ]; then
+        echo "========================================="
+        echo "DEBUG MODE ENABLED (runtime flag)"
+        echo "========================================="
+        echo "Enhanced diagnostic output will be shown."
+        echo "For maximum debugging, rebuild with DEBUG=1:"
+        echo "  docker build --build-arg DEBUG=1 -t mrva:debug ..."
+        echo "========================================="
+        echo ""
+    fi
+fi
+
 export MRVA_DEBUG=$DEBUG_MODE
 
 # Argument validation
@@ -323,7 +351,15 @@ echo "Year:     $YEAR"
 echo "DOY:      $DOY"
 echo "Mode:     $MODE"
 echo "Sensors:  ${SENSORS:-all (default)}"
-echo "Debug:    $([ $DEBUG_MODE -eq 1 ] && echo 'ENABLED' || echo 'disabled')"
+if [ $DEBUG_MODE -eq 1 ]; then
+    if [ "${MRVA_DEBUG_BUILD:-0}" = "1" ]; then
+        echo "Debug:    ENABLED (debug build)"
+    else
+        echo "Debug:    ENABLED (runtime flag)"
+    fi
+else
+    echo "Debug:    disabled"
+fi
 echo "-----------------------------------------"
 echo "Stack:    $(ulimit -s) (soft limit)"
 echo "KMP_STACKSIZE: $KMP_STACKSIZE"
