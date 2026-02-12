@@ -241,11 +241,18 @@ for isensor=1:size(sensors,1),
 
           % Read header with explicit Fortran record markers for memory efficiency
           % Fortran record format: [record_length] [data...] [record_length]
-          rec_len1 = fread(f, 1, 'int32');  % Record length marker (should be 12 for 3*int32)
+          rec_len1 = fread(f, 1, 'uint32');  % Record length marker (should be 12 for 3*int32)
           nyear = fread(f, 1, 'int32=>int32');
           nday = fread(f, 1, 'int32=>int32');
           N = fread(f, 1, 'int32=>int32');
-          rec_len2 = fread(f, 1, 'int32');  % Trailing record length marker
+          rec_len2 = fread(f, 1, 'uint32');  % Trailing record length marker
+
+          % Validate record markers (matches fortread behavior)
+          expected_len1 = 12;  % 3 x int32 = 12 bytes
+          if rec_len1 ~= expected_len1 || rec_len2 ~= expected_len1
+            error('BIC header record mismatch in %s: expected %d, got leading=%d trailing=%d', ...
+                  filename, expected_len1, rec_len1, rec_len2);
+          end
 
           % Debug: check if nday is valid
           if nday < 1 || nday > 366
@@ -257,15 +264,22 @@ for isensor=1:size(sensors,1),
           end
 
           % Read scaling parameters with Fortran record markers
-          rec_len1 = fread(f, 1, 'int32');  % Record length marker (should be 12 for 3*float32)
+          rec_len1 = fread(f, 1, 'uint32');  % Record length marker (should be 12 for 3*float32)
           off = fread(f, 1, 'float32=>single');
           scale1 = fread(f, 1, 'float32=>single');
           scale2 = fread(f, 1, 'float32=>single');
-          rec_len2 = fread(f, 1, 'int32');  % Trailing record length marker
+          rec_len2 = fread(f, 1, 'uint32');  % Trailing record length marker
+
+          % Validate scaling record markers
+          expected_len2 = 12;  % 3 x float32 = 12 bytes
+          if rec_len1 ~= expected_len2 || rec_len2 ~= expected_len2
+            error('BIC scaling record mismatch in %s: expected %d, got leading=%d trailing=%d', ...
+                  filename, expected_len2, rec_len1, rec_len2);
+          end
 
           % Read data arrays with Fortran record markers and type preservation
           % More memory-efficient than fortread which converts everything to float64
-          rec_len1 = fread(f, 1, 'int32');  % Record length marker
+          rec_len1 = fread(f, 1, 'uint32');  % Record length marker
           lon = fread(f, N, 'float32=>single');
           lat = fread(f, N, 'float32=>single');
           hour = fread(f, N, 'int16=>int16');
@@ -273,8 +287,16 @@ for isensor=1:size(sensors,1),
           bias = fread(f, N, 'int16=>int16');
           rms = fread(f, N, 'uint8=>uint8');
           qt = fread(f, N, 'uint8=>uint8');
-          rec_len2 = fread(f, 1, 'int32');  % Trailing record length marker
+          rec_len2 = fread(f, 1, 'uint32');  % Trailing record length marker
           fclose(f);
+
+          % Validate data record markers
+          % lon(4*N) + lat(4*N) + hour(2*N) + sst(2*N) + bias(2*N) + rms(N) + qt(N) = 16*N bytes
+          expected_len3 = 16 * double(N);
+          if rec_len1 ~= expected_len3 || rec_len2 ~= expected_len3
+            error('BIC data record mismatch in %s: expected %d, got leading=%d trailing=%d (N=%d)', ...
+                  filename, expected_len3, rec_len1, rec_len2, N);
+          end
 
           %% format conversion:
           sst=double(sst)*scale1+off;
@@ -304,22 +326,37 @@ for isensor=1:size(sensors,1),
           end;
           % Read header record with Fortran record markers
           % Record structure: [4-byte marker] [N:int32] [nyear:int16] [nday:int16] [4-byte marker]
-          rec_len1 = fread(f, 1, 'int32');  % Leading record marker (should be 8)
+          rec_len1 = fread(f, 1, 'uint32');  % Leading record marker (should be 8)
           N = fread(f, 1, 'int32=>int32');
           nyear = fread(f, 1, 'int16=>int16');
           nday = fread(f, 1, 'int16=>int16');
-          rec_len2 = fread(f, 1, 'int32');  % Trailing record marker
+          rec_len2 = fread(f, 1, 'uint32');  % Trailing record marker
+
+          % Validate header record markers
+          expected_len1 = 8;  % int32 + int16 + int16 = 8 bytes
+          if rec_len1 ~= expected_len1 || rec_len2 ~= expected_len1
+            error('BII header record mismatch in %s: expected %d, got leading=%d trailing=%d', ...
+                  filename, expected_len1, rec_len1, rec_len2);
+          end
 
           % Read data record with Fortran record markers
           % Record structure: [4-byte marker] [sst] [lon] [lat] [hour] [qt] [4-byte marker]
-          rec_len1 = fread(f, 1, 'int32');  % Leading record marker
+          rec_len1 = fread(f, 1, 'uint32');  % Leading record marker
           sst = fread(f, N, 'int16=>int16');
           lon = fread(f, N, 'int16=>int16');
           lat = fread(f, N, 'int16=>int16');
           hour = fread(f, N, 'int16=>int16');
           qt = fread(f, N, 'int8=>int8');
-          rec_len2 = fread(f, 1, 'int32');  % Trailing record marker
+          rec_len2 = fread(f, 1, 'uint32');  % Trailing record marker
           fclose(f);
+
+          % Validate data record markers
+          % sst(2*N) + lon(2*N) + lat(2*N) + hour(2*N) + qt(N) = 9*N bytes
+          expected_len2 = 9 * double(N);
+          if rec_len1 ~= expected_len2 || rec_len2 ~= expected_len2
+            error('BII data record mismatch in %s: expected %d, got leading=%d trailing=%d (N=%d)', ...
+                  filename, expected_len2, rec_len1, rec_len2, N);
+          end
 
           %% format conversion:
           sst=single(sst)/100; lon=single(lon)/100; lat=single(lat)/100;
