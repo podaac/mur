@@ -149,16 +149,17 @@ for isensor=1:size(sensors,1),
 %% packing:
 
   % Preallocate arrays for better performance
-  % Estimate maximum size based on typical observations per day
-  n_days = 2 * dayrange + 1;
-  typical_obs_per_day = 100000;  % Conservative estimate, adjust based on sensor
-  max_size = n_days * typical_obs_per_day;
+  % Use large flat estimate to avoid any reallocations (trim at end)
+  % MODIS worst case: ~30M/day × 5 days = 150M points
+  max_size = 200000000;  % 200M points - covers all sensors with margin
 
-  lonbip = NaN(max_size, 1, 'single');
-  latbip = NaN(max_size, 1, 'single');
-  dhrbip = NaN(max_size, 1, 'single');
-  sstbip = NaN(max_size, 1, 'single');
-  rmsbip = NaN(max_size, 1, 'single');
+  % NOTE: Must use double precision to match production behavior
+  % Single precision causes weight calculation errors (1/rms^2 overflow)
+  lonbip = NaN(max_size, 1);  % double (default)
+  latbip = NaN(max_size, 1);  % double (default)
+  dhrbip = NaN(max_size, 1);  % double (default)
+  sstbip = NaN(max_size, 1);  % double (default)
+  rmsbip = NaN(max_size, 1);  % double (default) - CRITICAL for weight calc
   idx = 0;  % Current index for filling arrays
 
   for dt=-dayrange:dayrange,
@@ -239,12 +240,13 @@ for isensor=1:size(sensors,1),
             continue;  % move on to the next "for" iteration.
           end;
 
-          % Read header with explicit Fortran record markers for memory efficiency
+          % Read header with explicit Fortran record markers
           % Fortran record format: [record_length] [data...] [record_length]
+          % NOTE: Must return double to match fortread behavior exactly
           rec_len1 = fread(f, 1, 'uint32');  % Record length marker (should be 12 for 3*int32)
-          nyear = fread(f, 1, 'int32=>int32');
-          nday = fread(f, 1, 'int32=>int32');
-          N = fread(f, 1, 'int32=>int32');
+          nyear = fread(f, 1, 'int32');      % Returns double (matches fortread 'integer*4')
+          nday = fread(f, 1, 'int32');       % Returns double (matches fortread 'integer*4')
+          N = fread(f, 1, 'int32');          % Returns double (matches fortread 'integer*4')
           rec_len2 = fread(f, 1, 'uint32');  % Trailing record length marker
 
           % Validate record markers (matches fortread behavior)
@@ -264,10 +266,11 @@ for isensor=1:size(sensors,1),
           end
 
           % Read scaling parameters with Fortran record markers
+          % NOTE: Must return double to match fortread behavior exactly
           rec_len1 = fread(f, 1, 'uint32');  % Record length marker (should be 12 for 3*float32)
-          off = fread(f, 1, 'float32=>single');
-          scale1 = fread(f, 1, 'float32=>single');
-          scale2 = fread(f, 1, 'float32=>single');
+          off = fread(f, 1, 'float32');      % Returns double (matches fortread)
+          scale1 = fread(f, 1, 'float32');   % Returns double (matches fortread)
+          scale2 = fread(f, 1, 'float32');   % Returns double (matches fortread)
           rec_len2 = fread(f, 1, 'uint32');  % Trailing record length marker
 
           % Validate scaling record markers
@@ -277,16 +280,17 @@ for isensor=1:size(sensors,1),
                   filename, expected_len2, rec_len1, rec_len2);
           end
 
-          % Read data arrays with Fortran record markers and type preservation
-          % More memory-efficient than fortread which converts everything to float64
+          % Read data arrays with Fortran record markers
+          % NOTE: Must return double to match fortread behavior exactly
+          % (fortread converts all types to float64/double)
           rec_len1 = fread(f, 1, 'uint32');  % Record length marker
-          lon = fread(f, N, 'float32=>single');
-          lat = fread(f, N, 'float32=>single');
-          hour = fread(f, N, 'int16=>int16');
-          sst = fread(f, N, 'int16=>int16');
-          bias = fread(f, N, 'int16=>int16');
-          rms = fread(f, N, 'uint8=>uint8');
-          qt = fread(f, N, 'uint8=>uint8');
+          lon = fread(f, N, 'float32');      % Returns double (matches fortread 'real*4')
+          lat = fread(f, N, 'float32');      % Returns double (matches fortread 'real*4')
+          hour = fread(f, N, 'int16');       % Returns double (matches fortread 'integer*2')
+          sst = fread(f, N, 'int16');        % Returns double (matches fortread 'integer*2')
+          bias = fread(f, N, 'int16');       % Returns double (matches fortread 'integer*2')
+          rms = fread(f, N, 'uint8');        % Returns double (matches fortread 'uint8')
+          qt = fread(f, N, 'uint8');         % Returns double (matches fortread 'uint8')
           rec_len2 = fread(f, 1, 'uint32');  % Trailing record length marker
           fclose(f);
 
@@ -326,10 +330,11 @@ for isensor=1:size(sensors,1),
           end;
           % Read header record with Fortran record markers
           % Record structure: [4-byte marker] [N:int32] [nyear:int16] [nday:int16] [4-byte marker]
+          % NOTE: Must return double to match fortread behavior exactly
           rec_len1 = fread(f, 1, 'uint32');  % Leading record marker (should be 8)
-          N = fread(f, 1, 'int32=>int32');
-          nyear = fread(f, 1, 'int16=>int16');
-          nday = fread(f, 1, 'int16=>int16');
+          N = fread(f, 1, 'int32');          % Returns double (matches fortread 'int32')
+          nyear = fread(f, 1, 'int16');      % Returns double (matches fortread 'int16')
+          nday = fread(f, 1, 'int16');       % Returns double (matches fortread 'int16')
           rec_len2 = fread(f, 1, 'uint32');  % Trailing record marker
 
           % Validate header record markers
@@ -341,12 +346,13 @@ for isensor=1:size(sensors,1),
 
           % Read data record with Fortran record markers
           % Record structure: [4-byte marker] [sst] [lon] [lat] [hour] [qt] [4-byte marker]
+          % NOTE: Must return double to match fortread behavior exactly
           rec_len1 = fread(f, 1, 'uint32');  % Leading record marker
-          sst = fread(f, N, 'int16=>int16');
-          lon = fread(f, N, 'int16=>int16');
-          lat = fread(f, N, 'int16=>int16');
-          hour = fread(f, N, 'int16=>int16');
-          qt = fread(f, N, 'int8=>int8');
+          sst = fread(f, N, 'int16');        % Returns double (matches fortread 'int16')
+          lon = fread(f, N, 'int16');        % Returns double (matches fortread 'int16')
+          lat = fread(f, N, 'int16');        % Returns double (matches fortread 'int16')
+          hour = fread(f, N, 'int16');       % Returns double (matches fortread 'int16')
+          qt = fread(f, N, 'int8');          % Returns double (matches fortread 'int8')
           rec_len2 = fread(f, 1, 'uint32');  % Trailing record marker
           fclose(f);
 
@@ -430,7 +436,7 @@ for isensor=1:size(sensors,1),
                   fortran_bin='/opt/mrva/bin';
                   eval(sprintf('! %s/cbscoeff',fortran_bin)); % execute spline.
                   f=fopen('cbs.out','r');
-                  wind = fread(f, nx, 'float32=>single');
+                  wind = fread(f, nx, 'float32');  % Returns double for consistency
                   fclose(f);
                   ! rm -f cbspoints.dat cbs.out cbsdata.out
                   %% discard only low-wind points:
@@ -467,14 +473,14 @@ for isensor=1:size(sensors,1),
       %% collect arrays:
         n = length(lon);
         if idx + n > max_size
-            % Reallocate if needed (rare case)
-            warning('Exceeded estimated size, reallocating...');
-            new_size = max_size + n_days * typical_obs_per_day;
-            lonbip = [lonbip; NaN(new_size - max_size, 1, 'single')];
-            latbip = [latbip; NaN(new_size - max_size, 1, 'single')];
-            dhrbip = [dhrbip; NaN(new_size - max_size, 1, 'single')];
-            sstbip = [sstbip; NaN(new_size - max_size, 1, 'single')];
-            rmsbip = [rmsbip; NaN(new_size - max_size, 1, 'single')];
+            % Expand memory if needed (should be rare with 200M preallocated)
+            warning('Exceeded 200M estimate, doubling allocation...');
+            new_size = max_size * 2;
+            lonbip = [lonbip; NaN(new_size - max_size, 1)];  % double
+            latbip = [latbip; NaN(new_size - max_size, 1)];  % double
+            dhrbip = [dhrbip; NaN(new_size - max_size, 1)];  % double
+            sstbip = [sstbip; NaN(new_size - max_size, 1)];  % double
+            rmsbip = [rmsbip; NaN(new_size - max_size, 1)];  % double
             max_size = new_size;
         end
 
