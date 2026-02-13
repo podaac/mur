@@ -29,3 +29,8 @@ This component downloads (or loads) L2P Sensor data from Earthdata and combines 
 Runtime: 2025-08-13T20:27:57,501 root INFO Execution time: 0:32:30.754806 (fully parallelized )
 
 See this README for details: [L2P README](l2p/README.md)
+
+## CalTech Copyright
+Copyright [2025], by the California Institute of Technology. ALL RIGHTS RESERVED. United States Government Sponsorship acknowledged. Any commercial use must be negotiated with the Office of Technology Transfer at the California Institute of Technology.
+ 
+This software may be subject to U.S. export control laws. By accepting this software, the user agrees to comply with all applicable U.S. export laws and regulations. User has the responsibility to obtain export licenses, or other export authority as may be required before exporting such information to foreign countries or providing access to foreign persons.
