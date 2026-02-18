@@ -436,7 +436,9 @@ for isensor=1:size(sensors,1),
                   fortran_bin='/opt/mrva/bin';
                   eval(sprintf('! %s/cbscoeff',fortran_bin)); % execute spline.
                   f=fopen('cbs.out','r');
+                  fread(f, 1, 'uint32');           % Skip Fortran record marker (start)
                   wind = fread(f, nx, 'float32');  % Returns double for consistency
+                  fread(f, 1, 'uint32');           % Skip Fortran record marker (end)
                   fclose(f);
                   ! rm -f cbspoints.dat cbs.out cbsdata.out
                   %% discard only low-wind points:

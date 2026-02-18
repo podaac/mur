@@ -93,14 +93,27 @@ for n=1:nbipfile,
         Nbip = fread(f, 1, 'int32');
         fread(f, 1, 'uint32');  % Record size marker (end)
 
-        % Read second Fortran record: lon,lat,hour,sst,wgt arrays (5 * Nbip real*4 values)
-        fread(f, 1, 'uint32');  % Record size marker (start)
+        % Read 5 separate Fortran records: lon, lat, hour, sst, wgt
+        % Each array is its own record with leading/trailing markers
+        fread(f, 1, 'uint32');  % Record 2 marker (start)
         lon = fread(f, Nbip, 'real*4=>single');
+        fread(f, 1, 'uint32');  % Record 2 marker (end)
+
+        fread(f, 1, 'uint32');  % Record 3 marker (start)
         lat = fread(f, Nbip, 'real*4=>single');
+        fread(f, 1, 'uint32');  % Record 3 marker (end)
+
+        fread(f, 1, 'uint32');  % Record 4 marker (start)
         hour = fread(f, Nbip, 'real*4=>single');
+        fread(f, 1, 'uint32');  % Record 4 marker (end)
+
+        fread(f, 1, 'uint32');  % Record 5 marker (start)
         sst = fread(f, Nbip, 'real*4=>single');
+        fread(f, 1, 'uint32');  % Record 5 marker (end)
+
+        fread(f, 1, 'uint32');  % Record 6 marker (start)
         wgt = fread(f, Nbip, 'real*4=>single');
-        fread(f, 1, 'uint32');  % Record size marker (end)
+        fread(f, 1, 'uint32');  % Record 6 marker (end)
       fclose(f);
 
       % bias determination:
