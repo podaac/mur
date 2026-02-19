@@ -31,65 +31,94 @@ This will install Streamlit and all required dependencies.
 
 ### Basic Usage
 
-Run the web viewer from the command line:
+Run the web viewer from the `dataviewer/` directory so that Streamlit picks up the
+`.streamlit/config.toml` configuration:
 
 ```bash
-# Using the installed script
-mur-web-viewer
+cd /path/to/mur/dataviewer
 
-# Or using streamlit directly
-streamlit run dataviewer/web_viewer.py
+# Set the base directory for file browsing
+export MUR_BASE_DIR=/path/to/mur/data
 
-# Or as a Python module
-python -m streamlit run dataviewer/web_viewer.py
+# Run the viewer
+streamlit run web_viewer.py
 ```
 
 The app will open in your default web browser at `http://localhost:8501`.
 
 ### Setting Base Directory
 
-By default, the file browser uses the current working directory as the base. You can set a custom base directory using the `MUR_BASE_DIR` environment variable:
+The `MUR_BASE_DIR` environment variable controls which directory tree is available
+for browsing. This **must** be set before launching the viewer:
 
 ```bash
 # Set base directory to MUR data location
 export MUR_BASE_DIR=/path/to/mur/data
-mur-web-viewer
+streamlit run web_viewer.py
 
 # Or inline
-MUR_BASE_DIR=/nas4/mur/data mur-web-viewer
+MUR_BASE_DIR=/nas4/mur/data streamlit run web_viewer.py
 ```
 
 This ensures users can only browse files within the specified directory tree (security feature to prevent path traversal).
+
+### Password Protection
+
+The app requires a password before any content is rendered. The password is stored
+in `.streamlit/secrets.toml` (git-ignored):
+
+```toml
+app_password = "your-secure-password"
+```
+
+If the file is missing or the `app_password` key is absent, the app runs without
+a password prompt. To enable password protection, create the file and set the value.
+
+### SSL / HTTPS
+
+To serve over HTTPS, place your certificate and key files in the `ssl/` directory:
+
+```text
+dataviewer/
+  ssl/
+    cert.pem   # SSL certificate (or fullchain)
+    key.pem    # SSL private key
+```
+
+Then uncomment the SSL lines in `.streamlit/config.toml`:
+
+```toml
+sslCertFile = "ssl/cert.pem"
+sslKeyFile = "ssl/key.pem"
+address = "0.0.0.0"
+enableCORS = true
+```
+
+When SSL is enabled the server binds to `0.0.0.0` and is accessible at
+`https://<hostname>:8501`. Without the cert/key files, it binds to `127.0.0.1`
+only (use an SSH tunnel for remote access).
+
+To generate a self-signed certificate for development:
+
+```bash
+openssl req -x509 -newkey rsa:4096 -keyout ssl/key.pem -out ssl/cert.pem \
+  -days 365 -nodes -subj '/CN=localhost'
+```
 
 ### Advanced Usage
 
 #### Custom Port
 
 ```bash
-streamlit run dataviewer/web_viewer.py --server.port 8080
-```
-
-#### Remote Access
-
-To allow remote access (use with caution):
-
-```bash
-streamlit run dataviewer/web_viewer.py \
-  --server.address 0.0.0.0 \
-  --server.port 8501
+streamlit run web_viewer.py --server.port 8080
 ```
 
 #### Production Deployment
 
-For production deployment, consider using:
+For production, enable SSL (see above) and run headless:
 
 ```bash
-streamlit run dataviewer/web_viewer.py \
-  --server.headless true \
-  --server.address 0.0.0.0 \
-  --server.port 8501 \
-  --server.enableCORS false \
-  --server.enableXsrfProtection true
+streamlit run web_viewer.py --server.headless true
 ```
 
 ## Interface Guide

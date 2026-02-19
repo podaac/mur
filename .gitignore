@@ -59,6 +59,12 @@ config.local.json
 iquam/testing
 iquam/archive
 
+# Streamlit secrets and SSL keys
+.streamlit/secrets.toml
+*/.streamlit/secrets.toml
+ssl/key.pem
+*/ssl/key.pem
+
 # MATLAB license files (keep example template)
 network.lic
 */network.lic

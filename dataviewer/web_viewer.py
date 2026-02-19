@@ -2449,8 +2449,38 @@ def create_comparison_plot(data1: dict, data2: dict, format_type: str,
         return fig
 
 
+def check_password() -> bool:
+    """Prompt for a password and return True if correct.
+
+    The expected password is read from .streamlit/secrets.toml (key: app_password).
+    If no password is configured, access is granted without a prompt.
+    """
+    try:
+        correct_password = st.secrets["app_password"]
+    except (KeyError, FileNotFoundError):
+        # No password configured – allow access
+        return True
+
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.title("MUR Data Viewer")
+    st.markdown("Please enter the password to continue.")
+    password = st.text_input("Password", type="password", key="_password_input")
+    if password:
+        if password == correct_password:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    return False
+
+
 def main():
     """Main Streamlit application."""
+
+    if not check_password():
+        return
 
     # Title and description
     st.title("MUR Data Viewer")

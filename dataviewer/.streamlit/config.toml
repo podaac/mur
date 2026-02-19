@@ -1,11 +1,26 @@
 [server]
-# Bind only to localhost - requires SSH tunnel for remote access
-address = "127.0.0.1"
 port = 8501
-
-# Disable CORS and XSRF protection not needed for localhost-only
-enableCORS = false
 enableXsrfProtection = true
+
+# SSL/TLS Configuration
+# To enable HTTPS, place your certificate and key files in dataviewer/ssl/:
+#   ssl/cert.pem  - SSL certificate (or fullchain)
+#   ssl/key.pem   - SSL private key
+# When both files are present, Streamlit serves over HTTPS and binds to 0.0.0.0.
+# Without certs, it binds to localhost only (use SSH tunnel for remote access).
+#
+# To generate a self-signed cert for development:
+#   openssl req -x509 -newkey rsa:4096 -keyout ssl/key.pem -out ssl/cert.pem \
+#     -days 365 -nodes -subj '/CN=localhost'
+#
+# sslCertFile = "ssl/cert.pem"
+# sslKeyFile = "ssl/key.pem"
+# address = "0.0.0.0"
+# enableCORS = true
+
+# Default: localhost-only, no SSL
+address = "127.0.0.1"
+enableCORS = false
 
 [browser]
 # Don't automatically open browser on startup
