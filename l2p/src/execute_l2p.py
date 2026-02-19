@@ -1,4 +1,24 @@
-"""This is a script to execute the MUR L2P sensor operations.
+"""Execute MUR L2P sensor operations.
+
+This script downloads L2P data and processes it using MATLAB to generate
+BIC (Best Interpolated Clear-sky) files for MUR SST analysis.
+
+Download Methods
+----------------
+Two download methods are available:
+
+1. podaac-data-subscriber (HTTP) - DEFAULT
+   - Matches the original production cron job infrastructure
+   - Uses CMR temporal filtering that returns granules based on observation time
+   - Results in files that match historical production outputs
+
+2. earthaccess (S3) - Use --s3 flag for in-region AWS access
+   - Uses in-region S3 access for faster downloads in AWS
+   - CMR temporal filtering returns granules that OVERLAP the time window
+   - May include granules from adjacent days (e.g., late previous day files
+     whose observations extend into the target day)
+   - The l2p2bic.m MATLAB code filters observations to 0 <= hour < 24 to
+     compensate, but file counts may differ from historical production
 """
 
 # Standard imports
@@ -9,6 +29,11 @@ import logging
 import os
 import pathlib
 import subprocess
+import sys
+
+# Add parent directories to path for mur_date import
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import mur_date  # noqa: E402
 
 # Third party imports
 import earthaccess
@@ -16,9 +41,10 @@ import fsspec
 
 
 # Constants
-DOWNLOADER_BIN = "/home/tebaldi/mur/env/l2p/bin/podaac-data-downloader"
-L2P_TEMPLATE = "l2p_template.m"
-MATLAB_BIN = "/opt/matlab/R2021b/bin/matlab"
+# Use installed podaac-data-subscriber from PATH (installed via pip)
+SUBSCRIBER_BIN = "podaac-data-subscriber"
+DOCKER_BIN = "docker"
+CONTAINER_IMAGE = "mur-l2p:latest"
 SENSORS = {
     "AMSR2R": {"collection_name": ("AMSR2-REMSS-L2P-v8.2", "AMSR2-REMSS-L2P_RT-v8.2"), "region": "Global", "La": 2, "Lb": 8,  "day_range": (12, 1), "stable": 2},
     "AVMTBG": {"collection_name": ("AVHRRMTB_G-NAVO-L2P-v2.0",), "region": "Global", "La": 2, "Lb": 9,  "day_range": (12, 1), "stable": 2},
@@ -51,8 +77,10 @@ def main():
     input_dir = args.input
     output_dir = args.output
     config = args.config
-    download = args.download
-    for name, value in vars(args).items(): logging.info("%s: %s", name, value)
+    use_s3 = args.s3
+    container_image = args.container_image
+    for name, value in vars(args).items():
+        logging.info("%s: %s", name, value)
 
     # Set up environment
     os.environ["TMP_DIR"] = TMP_DIR
@@ -66,24 +94,23 @@ def main():
     data_dir = input_dir.joinpath(sensor).joinpath(str(doy))
     data_dir.mkdir(parents=True, exist_ok=True)
     files = download_files(data["collection_name"], sensor, day, data_dir,
-                           download)
+                           use_s3)
 
-    # Determine stability of source file
-    if datetime.date.today().toordinal() - day.toordinal() < data["stable"]:
+    # Determine stability of source file (respects MUR_SIMULATED_DATE env var)
+    if mur_date.today().toordinal() - day.toordinal() < data["stable"]:
         rewrite = 1
     else:
         rewrite = 0
 
-    # Create MATLAB file
+    # Create output directory
     bic_dir = output_dir.joinpath(sensor)
-    cmd_file = create_matlab_file(bic_dir, data_dir, sensor, rewrite, year, doy,
-                                  data["region"], pathlib.Path().cwd())
-    files.append(cmd_file)
+    bic_dir.mkdir(parents=True, exist_ok=True)
 
-    # Execute MATLAB file
-    cmd = [MATLAB_BIN, "-nodisplay", "<", cmd_file]
-    execute_subprocess(cmd)
+    # Execute L2P processing in container
+    execute_container(sensor, data["region"], data_dir, bic_dir, year, doy,
+                     rewrite, container_image)
 
+    # Clean up downloaded files if needed
     # logging.info("Deleting downloads for sensor: %s", sensor)
     # delete_downloads(files)
 
@@ -120,10 +147,16 @@ def create_args():
                             "--config",
                             type=str,
                             help="Full path to configuration file")
-    arg_parser.add_argument("-w",
-                            "--download",
+    arg_parser.add_argument("--s3",
                             action="store_true",
-                            help="Whether to download L2P data for access")
+                            help="Use S3 in-region access via earthaccess "
+                                 "instead of default podaac-data-subscriber. "
+                                 "May include adjacent-day granules.")
+    arg_parser.add_argument("--container-image",
+                            type=str,
+                            default=CONTAINER_IMAGE,
+                            help=f"Docker container image to use "
+                                 f"(default: {CONTAINER_IMAGE})")
     return arg_parser
 
 
@@ -139,7 +172,7 @@ def get_config_data(config_file, sensor):
     return config_data[sensor]
 
 
-def download_files(collections, sensor, day, data_dir, download):
+def download_files(collections, sensor, day, data_dir, use_s3):
     """Download data files for sensor for date."""
 
     sd = f"{day}T00:00:00Z"
@@ -147,19 +180,23 @@ def download_files(collections, sensor, day, data_dir, download):
 
     downloads = []
     for collection in collections:
-        if download:    # HTTP access
-            files = download_http(collection, sensor, sd, ed, data_dir)
-        else:    # S3 access
+        if use_s3:
             files = download_s3(collection, sensor, sd, ed, data_dir)
+        else:  # Default: use podaac-data-subscriber (matches production)
+            files = download_http(collection, sensor, sd, ed, data_dir)
         downloads.extend(files)
 
     return list(set(downloads))
 
 
 def download_http(collection, sensor, sd, ed, data_dir):
-    """Download data files over HTTP."""
+    """Download data files using podaac-data-subscriber.
 
-    cmd = [DOWNLOADER_BIN, "-c", collection, "-d", data_dir, "-e", ".nc", "-sd", sd, "-ed", ed, "--verbose"]
+    Uses single-day temporal range matching cron job infrastructure.
+    """
+
+    cmd = [SUBSCRIBER_BIN, "-c", collection, "-d", str(data_dir),
+           "-e", ".nc", "-sd", sd, "-ed", ed, "--verbose"]
     execute_subprocess(cmd)
 
     files = list(data_dir.glob("*.nc"))
@@ -168,13 +205,22 @@ def download_http(collection, sensor, sd, ed, data_dir):
 
 
 def download_s3(collection, sensor, sd, ed, data_dir):
-    """Download data files as in-region access to S3."""
+    """Download data files as in-region access to S3.
 
+    WARNING: earthaccess temporal filtering returns granules that OVERLAP
+    the specified time window, not just those whose observations fall
+    entirely within it. This means files from late previous day (e.g.,
+    22:45 UTC) may be included if their observation window extends into
+    the target day. The l2p2bic.m code compensates by filtering
+    observations to 0 <= hour < 24.
+
+    For exact historical production matching, use download_http() instead.
+    """
     auth = earthaccess.Auth()
     auth.login(strategy="netrc")
 
     results = earthaccess.search_data(
-        short_name = collection,
+        short_name=collection,
         temporal=(sd, ed),
         cloud_hosted=True
     )
@@ -187,31 +233,43 @@ def download_s3(collection, sensor, sd, ed, data_dir):
     return files
 
 
-def create_matlab_file(bic_dir, data_dir, sensor, rewrite, year, doy, region, exe_path):
-    """Create the MATLAB file specific to the doy and case to execute."""
+def execute_container(sensor, region, data_dir, bic_dir, year, doy, rewrite,
+                     container_image):
+    """Execute L2P processing in Docker container.
 
-    template_file_path = pathlib.Path(__file__).resolve().parent.joinpath(L2P_TEMPLATE)
-    with open(template_file_path, "r") as fh:
-        lines = fh.read()
+    The container uses a wrapper that automatically maps volume mounts to
+    /data/input and /data/output, simplifying the interface.
 
-    lines = lines.replace("<replace_path>", str(exe_path))
-    lines = lines.replace("<replace_year>", str(year))
-    lines = lines.replace("<replace_day>", str(doy))
-    lines = lines.replace("<replace_sensor>", str(sensor))
-    lines = lines.replace("<replace_datadir>", str(data_dir))
-    lines = lines.replace("<replace_bicdir>", str(bic_dir))
-    lines = lines.replace("<replace_region>", str(region))
-    lines = lines.replace("<replace_rewrite>", str(rewrite))
+    Container arguments (5 args - paths handled by volume mounts):
+        sensor: AMSR2R, AVMTBG, MODISA, MODIST
+        region: 'Global'
+        year: 4-digit year
+        day: Day of year (1-366)
+        rewrite: 0=skip existing, 1=overwrite
+        container_image: Docker image name to use
+    """
 
-    cmd_file = exe_path.joinpath(f"make_bic_cmd_{sensor}_{year}_{doy}.m")
-    with open(cmd_file, "w") as fh:
-        fh.write(lines)
-    return cmd_file
+    # Convert paths to absolute paths
+    data_dir_abs = data_dir.resolve()
+    bic_dir_abs = bic_dir.resolve()
+
+    # Build docker run command with simplified 5-argument interface
+    # The entrypoint wrapper handles /data/input and /data/output internally
+    cmd = [
+        DOCKER_BIN, "run", "--rm",
+        "--shm-size=512M",
+        "-v", f"{data_dir_abs}:/data/input",
+        "-v", f"{bic_dir_abs}:/data/output",
+        container_image,
+        sensor, region, str(year), str(doy), str(rewrite)
+    ]
+
+    logging.info("Executing container: %s", " ".join(cmd))
+    subprocess.run(cmd, check=True)
 
 
 def execute_subprocess(cmd):
-    """Execute MATLAB file for resolution case."""
-
+    """Execute subprocess command (used for data downloads)."""
     subprocess.run(cmd, check=True)
 
 

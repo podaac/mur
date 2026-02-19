@@ -1,0 +1,285 @@
+function l2p_wrapper(sensor, year_str, doy_str, download_flag)
+%L2P_WRAPPER Wrapper function for compiled MATLAB L2P processing executable
+%
+%   This wrapper accepts all string inputs from command line and orchestrates
+%   L2P satellite data processing including download and conversion to BIC format.
+%
+%   USAGE:
+%       l2p_wrapper('AMSR2R', '2025', '220', '1')
+%
+%   When compiled as executable:
+%       ./L2pProcessor AMSR2R 2025 220 1
+%
+%   ARGUMENTS:
+%       sensor        - Sensor name: 'AMSR2R', 'AVMTBG', 'MODISA', or 'MODIST'
+%       year_str      - Year as string (e.g., '2025')
+%       doy_str       - Day of year as string (e.g., '220')
+%       download_flag - '0' = use pre-staged files, '1' = download (default: '1')
+%
+%   DATA DIRECTORIES (hardcoded for container):
+%       input_dir     - /data/input (mount point for L2P downloads/pre-staged files)
+%       output_dir    - /data/output (mount point for BIC output files)
+%
+%   When calling MATLAB directly (not in container), you can override via environment:
+%       export L2P_INPUT_DIR=/custom/input
+%       export L2P_OUTPUT_DIR=/custom/output
+%
+%   SENSOR CONFIGURATION:
+%       Each sensor has specific parameters for processing:
+%       - collection_name: PO.DAAC collection identifier(s)
+%       - region: Geographic region (typically 'Global')
+%       - stable: Stability latency in days (when to stop rewriting)
+%
+%   PROCESSING FLOW:
+%       1. Validate inputs and parse sensor configuration
+%       2. Download L2P files for the specified day (optional)
+%       3. Determine rewrite flag based on data stability
+%       4. Call l2p2bic to convert L2P NetCDF to BIC format
+%       5. Compress output with gzip
+%
+%   SENSOR PARAMETERS:
+%       AMSR2R: AMSR2-REMSS-L2P-v8.2 (microwave, all-weather, stable=2)
+%       AVMTBG: AVHRRMTB_G-NAVO-L2P-v2.0 (infrared, stable=2)
+%       MODISA: MODIS_A-JPL-L2P-v2019.0 (infrared, stable=2)
+%       MODIST: MODIS_T-JPL-L2P-v2019.0 (infrared, stable=3, Terra satellite)
+
+% ========================================================================
+% STARTUP AND VALIDATION
+% ========================================================================
+
+start_time = datetime('now');
+
+% Get data directories from environment or use defaults
+input_dir = getenv('L2P_INPUT_DIR');
+if isempty(input_dir)
+    input_dir = '/data/input';
+end
+
+output_dir = getenv('L2P_OUTPUT_DIR');
+if isempty(output_dir)
+    output_dir = '/data/output';
+end
+
+% Display input parameters
+fprintf('=== L2P_WRAPPER: Processing Started ===\n');
+fprintf('Sensor:        %s\n', sensor);
+fprintf('Year:          %s\n', year_str);
+fprintf('Day of Year:   %s\n', doy_str);
+fprintf('Download Mode: %s\n', download_flag);
+fprintf('Input Dir:     %s\n', input_dir);
+fprintf('Output Dir:    %s\n', output_dir);
+
+% Default download flag if not provided
+if nargin < 4
+    download_flag = '1';
+end
+
+% Convert string arguments to appropriate types
+year = str2double(year_str);
+doy = str2double(doy_str);
+do_download = str2double(download_flag);
+
+% Validate sensor
+valid_sensors = {'AMSR2R', 'AVMTBG', 'MODISA', 'MODIST'};
+sensor_upper = upper(sensor);
+if ~ismember(sensor_upper, valid_sensors)
+    error('Invalid sensor: %s. Must be one of: %s', sensor, strjoin(valid_sensors, ', '));
+end
+
+% ========================================================================
+% SENSOR CONFIGURATION
+% ========================================================================
+
+% Define sensor-specific parameters
+% Based on PROCESSING_FLOW_REPORT.md and nrtMRVA.py configuration
+switch sensor_upper
+    case 'AMSR2R'
+        collections = {'AMSR2-REMSS-L2P-v8.2', 'AMSR2-REMSS-L2P_RT-v8.2'};
+        region = 'Global';
+        stable_days = 2;
+
+    case 'AVMTBG'
+        collections = {'AVHRRMTB_G-NAVO-L2P-v2.0'};
+        region = 'Global';
+        stable_days = 2;
+
+    case 'MODISA'
+        collections = {'MODIS_A-JPL-L2P-v2019.0'};
+        region = 'Global';
+        stable_days = 2;
+
+    case 'MODIST'
+        collections = {'MODIS_T-JPL-L2P-v2019.0'};
+        region = 'Global';
+        stable_days = 3;  % Terra has longer stability window
+
+    otherwise
+        error('Unrecognized sensor configuration for: %s', sensor_upper);
+end
+
+fprintf('\nSensor Configuration:\n');
+fprintf('  Collections: %s\n', strjoin(collections, ', '));
+fprintf('  Region:      %s\n', region);
+fprintf('  Stability:   %d days\n', stable_days);
+
+% ========================================================================
+% DETERMINE REWRITE FLAG
+% ========================================================================
+
+% Calculate days since observation date
+today_ordinal = floor(now);
+obs_date = datenum(year, 1, doy);
+days_since_obs = today_ordinal - obs_date;
+
+% Determine if we should rewrite existing files
+% If data is recent (within stability window), allow rewriting
+if days_since_obs < stable_days
+    rewrite = 1;
+    fprintf('\nData is RECENT (%.0f days old < %d day stability)\n', ...
+            days_since_obs, stable_days);
+    fprintf('  -> rewrite=1 (will overwrite existing files)\n');
+else
+    rewrite = 0;
+    fprintf('\nData is STABLE (%.0f days old >= %d day stability)\n', ...
+            days_since_obs, stable_days);
+    fprintf('  -> rewrite=0 (will skip if files exist)\n');
+end
+
+% ========================================================================
+% DOWNLOAD L2P FILES (if requested)
+% ========================================================================
+
+% Create input directory structure for this sensor/day
+sensor_input_dir = fullfile(input_dir, sensor_upper, sprintf('%03d', doy));
+if ~exist(sensor_input_dir, 'dir')
+    mkdir(sensor_input_dir);
+    fprintf('\nCreated input directory: %s\n', sensor_input_dir);
+end
+
+if do_download
+    fprintf('\n=== DOWNLOADING L2P FILES (MATLAB Native) ===\n');
+
+    % Convert DOY to calendar date
+    date_vec = datevec(datenum(year, 1, doy));
+    date_str = sprintf('%04d-%02d-%02d', date_vec(1), date_vec(2), date_vec(3));
+
+    % Download each collection using pure MATLAB
+    all_files = {};
+    for c = 1:length(collections)
+        collection = collections{c};
+        fprintf('\n--- Downloading collection %d/%d: %s ---\n', c, length(collections), collection);
+
+        try
+            % Call MATLAB download function
+            files = download_l2p_files(collection, date_str, date_str, sensor_input_dir);
+
+            if ~isempty(files)
+                fprintf('Downloaded %d files from %s\n', length(files), collection);
+                all_files = [all_files; files(:)];
+            else
+                fprintf('No files downloaded from %s (may not be available)\n', collection);
+            end
+
+        catch ME
+            fprintf('ERROR downloading from %s: %s\n', collection, ME.message);
+            fprintf('Continuing to next collection...\n');
+        end
+    end
+
+    if isempty(all_files)
+        fprintf('\nWARNING: No files downloaded from any collection\n');
+        fprintf('Will attempt to process any existing files in: %s\n', sensor_input_dir);
+    else
+        fprintf('\n=== Download Complete ===\n');
+        fprintf('Total files downloaded: %d\n', length(all_files));
+    end
+
+else
+    fprintf('\nSkipping download (download_flag=%d) - using pre-staged files in: %s\n', ...
+            do_download, sensor_input_dir);
+end
+
+% Check if input directory has files
+nc_files = dir(fullfile(sensor_input_dir, '*.nc'));
+if isempty(nc_files)
+    fprintf('\nWARNING: No .nc files found in %s\n', sensor_input_dir);
+    fprintf('L2P processing may fail or produce empty output.\n');
+else
+    fprintf('\nFound %d L2P NetCDF files to process\n', length(nc_files));
+end
+
+% ========================================================================
+% CALL L2P2BIC FOR PROCESSING
+% ========================================================================
+
+fprintf('\n=== CALLING L2P2BIC ===\n');
+
+% Create output directory for this sensor
+sensor_output_dir = fullfile(output_dir, sensor_upper);
+if ~exist(sensor_output_dir, 'dir')
+    mkdir(sensor_output_dir);
+    fprintf('Created output directory: %s\n', sensor_output_dir);
+end
+
+% Call the main L2P to BIC conversion function
+% l2p2bic(sensor, region, indir, bicdir, year, day, rewrite)
+try
+    fprintf('Calling: l2p2bic(''%s'', ''%s'', ''%s'', ''%s'', %d, %d, %d)\n', ...
+            sensor_upper, region, sensor_input_dir, sensor_output_dir, ...
+            year, doy, rewrite);
+
+    l2p2bic(sensor_upper, region, sensor_input_dir, sensor_output_dir, ...
+            year, doy, rewrite);
+
+    fprintf('L2P2BIC completed successfully\n');
+
+catch ME
+    fprintf('ERROR in l2p2bic: %s\n', ME.message);
+    fprintf('Stack trace:\n');
+    for k = 1:length(ME.stack)
+        fprintf('  File: %s\n', ME.stack(k).file);
+        fprintf('  Name: %s\n', ME.stack(k).name);
+        fprintf('  Line: %d\n', ME.stack(k).line);
+    end
+    rethrow(ME);
+end
+
+% ========================================================================
+% VERIFY OUTPUT
+% ========================================================================
+
+fprintf('\n=== VERIFYING OUTPUT ===\n');
+
+% Check for output BIC file (compressed)
+expected_bic_gz = fullfile(sensor_output_dir, ...
+    sprintf('%s_%s_%04d_%03d.bic.gz', region, sensor_upper, year, doy));
+
+if exist(expected_bic_gz, 'file')
+    file_info = dir(expected_bic_gz);
+    fprintf('SUCCESS: Output file created\n');
+    fprintf('  File: %s\n', expected_bic_gz);
+    fprintf('  Size: %.2f MB\n', file_info.bytes / 1024^2);
+else
+    fprintf('WARNING: Expected output file not found:\n');
+    fprintf('  %s\n', expected_bic_gz);
+
+    % Check for uncompressed version
+    expected_bic = fullfile(sensor_output_dir, ...
+        sprintf('%s_%s_%04d_%03d.bic', region, sensor_upper, year, doy));
+    if exist(expected_bic, 'file')
+        fprintf('  (Uncompressed .bic file exists)\n');
+    end
+end
+
+% ========================================================================
+% COMPLETION
+% ========================================================================
+
+end_time = datetime('now');
+execution_time = end_time - start_time;
+
+fprintf('\n=== L2P_WRAPPER: Processing Completed ===\n');
+fprintf('Total execution time: %s\n', string(execution_time));
+fprintf('==========================================\n');
+
+end

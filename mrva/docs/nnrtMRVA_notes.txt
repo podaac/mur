@@ -1,0 +1,53 @@
+/home/tmchin/cyc3/nnrtMRVA.py >& /home/tmchin/logs/nnrtMRVA.py.log
+
+  rm -fr $mrvaDir
+  cp -a /home/tmchin/cyc3 $mrvaDir
+
+  rm -fr $makebinDir
+  cp -a /home/tmchin/makebin/savnrt $makebinDir
+
+  cd $mrvaDir
+  make
+  --> ./make  ## but old way works.
+
+  ## log file (selective f.write):
+  $logfile = /home/tmchin/logs/nnrtMRVA.log
+
+  ## ice:
+  cd $makebinDir
+  /usr/local/bin/matlab -nodisplay < makeice$year$day.m
+
+  ## fnmoc:
+  cd $makebinDir
+  /usr/local/bin/idl -rt=./FNMOCwrapper.sav -args $y $d '$FNMOCourputDir'
+
+  ## L2P files:
+  cd $makebinDir
+  /usr/local/bin/idl -rt=./dailywrapper.sav -args $y $d '$region' '$sensor' '$bicdir'
+
+  ## MRVA:
+  cd $mrvaDir
+  /usr/local/bin/matlab -nodisplay < MRVAcmd.m >& $logdir/MRVA_$year_$day.log
+
+      mrva3com.m
+        bic2biq.m
+          ! zcat, rm, rm -f, ln -sf
+          ! $home/bin/cbscoeff  # if wind.
+        ref2biq.m
+          ! rm -f
+          ! $home/bin/cbscoeff  # if wind; thus not used.
+        trimbip.m
+          ! bzcat, rm -f, mv
+          ! mrva > log.ref
+          ! trimbip3
+        biasbip.m
+          ! cat, rm -f, mv ln -sf
+          ! mrva > log.biasbip
+          ! $home/bin/cbscxcoeff
+        ! mv, zcat, cp, rm -f
+        ! mrva
+        ! /usr/local/bin/matlab -nodesktop -nosplash < matlabscript$year_$day.m >& /tmp/logs/csp2nc_$year_$day.log &
+
+
+
+      

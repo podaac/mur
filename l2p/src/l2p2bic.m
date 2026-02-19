@@ -16,8 +16,8 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
   %  region='Global';
   %
 
-  year=str2double(year)
-  day=str2double(day)
+  year=str2double(year);
+  day=str2double(day);
 
   %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
   sensor=upper(sensor);
@@ -52,40 +52,63 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
   tref=int64(julian(day,1,year,3)-julian(1,1,1981,3))*86400;
 
   %% fill data by reading each file:
-  listfile=append(filedir,'/L2Plist_',region,'_',sensor,'_',string(year),'_',string(day),'.txt')
+  listfile=sprintf('%s/L2Plist_%s_%s_%04d_%03d.txt',filedir,region,sensor,year,day);
   fprintf(1,'l2p2bic: writing %s\n',listfile);
   flist=fopen(listfile,'w');
 
-  lon=[]; lat=[]; hour=[];
-  sst=[]; bias=[]; rms=[]; flag=[];
+  % Pre-allocate in chunks for efficiency (avoiding repeated resizing)
+  chunk_size = 100000;  % Allocate in 100k point chunks
+  max_size = chunk_size;
+  lon = zeros(max_size, 1, 'single');
+  lat = zeros(max_size, 1, 'single');
+  hour = zeros(max_size, 1, 'single');
+  sst = zeros(max_size, 1, 'single');
+  bias = zeros(max_size, 1, 'single');
+  rms = zeros(max_size, 1, 'single');
+  flag = zeros(max_size, 1, 'single');
+  current_idx = 0;
 
-  for k=1:length(names),
+  nfiles = length(names);
+  fprintf(1,'l2p2bic: processing %d files from %s\n', nfiles, indir);
+
+  for k=1:nfiles,
 
     file=sprintf('%s/%s',indir,names(k).name);
-    fprintf(1,'l2p2bic: reading %s\n',file);
+    % Only log first, last, and every 50th file to reduce output
+    if k == 1 || k == nfiles || mod(k, 50) == 0
+        fprintf(1,'l2p2bic: reading file %d/%d: %s\n', k, nfiles, names(k).name);
+    end
     fprintf(flist,'%s\n',file);
 
     % read L2P file:
     [head, body, tail] = fileparts( file );
-    tmp_dir = getenv("TMP_DIR")
+    tmp_dir = getenv("TMP_DIR");
     tmpncfile=[tmp_dir,'/',body,'.nc'];
     if length(uncompresscmd),
       eval(sprintf('! %s %s > %s',uncompresscmd,file,tmpncfile));
     else,
       tmpncfile=file;
     end;
-    if length( strfind( subdir, '/L3U/' )),
-      if length( strfind( subdir, '/VIIRS_NPP/OSPO/' )),
-        [tmp,x,y,t,dt,b,sigma,prox]=readL3UasL2Pviirso(tmpncfile);
+
+    % Try to read file, skip if corrupted
+    try
+      if length( strfind( subdir, '/L3U/' )),
+        if length( strfind( subdir, '/VIIRS_NPP/OSPO/' )),
+          [tmp,x,y,t,dt,b,sigma,prox]=readL3UasL2Pviirso(tmpncfile);
+        else,
+          [tmp,x,y,t,dt,b,sigma,prox]=readL3UasL2P(tmpncfile);
+        end;
       else,
-        [tmp,x,y,t,dt,b,sigma,prox]=readL3UasL2P(tmpncfile);
+        %[tmp,x,y,t,dt,b,sigma,rjct,conf,prox]=readL2Pcore(tmpncfile);
+        [tmp,x,y,t,dt,b,sigma,rjct,conf,prox]=readL2Pboth(tmpncfile);
+        clear rjct conf;
       end;
-    else,
-      %[tmp,x,y,t,dt,b,sigma,rjct,conf,prox]=readL2Pcore(tmpncfile);
-      [tmp,x,y,t,dt,b,sigma,rjct,conf,prox]=readL2Pboth(tmpncfile);
-      clear rjct conf;
+      t = int64(t);
+    catch ME
+      fprintf(1,'WARNING: Failed to read %s: %s\n',file,ME.message);
+      fprintf(1,'  Skipping corrupted or empty file\n');
+      continue;
     end;
-    t = int64(t);
     % if length(uncompresscmd), delete(tmpncfile); end;
 
     % skip to next file if there is no SST content:
@@ -101,9 +124,8 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
       s=size(dt); n=length(s); m=prod(s(1:n-1)); n=s(n);
       if n~=length(tt), error('l2p2bic: # time stamps mismatches dim(dt)'); end;
       dt=reshape(dt,m,n);
-      for j=1:length(tt),
-        dt(:,j)=dt(:,j)+tt(j);
-      end;
+      % Vectorized broadcasting instead of loop
+      dt = dt + tt(:)';
     end;
 
     % find lon-lat for L2P_GRIDDED format:
@@ -115,19 +137,108 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
       end;
     end;
 
-    % trim by confidence:
-    inx=find(prox(:)>=minConfValue);
-    x=x(inx); y=y(inx); dt=dt(inx);
-    tmp=tmp(inx); b=b(inx); sigma=sigma(inx); prox=prox(inx);
+    % trim by confidence using logical mask:
+    mask = prox(:) >= minConfValue;
+    x=x(mask); y=y(mask); dt=dt(mask);
+    tmp=tmp(mask); b=b(mask); sigma=sigma(mask); prox=prox(mask);
 
-    % collect:
-    lon=[lon;x(:)]; lat=[lat;y(:)]; hour=[hour;dt(:)]; 
-    sst=[sst;tmp(:)]; bias=[bias;b(:)]; rms=[rms;sigma(:)]; flag=[flag;prox(:)];
+    % collect data with chunked pre-allocation:
+    n_new = numel(x);  % Use numel not length in case arrays are 2D
+    new_idx = current_idx + n_new;
+
+    % Expand arrays if needed (in chunks)
+    % Note: expand to new_idx + chunk_size to ensure we have room for this batch
+    % plus some buffer, avoiding the boundary bug where positions at exact
+    % chunk multiples could remain as zeros
+    while new_idx > max_size
+      max_size = max_size + chunk_size;
+    end
+    if length(lon) < max_size
+      lon(max_size) = 0;
+      lat(max_size) = 0;
+      hour(max_size) = 0;
+      sst(max_size) = 0;
+      bias(max_size) = 0;
+      rms(max_size) = 0;
+      flag(max_size) = 0;
+    end
+
+    % Store data
+    idx_range = (current_idx+1):new_idx;
+    lon(idx_range) = x(:);
+    lat(idx_range) = y(:);
+    hour(idx_range) = dt(:);
+    sst(idx_range) = tmp(:);
+    bias(idx_range) = b(:);
+    rms(idx_range) = sigma(:);
+    flag(idx_range) = prox(:);
+    current_idx = new_idx;
     clear tmp x y t dt b sigma prox;
 
   end;
 
   fclose(flist);
+  fprintf(1,'l2p2bic: completed reading %d files, %d observations collected\n', nfiles, current_idx);
+
+  % Trim arrays to actual size
+  lon = lon(1:current_idx);
+  lat = lat(1:current_idx);
+  hour = hour(1:current_idx);
+  sst = sst(1:current_idx);
+  bias = bias(1:current_idx);
+  rms = rms(1:current_idx);
+  flag = flag(1:current_idx);
+
+  % Filter out NaN/invalid values before writing to BIC
+  % This prevents: NaN SST -> int16(0) -> 0.0°C in output
+  % Also filters sentinel values like -999.0 in coordinates
+  valid_mask = ~isnan(sst) & ~isnan(lon) & ~isnan(lat) & isfinite(sst) & ...
+               isfinite(lon) & isfinite(lat);
+
+  n_invalid = sum(~valid_mask);
+  if n_invalid > 0
+      fprintf('  Warning: Filtering %d invalid observations (NaN/Inf coordinates or SST)\n', n_invalid);
+  end
+
+  lon = lon(valid_mask);
+  lat = lat(valid_mask);
+  hour = hour(valid_mask);
+  sst = sst(valid_mask);
+  bias = bias(valid_mask);
+  rms = rms(valid_mask);
+  flag = flag(valid_mask);
+
+  % Filter to only include data within the target day (0 <= hour < 24)
+  % This matches historical behavior where only same-day observations are included
+  day_mask = (hour >= 0) & (hour < 24);
+  n_outside_day = sum(~day_mask);
+  if n_outside_day > 0
+      fprintf('  Filtering %d observations outside target day (hour < 0 or >= 24)\n', n_outside_day);
+  end
+
+  lon = lon(day_mask);
+  lat = lat(day_mask);
+  hour = hour(day_mask);
+  sst = sst(day_mask);
+  bias = bias(day_mask);
+  rms = rms(day_mask);
+  flag = flag(day_mask);
+
+  % Safety check: filter out any zero-filled entries from pre-allocation
+  % that may have slipped through (quality=0 with lat=lon=0)
+  quality_mask = (flag >= minConfValue);
+  n_low_quality = sum(~quality_mask);
+  if n_low_quality > 0
+      fprintf('  Warning: Filtering %d low-quality observations (quality < %d)\n', n_low_quality, minConfValue);
+  end
+
+  lon = lon(quality_mask);
+  lat = lat(quality_mask);
+  hour = hour(quality_mask);
+  sst = sst(quality_mask);
+  bias = bias(quality_mask);
+  rms = rms(quality_mask);
+  flag = flag(quality_mask);
 
 
 %% compare against an existing bic file:
@@ -149,6 +260,6 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
   %filedir=sprintf('%s/%04d',bicdir,year);
   if ~exist(filedir,'dir'), eval(sprintf('!mkdir -p %s',filedir)); end;
 
-  bicfile=append(filedir,'/',region,'_',sensor,'_',string(year),'_',string(day),'.bic');
+  bicfile=sprintf('%s/%s_%s_%04d_%03d.bic',filedir,region,sensor,year,day);
   writebic(bicfile,year,day,lon,lat,sst,bias,rms,hour,flag);
   % writebic does gzipping.

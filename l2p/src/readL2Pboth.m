@@ -53,26 +53,43 @@ end;
 % SST:
 if nargout>=1,
   varid = netcdf.inqVarID(ncid,'sea_surface_temperature');
-  sst = netcdf.getVar(ncid,varid);
-  badpix = netcdf.getAtt(ncid,varid,'_FillValue');
-  const = netcdf.getAtt(ncid,varid,'add_offset');
-  scale = netcdf.getAtt(ncid,varid,'scale_factor');
-  sst=single(sst);
-  inx=find(sst(:)==badpix);
-  sst=sst*single(scale)+single(const);
-  if length(inx), sst(inx)=vfv*ones(size(inx)); end;
+  sst = netcdf.getVar(ncid,varid);  % Read as native type (int16)
+  badpix = netcdf.getAtt(ncid,varid,'_FillValue');  % Keep native type for exact comparison
+  mask = (sst == badpix);  % Compare in native type (exact integer match)
+  % Now convert to single for scaling
+  sst = single(sst);
+  const = single(netcdf.getAtt(ncid,varid,'add_offset'));
+  scale = single(netcdf.getAtt(ncid,varid,'scale_factor'));
+  sst = sst * scale + const;
+  if any(mask(:)), sst(mask) = single(vfv); end;
 end;
 
 % longitude:
 if nargout>=2,
   varid = netcdf.inqVarID(ncid,'lon');
   lon = netcdf.getVar(ncid,varid);
+  % Handle fill values (e.g., -999.0) in lon
+  try
+    badpix = netcdf.getAtt(ncid,varid,'_FillValue');
+    mask = (lon == badpix);
+    if any(mask(:)), lon(mask) = vfv; end;
+  catch
+    % No _FillValue attribute for lon, skip
+  end;
 end;
 
 % latitude:
 if nargout>=3,
   varid = netcdf.inqVarID(ncid,'lat');
   lat = netcdf.getVar(ncid,varid);
+  % Handle fill values (e.g., -999.0) in lat
+  try
+    badpix = netcdf.getAtt(ncid,varid,'_FillValue');
+    mask = (lat == badpix);
+    if any(mask(:)), lat(mask) = vfv; end;
+  catch
+    % No _FillValue attribute for lat, skip
+  end;
 end;
 
 % reference time:
@@ -86,22 +103,23 @@ if nargout>=5,
   varid = netcdf.inqVarID(ncid,'sst_dtime');
   dt = netcdf.getVar(ncid,varid);
   badpix = netcdf.getAtt(ncid,varid,'_FillValue');
-  inx=find(dt(:)==badpix);
-  if length(inx), dt(inx)=vfv*ones(size(inx)); end;
+  mask = (dt == badpix);
+  if any(mask(:)), dt(mask) = vfv; end;
 end;
 
 % SSES bias:
 if nargout>=6,
   if gds2, nameBias='sses_bias'; else, nameBias='SSES_bias_error'; end;
   varid = netcdf.inqVarID(ncid,nameBias);
-  bias = netcdf.getVar(ncid,varid);
-  badpix = netcdf.getAtt(ncid,varid,'_FillValue');
-  const = netcdf.getAtt(ncid,varid,'add_offset');
-  scale = netcdf.getAtt(ncid,varid,'scale_factor');
-  bias=single(bias);
-  inx=find(bias(:)==badpix); 
-  bias=bias*single(scale)+single(const);
-  if length(inx), bias(inx)=vfv*ones(size(inx)); end;
+  bias = netcdf.getVar(ncid,varid);  % Read as native type (int8)
+  badpix = netcdf.getAtt(ncid,varid,'_FillValue');  % Keep native type for exact comparison
+  mask = (bias == badpix);  % Compare in native type (exact integer match)
+  % Now convert to single for scaling
+  bias = single(bias);
+  const = single(netcdf.getAtt(ncid,varid,'add_offset'));
+  scale = single(netcdf.getAtt(ncid,varid,'scale_factor'));
+  bias = bias * scale + const;
+  if any(mask(:)), bias(mask) = single(vfv); end;
 end;
 
 % SSES std:
@@ -112,14 +130,15 @@ if nargout>=7,
     nameSTD='SSES_standard_deviation_error';
   end;
   varid = netcdf.inqVarID(ncid,nameSTD);
-  sigma = netcdf.getVar(ncid,varid);
-  badpix = netcdf.getAtt(ncid,varid,'_FillValue');
-  const = netcdf.getAtt(ncid,varid,'add_offset');
-  scale = netcdf.getAtt(ncid,varid,'scale_factor');
-  sigma=single(sigma);
-  inx=find(sigma(:)==badpix); 
-  sigma=sigma*single(scale)+single(const);
-  if length(inx), sigma(inx)=vfv*ones(size(inx)); end;
+  sigma = netcdf.getVar(ncid,varid);  % Read as native type (int8)
+  badpix = netcdf.getAtt(ncid,varid,'_FillValue');  % Keep native type for exact comparison
+  mask = (sigma == badpix);  % Compare in native type (exact integer match)
+  % Now convert to single for scaling
+  sigma = single(sigma);
+  const = single(netcdf.getAtt(ncid,varid,'add_offset'));
+  scale = single(netcdf.getAtt(ncid,varid,'scale_factor'));
+  sigma = sigma * scale + const;
+  if any(mask(:)), sigma(mask) = single(vfv); end;
 end;
 
 % rejection flag:
@@ -144,6 +163,14 @@ end;
 if nargout>=8 & gds2,
   varid = netcdf.inqVarID(ncid,'quality_level');
   prox = netcdf.getVar(ncid,varid);
+  % Handle fill values in quality_level to prevent bad pixels from passing filter
+  try
+    badpix = netcdf.getAtt(ncid,varid,'_FillValue');
+    mask = (prox == badpix);
+    if any(mask(:)), prox(mask) = vfv; end;
+  catch
+    % No _FillValue attribute for quality_level, skip
+  end;
   rjct=prox; conf=prox;
 end;
 
