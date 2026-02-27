@@ -117,7 +117,7 @@ def smart_downsample(x: np.ndarray, y: np.ndarray, c: Optional[np.ndarray] = Non
         return x_down, y_down
 
 
-def print_file_info(data: dict, format_type: str, filepath: Path):
+def print_file_info(data: dict, format_type: str, filepath: Path, verbose: bool = False):
     """
     Print summary information about the data file.
 
@@ -293,13 +293,17 @@ def print_file_info(data: dict, format_type: str, filepath: Path):
             print(f"  {var_name:20s} {str(shape):20s} {dtype}")
 
         print(f"\nGlobal attributes:")
-        for attr, value in list(data['attributes'].items())[:10]:
-            value_str = str(value)
-            if len(value_str) > 60:
-                value_str = value_str[:57] + "..."
-            print(f"  {attr:30s} = {value_str}")
-        if len(data['attributes']) > 10:
-            print(f"  ... and {len(data['attributes']) - 10} more")
+        if verbose:
+            for attr, value in data['attributes'].items():
+                print(f"  {attr:30s} = {value}")
+        else:
+            for attr, value in list(data['attributes'].items())[:10]:
+                value_str = str(value)
+                if len(value_str) > 60:
+                    value_str = value_str[:57] + "..."
+                print(f"  {attr:30s} = {value_str}")
+            if len(data['attributes']) > 10:
+                print(f"  ... and {len(data['attributes']) - 10} more (use -v for all)")
 
     print()
 
@@ -1405,6 +1409,8 @@ Examples:
                         help='Data file(s) to view')
     parser.add_argument('--info', action='store_true',
                         help='Show info only (no plotting)')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='Show full details (e.g. all NetCDF global attributes)')
     parser.add_argument('--compare', action='store_true',
                         help='Compare two files (requires exactly 2 files)')
     parser.add_argument('--export', type=str, metavar='FILE',
@@ -1442,7 +1448,7 @@ Examples:
             data = read_file(filepath)
 
             # Print info
-            print_file_info(data, format_type, filepath)
+            print_file_info(data, format_type, filepath, verbose=args.verbose)
 
             # Plot by default unless --info flag is set
             if not args.info:

@@ -25,7 +25,7 @@ ARG DEBUG=0
 # ========================================================================
 FROM intel/oneapi-hpckit:2024.0.1-devel-ubuntu22.04 AS fortran-builder
 
-# Re-declare ARG after FROM to make it available in this stage
+# Re-declare ARGs after FROM to make them available in this stage
 ARG DEBUG
 
 # Remove problematic Intel GPU repository (not needed for Fortran compilation)
@@ -142,10 +142,10 @@ RUN cd /app/matlab && \
 # ========================================================================
 FROM debian:bookworm-slim
 
-# Re-declare DEBUG arg from build to persist in runtime image
+# Re-declare build args to persist in runtime image
 ARG DEBUG=0
 
-# Persist DEBUG flag as environment variable for runtime detection
+# Persist build flags as environment variables for runtime detection
 # If built with DEBUG=1, runtime will automatically enable debug output
 ENV MRVA_DEBUG_BUILD=${DEBUG}
 

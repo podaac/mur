@@ -2,10 +2,10 @@
 # Build MUR processing modules with automatic base image check
 #
 # Usage:
-#   ./build_module.sh <module_name>           - Build a specific module (production)
-#   ./build_module.sh <module_name> --debug   - Build with debug symbols and bounds checking
-#   ./build_module.sh all                     - Build all modules (production)
-#   ./build_module.sh all --debug             - Build all modules with debug enabled
+#   ./build_module.sh <module_name>                    - Build a specific module (production)
+#   ./build_module.sh <module_name> --debug            - Build with debug symbols and bounds checking
+#   ./build_module.sh all                              - Build all modules (production)
+#   ./build_module.sh all --debug                      - Build all modules with debug enabled
 #
 # Debug builds enable:
 #   - Debug symbols (-g) for meaningful stack traces
@@ -26,7 +26,7 @@ BUILD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Available modules
 MODULES=("iquam" "l2p" "landice" "mrva")
 
-# Debug mode flag
+# Build flags
 DEBUG_MODE=0
 NO_CACHE=0
 
@@ -85,7 +85,7 @@ build_module() {
     fi
     echo ""
 
-    # Build with optional DEBUG arg and no-cache
+    # Build with optional build args and no-cache
     local BUILD_ARGS=""
     if [ "$DEBUG_MODE" -eq 1 ]; then
         BUILD_ARGS="--build-arg DEBUG=1"
@@ -124,9 +124,9 @@ if [ $# -lt 1 ]; then
     echo "  all     - Build all modules"
     echo ""
     echo "Options:"
-    echo "  --debug    - Enable debug build with symbols and bounds checking"
-    echo "               (still tags as :latest for seamless pipeline use)"
-    echo "  --no-cache - Force rebuild without using Docker cache"
+    echo "  --debug       - Enable debug build with symbols and bounds checking"
+    echo "                  (still tags as :latest for seamless pipeline use)"
+    echo "  --no-cache    - Force rebuild without using Docker cache"
     echo ""
     echo "Examples:"
     echo "  $0 mrva                      # Build MRVA (production)"
@@ -270,6 +270,7 @@ else
         echo "  - Uninitialized variable access will be detected"
         echo "  - Floating-point exceptions (NaN, Inf, div-by-zero) will trap"
     fi
+
 fi
 
 echo ""
