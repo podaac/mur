@@ -706,6 +706,18 @@ class MUROrchestrator:
         ]:
             directory.mkdir(parents=True, exist_ok=True)
 
+        # Check for existing MRVA output (matches legacy nrtMRVA.py line 385)
+        # REA outputs are never rewritten; NRT outputs are always rewritten
+        nrt_suffix = "nrt" if is_nrt else ""
+        output_day_dir = netcdf_dir / "GLOB" / "JPL" / "MUR" / "v4" / str(year) / f"{doy:03d}{nrt_suffix}"
+        date_str = process_date.strftime('%Y%m%d')
+        nc_files = list(output_day_dir.glob(f"{date_str}*-MUR*.nc*")) if output_day_dir.exists() else []
+
+        if nc_files and not is_nrt:
+            logger.info(f"    → KEEPING OLD MRVA output for DOY {doy} (REA, {len(nc_files)} files)")
+            self.stats["mrva"]["skipped"] += 1
+            return True
+
         # Verify input data exists
         input_checks = {
             "L2P data": bic_dir,
