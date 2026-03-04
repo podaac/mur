@@ -770,7 +770,7 @@ class MUROrchestrator:
             "-v", f"{bic_dir.resolve()}:/data/input/bic:ro",
             "-v", f"{iquam_dir.resolve()}:/data/input/iquam:ro",
             "-v", f"{landice_dir.resolve()}:/data/input/landice:ro",
-            "-v", f"{static_resources_dir.resolve()}:/data/static-resources:ro",
+            "-v", f"{static_resources_dir.resolve()}:/data/static-resources:rw",
             # Volume mounts for outputs
             "-v", f"{csp_dir.resolve()}:/data/output/csp",
             "-v", f"{netcdf_dir.resolve()}:/data/output/netcdf",
