@@ -3,8 +3,9 @@
   "landice": {
     "container_image": "mur-landice:latest",
     "input_dir": "./testing/static-resources",
-    "output_dir": "./testing/preprocessing/output/landice",
-    "description": "Land/Ice mask generation from OSI-SAF data. Input directory contains static grids and mat transformation files. Output files are written to output_dir/land/p011/YEAR/ and output_dir/land/p01/YEAR/ subdirectories."
+    "output_dir_p011": "./testing/preprocessing/output/landice-p011",
+    "output_dir_p01": "./testing/preprocessing/output/landice-p01",
+    "description": "Land/Ice mask generation from OSI-SAF data. Input directory contains static grids and mat transformation files. Separate output directories per resolution matching production NAS layout (p011=/nas/ftp/.../landice, p01=/nas2/landice)."
   },
   "l2p": {
     "container_image": "mur-l2p:latest",
@@ -90,8 +91,9 @@
     "container_image": "mur-mrva:latest",
     "input_dir_bic": "./testing/preprocessing/output/l2p",
     "input_dir_iquam": "./testing/preprocessing/output/iquam",
-    "input_dir_landice": "./testing/preprocessing/output/landice",
-    "_input_dir_landice_note": "MRVA uses the land/p011 subdirectory (1km resolution) from this path",
+    "input_dir_landice_p011": "./testing/preprocessing/output/landice-p011",
+    "input_dir_landice_p01": "./testing/preprocessing/output/landice-p01",
+    "_input_dir_landice_note": "Separate paths per resolution: p011 for Global_ice/icefiles (mrva4com), p01 for landiceP01 grid (csp2nc4a/MUR25)",
     "static_resources_dir": "./testing/static-resources",
     "output_dir_csp": "./testing/mrva/output/csp",
     "output_dir_netcdf": "./testing/mrva/output/netcdf",

@@ -72,7 +72,11 @@ function mrva4com_container(year, day, realtime, varargin)
     % Input paths
     bic_root = '/data/input/bic';
     iquam_root = '/data/input/iquam';
-    landice_root = '/data/input/landice';
+    % Separate landice paths matching production's NAS layout:
+    %   p011 (1km):  /nas/ftp/mur_sst/tmchin/landice/ -> Global_ice, landice_ grid, icefiles
+    %   p01 (0.01°): /nas2/landice/                    -> landiceP01_ grid
+    landice_p011_root = '/data/input/landice-p011';
+    landice_p01_root = '/data/input/landice-p01';
     static_resources_root = '/data/static-resources';
 
     % Output paths
@@ -279,7 +283,7 @@ function mrva4com_container(year, day, realtime, varargin)
 
     if icecapFlag
         icesstfile = sprintf('%s/icesst_%04d_%03d.bip', bipdir, year, day);
-        icefile = sprintf('%s/%04d/Global_ice_%04d_%03d.bip', landice_root, year, year, day);
+        icefile = sprintf('%s/%04d/Global_ice_%04d_%03d.bip', landice_p011_root, year, year, day);
 
         if exist([icefile, '.gz'], 'file')
             system(sprintf('zcat %s.gz > %s', icefile, icesstfile));
@@ -603,6 +607,8 @@ function mrva4com_container(year, day, realtime, varargin)
             nc_config.hourAna = hourAna;
             nc_config.whichdays = {year, day:day};
             nc_config.realtime = realtime;
+            nc_config.landice_p011_root = landice_p011_root;
+            nc_config.landice_p01_root = landice_p01_root;
 
             % Add optional high-res grid file if available
             if hiresgridFlag && ~isempty(hiresgridfile)
@@ -651,7 +657,7 @@ function mrva4com_container(year, day, realtime, varargin)
             mur25_config.cspdir = cspdir;
             mur25_config.cspfmt = cspfmt;
             mur25_config.netcdf_dir = netcdf_dir;
-            mur25_config.landice_root = landice_root;
+            mur25_config.landice_root = landice_p01_root;  % MUR25 uses p01 landiceP01_ files
             mur25_config.static_resources_root = static_resources_root;
             mur25_config.fortran_bin = fortran_bin;
             mur25_config.region = region;

@@ -17,7 +17,8 @@ function status = csp2nc4a(config)
 %     Optional:
 %       .hiresgridfile  - High-res distance grid path (default: none)
 %       .fortran_bin    - Fortran bin directory (default: /opt/mrva/bin)
-%       .landice_root   - Landice data directory (default: /data/input/landice)
+%       .landice_p011_root - Landice p011 (1km) data directory (default: /data/input/landice-p011)
+%       .landice_p01_root  - Landice p01 (0.01°) data directory (default: /data/input/landice-p01)
 %       .grids_root     - Static grids directory (default: /data/static-resources/grids)
 %       .tmp_root       - Temp directory (default: /tmp)
 %       .version        - Product version (default: '04.1')
@@ -68,10 +69,18 @@ else
     fortran_bin = '/opt/mrva/bin';
 end
 
-if isfield(config, 'landice_root')
-    landice_root = config.landice_root;
+% Separate landice paths matching production's NAS layout:
+%   p011 (1km):  Global_ice, landice_ grid (v03), icefiles.txt
+%   p01 (0.01°): landiceP01_ grid (v04/v04.1)
+if isfield(config, 'landice_p011_root')
+    landice_p011_root = config.landice_p011_root;
 else
-    landice_root = '/data/input/landice';
+    landice_p011_root = '/data/input/landice-p011';
+end
+if isfield(config, 'landice_p01_root')
+    landice_p01_root = config.landice_p01_root;
+else
+    landice_p01_root = '/data/input/landice-p01';
 end
 
 if isfield(config, 'grids_root')
@@ -183,9 +192,9 @@ switch version,
     resolution='0.011 degrees'; % for metadata.
     resfloat=single(0.011);
     if iceIncluded,
-      gridfile=[landice_root, '/%04d/landice_%04d_%03d.gds.gz'];
+      gridfile=[landice_p011_root, '/%04d/landice_%04d_%03d.gds.gz'];
       tmpgridfile=[tmp_root, '/landice_%04d_%03d.gds'];
-      icefiles=[landice_root, '/%04d/icefiles_%04d_%03d.txt'];
+      icefiles=[landice_p011_root, '/%04d/icefiles_%04d_%03d.txt'];
     else,
       gridfile=[grids_root, '/maskGlob1km.gds'];
     end;
@@ -194,9 +203,9 @@ switch version,
     resolution='0.01 degrees';  % for metadata.
     resfloat=single(0.01);
     if iceIncluded,
-      gridfile=[landice_root, '/%04d/landiceP01_%04d_%03d.gds.gz'];
+      gridfile=[landice_p01_root, '/%04d/landiceP01_%04d_%03d.gds.gz'];
       tmpgridfile=[tmp_root, '/landice_%04d_%03d.gds'];
-      icefiles=[landice_root, '/%04d/icefiles_%04d_%03d.txt'];
+      icefiles=[landice_p011_root, '/%04d/icefiles_%04d_%03d.txt'];
     else,
       gridfile=[grids_root, '/maskGLOBp01deg.gds'];
     end;
@@ -205,9 +214,9 @@ switch version,
     resolution='0.01 degrees';  % for metadata.
     resfloat=single(0.01);
     if iceIncluded,
-      gridfile=[landice_root, '/%04d/landiceP01_%04d_%03d.gds.gz'];
+      gridfile=[landice_p01_root, '/%04d/landiceP01_%04d_%03d.gds.gz'];
       tmpgridfile=[tmp_root, '/landice_%04d_%03d.gds'];
-      icefiles=[landice_root, '/%04d/icefiles_%04d_%03d.txt'];
+      icefiles=[landice_p011_root, '/%04d/icefiles_%04d_%03d.txt'];
     else,
       gridfile=[grids_root, '/maskGLOBp01deg.gds'];
     end;
@@ -216,7 +225,7 @@ switch version,
     resolution='0.088 degrees'; % for metadata.
     resfloat=single(0.088);
     gridfile=[grids_root, '/maskGlob8km.gds'];
-    icefiles=[landice_root, '/%04d/icefiles_%04d_%03d.txt'];
+    icefiles=[landice_p011_root, '/%04d/icefiles_%04d_%03d.txt'];
     iceIncluded=0;  % force no ice.
 end;
 

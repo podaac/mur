@@ -267,10 +267,13 @@ class MUROrchestrator:
 
         # Set up paths
         input_dir = pathlib.Path(config["input_dir"])
-        # Note: Don't append year here - the container creates the full path structure:
-        # /output/land/p011/YEAR/ and /output/land/p01/YEAR/
-        output_dir = pathlib.Path(config["output_dir"])
-        output_dir.mkdir(parents=True, exist_ok=True)
+        # Two separate output directories matching production's NAS layout:
+        #   p011 (1km):  /nas/ftp/mur_sst/tmchin/landice/
+        #   p01 (0.01°): /nas2/landice/
+        output_dir_p011 = pathlib.Path(config["output_dir_p011"])
+        output_dir_p01 = pathlib.Path(config["output_dir_p01"])
+        output_dir_p011.mkdir(parents=True, exist_ok=True)
+        output_dir_p01.mkdir(parents=True, exist_ok=True)
 
         mode_str = "Interim" if is_nrt else "Final"
         logger.info(f"  Land/Ice ({mode_str}): {process_date} (DOY {doy})")
@@ -294,9 +297,10 @@ class MUROrchestrator:
             "-e", "OSISAF_FTP_REPROCESSED=ftp://osisaf.met.no/reprocessed/ice/conc/v1p2",
             "-e", "OSISAF_FTP_ARCHIVE=https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/conc",
             "-e", "OSISAF_FTP_PROD=ftp://osisaf.met.no/prod/ice/conc",
-            # Volume mounts (container expects /input and /output)
+            # Volume mounts (container expects /input and /output/p011, /output/p01)
             "-v", f"{input_dir.resolve()}:/input",
-            "-v", f"{output_dir.resolve()}:/output",
+            "-v", f"{output_dir_p011.resolve()}:/output/p011",
+            "-v", f"{output_dir_p01.resolve()}:/output/p01",
             container_image,
             # Positional arguments: year doy
             str(year),
@@ -674,14 +678,15 @@ class MUROrchestrator:
         iquam_dir = pathlib.Path(
             config.get("input_dir_iquam", "testing/preprocessing/output/iquam")
         )
-        # Landice container outputs to: output_dir/land/p01/YEAR/landiceP01_*.gds.gz
-        # MRVA expects: /data/input/landice/YEAR/landiceP01_*.gds.gz
-        # (used by csp2nc4a for NetCDF generation)
-        # So we mount the land/p01 subdirectory to match MRVA's expected structure
-        landice_base_dir = pathlib.Path(
-            config.get("input_dir_landice", "testing/preprocessing/output/landice")
+        # Two separate landice input paths matching production's NAS layout:
+        #   p011 (1km):  Global_ice (mrva4com), landice_ grid (csp2nc4a v03), icefiles.txt
+        #   p01 (0.01°): landiceP01_ grid (csp2nc4a v04/v04.1, makeMUR25)
+        landice_p011_dir = pathlib.Path(
+            config.get("input_dir_landice_p011", "testing/preprocessing/output/landice-p011")
         )
-        landice_dir = landice_base_dir / "land" / "p01"
+        landice_p01_dir = pathlib.Path(
+            config.get("input_dir_landice_p01", "testing/preprocessing/output/landice-p01")
+        )
         static_resources_dir = pathlib.Path(
             config.get("static_resources_dir", "testing/static-resources")
         )
@@ -722,7 +727,8 @@ class MUROrchestrator:
         input_checks = {
             "L2P data": bic_dir,
             "iQUAM data": iquam_dir,
-            "LandIce data": landice_dir
+            "LandIce p011 data": landice_p011_dir,
+            "LandIce p01 data": landice_p01_dir
         }
 
         for name, path in input_checks.items():
@@ -769,7 +775,8 @@ class MUROrchestrator:
             # Volume mounts for inputs (read-only)
             "-v", f"{bic_dir.resolve()}:/data/input/bic:ro",
             "-v", f"{iquam_dir.resolve()}:/data/input/iquam:ro",
-            "-v", f"{landice_dir.resolve()}:/data/input/landice:ro",
+            "-v", f"{landice_p011_dir.resolve()}:/data/input/landice-p011:ro",
+            "-v", f"{landice_p01_dir.resolve()}:/data/input/landice-p01:ro",
             "-v", f"{static_resources_dir.resolve()}:/data/static-resources:rw",
             # Volume mounts for outputs
             "-v", f"{csp_dir.resolve()}:/data/output/csp",
@@ -1228,13 +1235,14 @@ def create_output_directories(config: Dict) -> None:
 
     directories_created = []
 
-    # Land/Ice directories
+    # Land/Ice directories (separate per resolution)
     if "landice" in config:
         landice_config = config["landice"]
-        if "output_dir" in landice_config:
-            path = pathlib.Path(landice_config["output_dir"])
-            path.mkdir(parents=True, exist_ok=True)
-            directories_created.append(str(path))
+        for key in ("output_dir_p011", "output_dir_p01"):
+            if key in landice_config:
+                path = pathlib.Path(landice_config[key])
+                path.mkdir(parents=True, exist_ok=True)
+                directories_created.append(str(path))
 
     # L2P directories
     if "l2p" in config:

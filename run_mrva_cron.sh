@@ -15,9 +15,12 @@ echo "========================================" | tee -a "$LOGFILE"
 echo "MUR Pipeline Run: $(date)" | tee -a "$LOGFILE"
 echo "========================================" | tee -a "$LOGFILE"
 
-# Sync landice
+# Sync landice from production NAS paths (separate per resolution)
 YEAR=$(date +%Y)
-rsync -av "/nas2/landice/${YEAR}/" "/data3/jleach/testing/ops-landice/land/p01/${YEAR}/" >> "$LOGFILE" 2>&1
+# p011 (1km): Global_ice, landice_ grid, icefiles - from production /nas/ftp/.../landice/
+rsync -av "/measures_mur/seamap/nas/ftp/mur_sst/tmchin/landice/${YEAR}/" "/data3/jleach/testing/ops-landice-p011/${YEAR}/" >> "$LOGFILE" 2>&1
+# p01 (0.01°): landiceP01_ grid - from production /nas2/landice/
+rsync -av "/nas2/landice/${YEAR}/" "/data3/jleach/testing/ops-landice-p01/${YEAR}/" >> "$LOGFILE" 2>&1
 
 # Run MRVA over the full processing window (T-9 through T-1)
 # Pipeline auto-detects REA (T-9..T-4) vs NRT (T-3..T-1) mode

@@ -70,7 +70,7 @@ switch resolution,
     landmaskfile = append(input_dir, '/grids/maskGlob1km.gds');
     gridinxnorth = append(input_dir, '/mat/p011/saf2north');
     gridinxsouth = append(input_dir, '/mat/p011/saf2south');
-    odir = append(output_dir, '/land/p011/', year);  % output dir.
+    odir = append(output_dir, '/', year);  % output dir.
     icefiles_odir = odir;  % icefiles.txt goes in same dir as GDS for container mapping
     landicefile = append(odir, '/landice_', year, '_', day, '.gds')
     icesstfile = append(odir, '/Global_ice_', year, '_', day, '.bip')
@@ -86,7 +86,7 @@ switch resolution,
     landmaskfile = append(input_dir, '/grids/maskGLOBp01deg.gds');
     gridinxnorth = append(input_dir, '/mat/p01/saf2north');
     gridinxsouth = append(input_dir, '/mat/p01/saf2south');
-    odir = append(output_dir, '/land/p01/', year);  % output dir.
+    odir = append(output_dir, '/', year);  % output dir.
     icefiles_odir = odir;  % icefiles.txt goes in same dir as GDS for container mapping
     landicefile = append(odir, '/landiceP01_', year, '_', day, '.gds')
     icesstfile = append(odir, '/Global_ice_', year, '_', day, '.bip')
