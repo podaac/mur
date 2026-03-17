@@ -13,6 +13,7 @@ function makeMUR25_container(year, day, realtime, config)
 %             - landice_root: Land/ice input directory
 %             - static_resources_root: Static resources directory
 %             - fortran_bin: Fortran executables directory
+%             - cache_dir:   Writable cache directory (default: '/data/cache')
 %             - region:      Region name (default: 'Global')
 %             - hourAna:     Analysis hour (default: 9)
 %
@@ -37,6 +38,12 @@ function makeMUR25_container(year, day, realtime, config)
     landice_root = config.landice_root;
     static_resources_root = config.static_resources_root;
     fortran_bin = config.fortran_bin;
+
+    if isfield(config, 'cache_dir')
+        cache_dir = config.cache_dir;
+    else
+        cache_dir = '/data/cache';
+    end
 
     if isfield(config, 'region')
         region = config.region;
@@ -140,7 +147,7 @@ function makeMUR25_container(year, day, realtime, config)
     fprintf('Processing ice data for MUR25...\n');
 
     if iceIncluded
-        icemap = makeMUR25ice_container(year, day, landice_root, static_resources_root);
+        icemap = makeMUR25ice_container(year, day, landice_root, static_resources_root, cache_dir);
         fprintf('  Ice data loaded: %d x %d\n', size(icemap, 1), size(icemap, 2));
     end
 
@@ -630,13 +637,14 @@ function out = iif(condition, true_val, false_val)
 end
 
 %% Helper function: makeMUR25ice for container
-function icemap = makeMUR25ice_container(year, doy, landice_root, static_resources_root)
+function icemap = makeMUR25ice_container(year, doy, landice_root, static_resources_root, cache_dir)
 % Generate MUR25 ice map from landice data by downsampling
 %
 % Reads the full-resolution landice file and downsamples to 0.25 degree
+% Cache is written to cache_dir (writable) rather than landice_root (read-only)
 
     % Check for cached MUR25 ice file first
-    icecachedir = sprintf('%s/ice25', landice_root);
+    icecachedir = sprintf('%s/ice25', cache_dir);
     icefile = sprintf('%s/icemap%04d_%03d.ice', icecachedir, year, doy);
 
     if exist(icefile, 'file')

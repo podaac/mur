@@ -660,6 +660,7 @@ function mrva4com_container(year, day, realtime, varargin)
             mur25_config.landice_root = landice_p01_root;  % MUR25 uses p01 landiceP01_ files
             mur25_config.static_resources_root = static_resources_root;
             mur25_config.fortran_bin = fortran_bin;
+            mur25_config.cache_dir = '/data/cache';
             mur25_config.region = region;
             mur25_config.hourAna = hourAna;
 
