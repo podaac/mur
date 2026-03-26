@@ -347,19 +347,25 @@ class MUROrchestrator:
         config = self.config["l2p"]
         sensor_config = config["sensors"][sensor]
 
-        # Set up download directory (matches production structure)
-        download_dir = pathlib.Path(config["input_dir"]) / sensor / str(data_day.timetuple().tm_yday)
+        # Set up download directory - use sensor-level parent; -dydoy sorts
+        # files into YYYY/DOY/ subdirectories based on granule timestamp,
+        # matching production cron job behavior.
+        doy = data_day.timetuple().tm_yday
+        year = data_day.year
+        download_dir = pathlib.Path(config["input_dir"]) / sensor
         download_dir.mkdir(parents=True, exist_ok=True)
 
-        # Check if already downloaded
-        existing_files = list(download_dir.glob("*.nc"))
+        # Check if already downloaded (files are in YYYY/DOY/ subdirectory)
+        doy_dir = download_dir / str(year) / f"{doy:03d}"
+        existing_files = list(doy_dir.glob("*.nc")) if doy_dir.exists() else []
         if existing_files and not rewrite:
             logger.info(f"    → Keeping existing L2P files for {sensor} {data_day}")
             self.stats["l2p_download"]["skipped"] += 1
             return True
 
         # Download via podaac-data-subscriber (matches production cron jobs)
-        # This uses CMR temporal filtering based on observation time
+        # Uses -dydoy to sort granules into YYYY/DOY/ subdirectories so
+        # boundary granules go to the correct day.
         sd = f"{data_day}T00:00:00Z"
         ed = f"{data_day}T23:59:59Z"
 
@@ -375,13 +381,14 @@ class MUROrchestrator:
                     "-e", ".nc",
                     "-sd", sd,
                     "-ed", ed,
+                    "-dydoy",
                     "--verbose"
                 ]
 
                 subprocess.run(cmd, check=True)
 
-                # Count downloaded files
-                files = list(download_dir.glob("*.nc"))
+                # Count downloaded files in target DOY directory
+                files = list(doy_dir.glob("*.nc")) if doy_dir.exists() else []
                 downloads.extend(files)
                 logger.info(f"      ✓ Downloaded {len(files)} files")
 
@@ -440,8 +447,8 @@ class MUROrchestrator:
         year = data_day.year
         doy = data_day.timetuple().tm_yday
 
-        # Set up paths (match production structure: sensor/YYYY/)
-        input_dir = pathlib.Path(config["input_dir"]) / sensor / str(doy)
+        # Set up paths (match production structure: sensor/YYYY/DOY/ for input)
+        input_dir = pathlib.Path(config["input_dir"]) / sensor / str(year) / f"{doy:03d}"
         output_dir = pathlib.Path(config["output_dir"]) / sensor / str(year)
         output_dir.mkdir(parents=True, exist_ok=True)
 
