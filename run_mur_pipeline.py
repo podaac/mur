@@ -138,7 +138,8 @@ class MUROrchestrator:
         config_path: pathlib.Path,
         netrc_path: Optional[pathlib.Path] = None,
         force_nrt: bool = False,
-        keep_containers: bool = False
+        keep_containers: bool = False,
+        fresh_download: bool = True
     ):
         """Initialize orchestrator with configuration.
 
@@ -147,6 +148,9 @@ class MUROrchestrator:
             netrc_path: Optional path to .netrc file for NASA Earthdata auth
             force_nrt: Force NRT mode for all dates (override auto-detection)
             keep_containers: If True, don't auto-remove containers (for debugging)
+            fresh_download: If True, clear podaac-data-subscriber .update state
+                before each download so per-DOY temporal queries get fresh CMR
+                results. Not needed when cron jobs keep L2P files current.
 
         Note:
             By default, mode (NRT vs REA) is automatically determined based on
@@ -164,6 +168,7 @@ class MUROrchestrator:
         self.netrc_path = netrc_path
         self.force_nrt = force_nrt
         self.keep_containers = keep_containers
+        self.fresh_download = fresh_download
 
         # Track processing stats
         self.stats = {
@@ -363,15 +368,33 @@ class MUROrchestrator:
             self.stats["l2p_download"]["skipped"] += 1
             return True
 
-        # Download via podaac-data-subscriber (matches production cron jobs)
-        # Uses -dydoy to sort granules into YYYY/DOY/ subdirectories so
-        # boundary granules go to the correct day.
+        # Download via podaac-data-subscriber with -dydoy to sort granules
+        # into YYYY/DOY/ subdirectories by granule timestamp (matches
+        # production cron behavior).
+        #
+        # Note on .update state file: The subscriber tracks "last checked"
+        # via a .update file in the download directory. Production cron jobs
+        # use this for incremental hourly downloads (no per-day -sd/-ed).
+        # When we call the subscriber per-DOY with -sd/-ed, the .update
+        # timestamp causes subsequent DOY queries to skip granules published
+        # before that timestamp. Use --fresh-download to clear this state
+        # when doing batch downloads (not needed if cron keeps files current).
         sd = f"{data_day}T00:00:00Z"
         ed = f"{data_day}T23:59:59Z"
+
+        if self.fresh_download:
+            update_file = download_dir / ".update"
+            if update_file.exists():
+                update_file.unlink()
 
         downloads = []
         for collection in sensor_config["collection_name"]:
             logger.info(f"    → Downloading {sensor} data: {data_day} ({collection})")
+
+            if self.fresh_download:
+                update_file = download_dir / ".update"
+                if update_file.exists():
+                    update_file.unlink()
 
             try:
                 cmd = [
@@ -1174,6 +1197,14 @@ Examples:
              "debugging crashes - use 'docker logs <container_id>' to inspect output."
     )
 
+    parser.add_argument(
+        "--no-fresh-download",
+        action="store_true",
+        help="Don't clear podaac-data-subscriber .update state file before "
+             "each L2P download. Use this when cron jobs keep L2P files "
+             "current and incremental subscriber state should be preserved."
+    )
+
     return parser.parse_args()
 
 
@@ -1315,7 +1346,8 @@ def main():
             args.config,
             netrc_path=args.netrc_path,
             force_nrt=args.force_nrt,
-            keep_containers=args.keep_containers
+            keep_containers=args.keep_containers,
+            fresh_download=not args.no_fresh_download
         )
     except Exception as e:
         logger.error(f"Failed to initialize: {e}")
