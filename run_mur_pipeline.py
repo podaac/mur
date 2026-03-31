@@ -383,8 +383,7 @@ class MUROrchestrator:
         ed = f"{data_day}T23:59:59Z"
 
         if self.fresh_download:
-            update_file = download_dir / ".update"
-            if update_file.exists():
+            for update_file in download_dir.glob(".update*"):
                 update_file.unlink()
 
         downloads = []
@@ -392,8 +391,7 @@ class MUROrchestrator:
             logger.info(f"    → Downloading {sensor} data: {data_day} ({collection})")
 
             if self.fresh_download:
-                update_file = download_dir / ".update"
-                if update_file.exists():
+                for update_file in download_dir.glob(".update*"):
                     update_file.unlink()
 
             try:
@@ -476,7 +474,7 @@ class MUROrchestrator:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Check if BIC file exists
-        bic_file = output_dir / f"Global_{sensor}_{year}_{doy:03d}.bic.gz"
+        bic_file = output_dir / f"Global_{sensor}_{year}_{doy:03d}.bic"
         if bic_file.exists() and not rewrite:
             logger.info(f"    → Keeping existing BIC for {sensor} {data_day}")
             self.stats["l2p_process"]["skipped"] += 1
