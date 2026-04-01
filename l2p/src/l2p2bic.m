@@ -24,9 +24,9 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
   %filedir=sprintf('%s/%s/%04d',bicdir,sensor,year);
   filedir=bicdir;
   mkdir(filedir)
-  bicfilegz=sprintf('%s/%s_%s_%04d_%03d.bic.gz',filedir,region,sensor,year,day);
-  if exist(bicfilegz,'file')&(rewrite==0),
-    fprintf(1,'File exists; will NOT be reproduced:\n ... %s\n',bicfilegz);
+  bicfile_check=sprintf('%s/%s_%s_%04d_%03d.bic',filedir,region,sensor,year,day);
+  if exist(bicfile_check,'file')&(rewrite==0),
+    fprintf(1,'File exists; will NOT be reproduced:\n ... %s\n',bicfile_check);
     return;
   end;
 
