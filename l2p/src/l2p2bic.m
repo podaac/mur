@@ -208,22 +208,6 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
   rms = rms(valid_mask);
   flag = flag(valid_mask);
 
-  % Filter to only include data within the target day (0 <= hour < 24)
-  % This matches historical behavior where only same-day observations are included
-  day_mask = (hour >= 0) & (hour < 24);
-  n_outside_day = sum(~day_mask);
-  if n_outside_day > 0
-      fprintf('  Filtering %d observations outside target day (hour < 0 or >= 24)\n', n_outside_day);
-  end
-
-  lon = lon(day_mask);
-  lat = lat(day_mask);
-  hour = hour(day_mask);
-  sst = sst(day_mask);
-  bias = bias(day_mask);
-  rms = rms(day_mask);
-  flag = flag(day_mask);
-
   % Safety check: filter out any zero-filled entries from pre-allocation
   % that may have slipped through (quality=0 with lat=lon=0)
   quality_mask = (flag >= minConfValue);

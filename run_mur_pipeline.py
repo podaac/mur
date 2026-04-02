@@ -139,7 +139,7 @@ class MUROrchestrator:
         netrc_path: Optional[pathlib.Path] = None,
         force_nrt: bool = False,
         keep_containers: bool = False,
-        fresh_download: bool = True
+        force_date_range: bool = False
     ):
         """Initialize orchestrator with configuration.
 
@@ -148,9 +148,10 @@ class MUROrchestrator:
             netrc_path: Optional path to .netrc file for NASA Earthdata auth
             force_nrt: Force NRT mode for all dates (override auto-detection)
             keep_containers: If True, don't auto-remove containers (for debugging)
-            fresh_download: If True, clear podaac-data-subscriber .update state
-                before each download so per-DOY temporal queries get fresh CMR
-                results. Not needed when cron jobs keep L2P files current.
+            force_date_range: If True, use bounded date-range downloads instead
+                of incremental mode. Saves/restores .update state so incremental
+                state isn't corrupted. Used when --date is specified for
+                testing/backfill.
 
         Note:
             By default, mode (NRT vs REA) is automatically determined based on
@@ -168,7 +169,7 @@ class MUROrchestrator:
         self.netrc_path = netrc_path
         self.force_nrt = force_nrt
         self.keep_containers = keep_containers
-        self.fresh_download = fresh_download
+        self.force_date_range = force_date_range
 
         # Track processing stats
         self.stats = {
@@ -326,73 +327,27 @@ class MUROrchestrator:
     # Stage 2: L2P Data Download (Cron-Style)
     # ========================================================================
 
-    def run_l2p_download(
-        self,
-        sensor: str,
-        process_date: datetime.date,
-        data_day: datetime.date,
-        rewrite: bool
-    ) -> bool:
+    def run_l2p_download_incremental(self, sensor: str) -> bool:
         """
-        Download L2P satellite data for a sensor/day.
+        Download L2P data incrementally, matching production cron behavior.
 
-        Uses podaac-data-subscriber (HTTP) by default, matching production cron jobs.
-        This ensures CMR temporal filtering returns granules based on observation time,
-        producing results consistent with historical production outputs.
+        Uses podaac-data-subscriber with -sd START_DATE (no -ed), letting
+        the subscriber's .update state file track what's been downloaded.
+        Called once per sensor — the subscriber + -dydoy sorts files into
+        YYYY/DOY/ subdirectories automatically.
 
-        Args:
-            sensor: Sensor name (AMSR2R, MODISA, etc.)
-            process_date: Analysis date being processed
-            data_day: Day of data to download (may be ±dayrange from process_date)
-            rewrite: If True, re-download even if files exist
-
-        Returns:
-            True if successful
+        This matches the production cron scripts (mur_cron/*.sh) which run
+        hourly with no knowledge of BIC files or analysis dates.
         """
         config = self.config["l2p"]
         sensor_config = config["sensors"][sensor]
-
-        # Set up download directory - use sensor-level parent; -dydoy sorts
-        # files into YYYY/DOY/ subdirectories based on granule timestamp,
-        # matching production cron job behavior.
-        doy = data_day.timetuple().tm_yday
-        year = data_day.year
         download_dir = pathlib.Path(config["input_dir"]) / sensor
         download_dir.mkdir(parents=True, exist_ok=True)
 
-        # Check if already downloaded (files are in YYYY/DOY/ subdirectory)
-        doy_dir = download_dir / str(year) / f"{doy:03d}"
-        existing_files = list(doy_dir.glob("*.nc")) if doy_dir.exists() else []
-        if existing_files and not rewrite:
-            logger.info(f"    → Keeping existing L2P files for {sensor} {data_day}")
-            self.stats["l2p_download"]["skipped"] += 1
-            return True
+        start_date = sensor_config.get("start_date", "2022-07-07T00:00:00Z")
 
-        # Download via podaac-data-subscriber with -dydoy to sort granules
-        # into YYYY/DOY/ subdirectories by granule timestamp (matches
-        # production cron behavior).
-        #
-        # Note on .update state file: The subscriber tracks "last checked"
-        # via a .update file in the download directory. Production cron jobs
-        # use this for incremental hourly downloads (no per-day -sd/-ed).
-        # When we call the subscriber per-DOY with -sd/-ed, the .update
-        # timestamp causes subsequent DOY queries to skip granules published
-        # before that timestamp. Use --fresh-download to clear this state
-        # when doing batch downloads (not needed if cron keeps files current).
-        sd = f"{data_day}T00:00:00Z"
-        ed = f"{data_day}T23:59:59Z"
-
-        if self.fresh_download:
-            for update_file in download_dir.glob(".update*"):
-                update_file.unlink()
-
-        downloads = []
         for collection in sensor_config["collection_name"]:
-            logger.info(f"    → Downloading {sensor} data: {data_day} ({collection})")
-
-            if self.fresh_download:
-                for update_file in download_dir.glob(".update*"):
-                    update_file.unlink()
+            logger.info(f"    → Downloading {sensor} ({collection}) incremental since {start_date}")
 
             try:
                 cmd = [
@@ -400,22 +355,18 @@ class MUROrchestrator:
                     "-c", collection,
                     "-d", str(download_dir),
                     "-e", ".nc",
-                    "-sd", sd,
-                    "-ed", ed,
                     "-dydoy",
+                    "-sd", start_date,
                     "--verbose"
                 ]
 
                 subprocess.run(cmd, check=True)
-
-                # Count downloaded files in target DOY directory
-                files = list(doy_dir.glob("*.nc")) if doy_dir.exists() else []
-                downloads.extend(files)
-                logger.info(f"      ✓ Downloaded {len(files)} files")
+                logger.info(f"      ✓ Download complete for {collection}")
+                self.stats["l2p_download"]["success"] += 1
 
             except subprocess.CalledProcessError as e:
                 logger.error(f"    ✗ Download failed for {collection}: {e}")
-                # Continue with next collection
+                self.stats["l2p_download"]["failed"] += 1
                 continue
             except FileNotFoundError:
                 logger.error("    ✗ podaac-data-subscriber not found in PATH")
@@ -423,14 +374,69 @@ class MUROrchestrator:
                 self.stats["l2p_download"]["failed"] += 1
                 return False
 
-        if downloads:
-            self.stats["l2p_download"]["success"] += 1
-            logger.info(f"    ✓ Total downloaded: {len(downloads)} files")
-            return True
-        else:
-            logger.warning(f"    ⚠ No data found for {sensor} {data_day}")
-            self.stats["l2p_download"]["skipped"] += 1
-            return True  # Not an error - data may not exist
+        return True
+
+    def run_l2p_download_daterange(
+        self,
+        sensor: str,
+        start_date: datetime.date,
+        end_date: datetime.date
+    ) -> bool:
+        """
+        Force-download L2P data for a specific date range.
+
+        Used for testing/backfill when --date is specified. Saves and restores
+        the .update file so the normal incremental state isn't corrupted.
+        """
+        config = self.config["l2p"]
+        sensor_config = config["sensors"][sensor]
+        download_dir = pathlib.Path(config["input_dir"]) / sensor
+        download_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save existing .update files
+        update_files = list(download_dir.glob(".update*"))
+        saved_updates = {}
+        for uf in update_files:
+            saved_updates[uf] = uf.read_bytes()
+            uf.unlink()
+
+        sd = f"{start_date.isoformat()}T00:00:00Z"
+        ed = f"{end_date.isoformat()}T23:59:59Z"
+
+        try:
+            for collection in sensor_config["collection_name"]:
+                logger.info(f"    → Downloading {sensor} ({collection}) for {start_date} to {end_date}")
+
+                try:
+                    cmd = [
+                        "podaac-data-subscriber",
+                        "-c", collection,
+                        "-d", str(download_dir),
+                        "-e", ".nc",
+                        "-dydoy",
+                        "-sd", sd,
+                        "-ed", ed,
+                        "--verbose"
+                    ]
+
+                    subprocess.run(cmd, check=True)
+                    logger.info(f"      ✓ Download complete for {collection}")
+                    self.stats["l2p_download"]["success"] += 1
+
+                except subprocess.CalledProcessError as e:
+                    logger.error(f"    ✗ Download failed for {collection}: {e}")
+                    self.stats["l2p_download"]["failed"] += 1
+                    continue
+                except FileNotFoundError:
+                    logger.error("    ✗ podaac-data-subscriber not found in PATH")
+                    self.stats["l2p_download"]["failed"] += 1
+                    return False
+        finally:
+            # Restore .update files so incremental state is preserved
+            for uf, content in saved_updates.items():
+                uf.write_bytes(content)
+
+        return True
 
     # ========================================================================
     # Stage 3: L2P Container Processing
@@ -515,43 +521,56 @@ class MUROrchestrator:
             self.stats["l2p_process"]["failed"] += 1
             return False
 
-    def run_l2p_sensor_full(
+    def run_l2p_sensor_download(self, sensor: str, process_date: datetime.date) -> bool:
+        """
+        Download L2P data for one sensor.
+
+        Matches production where cron downloads are completely decoupled from
+        BIC creation. Downloads happen once per sensor, not per-DOY.
+        """
+        config = self.config["l2p"]
+        sensor_config = config["sensors"][sensor]
+        dayrange = sensor_config.get("day_range", [2, 2])
+        reference_today = self.get_reference_today()
+
+        # Determine if we should use date-range mode (testing/backfill)
+        # or incremental mode (production-style)
+        if self.force_date_range:
+            earliest = process_date - datetime.timedelta(days=dayrange[0])
+            latest = min(
+                process_date + datetime.timedelta(days=dayrange[1]),
+                reference_today
+            )
+            return self.run_l2p_download_daterange(sensor, earliest, latest)
+        else:
+            return self.run_l2p_download_incremental(sensor)
+
+    def run_l2p_sensor_processing(
         self,
         sensor: str,
         process_date: datetime.date,
         is_nrt: bool
     ) -> bool:
         """
-        Full L2P workflow for one sensor: download + process for dayrange window.
+        Create BIC files for one sensor across the dayrange window.
 
-        Mimics production where each sensor processes a temporal window around
-        the analysis date.
-
-        Note: Uses get_reference_today() for all date comparisons to support
-        historical reprocessing via --date flag.
+        Uses stablat to decide whether to re-create existing BIC files,
+        matching production nrtMRVA.py behavior. Download must have already
+        run separately via run_l2p_sensor_download().
         """
         config = self.config["l2p"]
         sensor_config = config["sensors"][sensor]
-        dayrange = sensor_config.get("day_range", [12, 1])
+        dayrange = sensor_config.get("day_range", [2, 2])
         stablat = sensor_config.get("stable", 2)
-
-        logger.info(f"  L2P Sensor: {sensor}")
-        logger.info(f"    Dayrange: -{dayrange[0]} to +{dayrange[1]} days")
-
-        success = True
-        # Use simulated "today" for historical reprocessing support
         reference_today = self.get_reference_today()
 
-        # Calculate total days to process
+        success = True
         total_days = dayrange[0] + dayrange[1] + 1
         days_processed = 0
 
-        # Process temporal window
         for dt in range(-dayrange[0], dayrange[1] + 1):
             data_day = process_date + datetime.timedelta(days=dt)
 
-            # Skip future dates (relative to simulated run day)
-            # This matches production behavior where data wasn't available yet
             if data_day > reference_today:
                 continue
 
@@ -561,18 +580,13 @@ class MUROrchestrator:
                 f"{data_day} (analysis_date{dt:+d})"
             )
 
-            # Determine if data is stable (old enough that it won't change)
-            # Uses simulated "today" so historical runs treat data as "fresh"
             days_old = (reference_today - data_day).days
             rewrite = days_old < stablat
 
-            # Download step (mimics cron job)
-            download_ok = self.run_l2p_download(sensor, process_date, data_day, rewrite)
-
-            # Processing step (mimics MATLAB script execution)
-            if download_ok:
-                process_ok = self.run_l2p_processing(sensor, process_date, data_day, rewrite)
-                success = success and process_ok
+            process_ok = self.run_l2p_processing(
+                sensor, process_date, data_day, rewrite
+            )
+            success = success and process_ok
 
         return success
 
@@ -1000,16 +1014,31 @@ class MUROrchestrator:
             logger.info("-" * 80)
             results["iquam"] = self.run_iquam(process_date, is_nrt)
 
-        # Stage 3: L2P (all sensors - slowest stage, run last)
-        if execute_stages is None or "l2p" in execute_stages:
-            active_sensors = self.config["l2p"].get("active_sensors", [])
+        # Stage 3a: L2P Download (once per sensor, incremental)
+        # Runs when either "l2p-download" or "l2p" stage is requested.
+        # Decoupled from BIC creation to match production where cron downloads
+        # have no knowledge of BIC files.
+        active_sensors = self.config["l2p"].get("active_sensors", [])
+        if execute_stages is None or "l2p-download" in execute_stages or "l2p" in execute_stages:
             logger.info("")
-            logger.info(f"▶ STAGE 3/4: L2P Satellite Data ({len(active_sensors)} sensors)")
+            logger.info(f"▶ STAGE 3a/4: L2P Download ({len(active_sensors)} sensors)")
+            logger.info("-" * 80)
+            dl_results = []
+            for idx, sensor in enumerate(active_sensors, 1):
+                logger.info(f"  Sensor {idx}/{len(active_sensors)}: {sensor}")
+                dl_ok = self.run_l2p_sensor_download(sensor, process_date)
+                dl_results.append(dl_ok)
+            results["l2p_download"] = all(dl_results) if dl_results else True
+
+        # Stage 3b: L2P Processing (BIC creation per DOY with stablat rewrite)
+        if execute_stages is None or "l2p" in execute_stages:
+            logger.info("")
+            logger.info(f"▶ STAGE 3b/4: L2P Processing ({len(active_sensors)} sensors)")
             logger.info("-" * 80)
             l2p_results = []
             for idx, sensor in enumerate(active_sensors, 1):
                 logger.info(f"  Sensor {idx}/{len(active_sensors)}: {sensor}")
-                sensor_ok = self.run_l2p_sensor_full(sensor, process_date, is_nrt)
+                sensor_ok = self.run_l2p_sensor_processing(sensor, process_date, is_nrt)
                 l2p_results.append(sensor_ok)
             results["l2p"] = all(l2p_results) if l2p_results else True
 
@@ -1176,8 +1205,10 @@ Examples:
         action="append",
         default=[],
         help="Execute only specific stages (can be specified multiple times or "
-             "comma-separated). Available stages: landice, l2p, iquam, mrva. "
-             "Example: --execute iquam --execute landice OR --execute iquam,landice"
+             "comma-separated). Available stages: landice, l2p-download, l2p, "
+             "iquam, mrva. 'l2p-download' downloads L2P data only (no BIC "
+             "creation). 'l2p' does both download and BIC creation. "
+             "Example: --execute l2p-download OR --execute iquam,landice"
     )
 
     parser.add_argument(
@@ -1196,11 +1227,13 @@ Examples:
     )
 
     parser.add_argument(
-        "--no-fresh-download",
+        "--force-date-download",
         action="store_true",
-        help="Don't clear podaac-data-subscriber .update state file before "
-             "each L2P download. Use this when cron jobs keep L2P files "
-             "current and incremental subscriber state should be preserved."
+        help="Use bounded date-range L2P downloads instead of incremental mode. "
+             "Downloads only for the analysis date ± dayrange, saving and "
+             "restoring the .update state. Useful for testing/backfill. "
+             "Default (without this flag) uses production-style incremental "
+             "downloads via the subscriber's .update state file."
     )
 
     return parser.parse_args()
@@ -1212,7 +1245,7 @@ def parse_execute_stages(execute_args: List[str]) -> Optional[List[str]]:
         return None
 
     stages = []
-    valid_stages = {"landice", "l2p", "iquam", "mrva"}
+    valid_stages = {"landice", "l2p", "l2p-download", "iquam", "mrva"}
 
     for arg in execute_args:
         # Support comma-separated values
@@ -1345,7 +1378,7 @@ def main():
             netrc_path=args.netrc_path,
             force_nrt=args.force_nrt,
             keep_containers=args.keep_containers,
-            fresh_download=not args.no_fresh_download
+            force_date_range=args.force_date_download
         )
     except Exception as e:
         logger.error(f"Failed to initialize: {e}")

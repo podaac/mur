@@ -27,4 +27,10 @@ switch upper(SensorName),
     cmd = 'cat';
     subdir='GDS2/L2P/MODIS_T/JPL/v2019.0';
 
+  case 'AVMTAG',
+    l2pnames   = {'*.nc'};
+    minConfValue = 4;
+    cmd = 'cat';
+    subdir='GDS2/L2P/AVHRRMTA_G/NAVO/v2';
+
 end;  % switch.
