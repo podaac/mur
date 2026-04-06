@@ -1022,7 +1022,7 @@ class MUROrchestrator:
         # have no knowledge of BIC files.
         all_sensors = self.config["l2p"].get("active_sensors", [])
         active_sensors = [s for s in all_sensors if s in sensor_filter] if sensor_filter else all_sensors
-        if execute_stages is None or "l2p-download" in execute_stages or "l2p" in execute_stages:
+        if execute_stages is not None and "l2p-download" in execute_stages:
             logger.info("")
             logger.info(f"▶ STAGE 3a/4: L2P Download ({len(active_sensors)} sensors)")
             logger.info("-" * 80)
@@ -1209,8 +1209,9 @@ Examples:
         default=[],
         help="Execute only specific stages (can be specified multiple times or "
              "comma-separated). Available stages: landice, l2p-download, l2p, "
-             "iquam, mrva. 'l2p-download' downloads L2P data only (no BIC "
-             "creation). 'l2p' does both download and BIC creation. "
+             "iquam, mrva. 'l2p-download' downloads L2P data (must be explicitly "
+             "requested, not included in default run). 'l2p' creates BIC files "
+             "from already-downloaded data. "
              "Example: --execute l2p-download OR --execute iquam,landice"
     )
 
