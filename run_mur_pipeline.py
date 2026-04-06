@@ -974,7 +974,8 @@ class MUROrchestrator:
         process_date: datetime.date,
         day1: datetime.date,
         preprocess_only: bool = False,
-        execute_stages: Optional[List[str]] = None
+        execute_stages: Optional[List[str]] = None,
+        sensor_filter: Optional[List[str]] = None
     ) -> bool:
         """
         Process a single day through all stages.
@@ -987,6 +988,7 @@ class MUROrchestrator:
             preprocess_only: If True, skip MRVA stage (preprocessing only)
             execute_stages: If provided, only run these stages
                            (e.g., ['iquam', 'landice'])
+            sensor_filter: If provided, only process these sensors for L2P stages
         """
         is_nrt = self.is_nrt_mode(process_date, day1)
         mode = "NRT (Interim)" if is_nrt else "REA (Final)"
@@ -1018,7 +1020,8 @@ class MUROrchestrator:
         # Runs when either "l2p-download" or "l2p" stage is requested.
         # Decoupled from BIC creation to match production where cron downloads
         # have no knowledge of BIC files.
-        active_sensors = self.config["l2p"].get("active_sensors", [])
+        all_sensors = self.config["l2p"].get("active_sensors", [])
+        active_sensors = [s for s in all_sensors if s in sensor_filter] if sensor_filter else all_sensors
         if execute_stages is None or "l2p-download" in execute_stages or "l2p" in execute_stages:
             logger.info("")
             logger.info(f"▶ STAGE 3a/4: L2P Download ({len(active_sensors)} sensors)")
@@ -1236,6 +1239,14 @@ Examples:
              "downloads via the subscriber's .update state file."
     )
 
+    parser.add_argument(
+        "--sensors",
+        type=str,
+        help="Filter to specific sensors (comma-separated). Only these sensors "
+             "will be downloaded/processed for L2P stages. "
+             "Example: --sensors AMSR2R or --sensors AMSR2R,MODISA"
+    )
+
     return parser.parse_args()
 
 
@@ -1384,6 +1395,18 @@ def main():
         logger.error(f"Failed to initialize: {e}")
         sys.exit(1)
 
+    # Parse sensor filter
+    sensor_filter = None
+    if args.sensors:
+        sensor_filter = [s.strip().upper() for s in args.sensors.split(",")]
+        valid_sensors = set(orchestrator.config["l2p"].get("active_sensors", []))
+        invalid = set(sensor_filter) - valid_sensors
+        if invalid:
+            logger.error(f"Unknown sensor(s): {', '.join(sorted(invalid))}")
+            logger.error(f"Valid sensors: {', '.join(sorted(valid_sensors))}")
+            sys.exit(1)
+        logger.info(f"Sensor filter: {', '.join(sensor_filter)}")
+
     # Create output directories before running
     create_output_directories(orchestrator.config)
 
@@ -1418,7 +1441,8 @@ def main():
             logger.info(f"{'='*60}")
 
             day_success = orchestrator.run_single_day(
-                process_date, day1, args.preprocess_only, execute_stages
+                process_date, day1, args.preprocess_only, execute_stages,
+                sensor_filter=sensor_filter
             )
             success = success and day_success
 
