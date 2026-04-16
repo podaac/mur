@@ -60,6 +60,7 @@ import json
 import logging
 import os
 import pathlib
+import shutil
 import signal
 import subprocess
 import sys
@@ -125,7 +126,8 @@ class MUROrchestrator:
     - Stage 2: L2P data download (cron-style)
     - Stage 3: L2P container processing (direct container calls)
     - Stage 4: iQUAM buoy processing
-    - Stage 5: MRVA analysis (prepared but not executed)
+    - Stage 5: MRVA analysis
+    - Stage 6: Purge old L2P downloads (rolling window cleanup)
     """
 
     # Latency parameters (from nrtMRVA.py)
@@ -171,13 +173,18 @@ class MUROrchestrator:
         self.keep_containers = keep_containers
         self.force_date_range = force_date_range
 
+        # Resolve host UID:GID so containers write files with the calling
+        # user's ownership (passed as --user to every docker run).
+        self.docker_user = f"{os.getuid()}:{os.getgid()}"
+
         # Track processing stats
         self.stats = {
             "landice": {"success": 0, "failed": 0},
             "l2p_download": {"success": 0, "failed": 0, "skipped": 0},
             "l2p_process": {"success": 0, "failed": 0, "skipped": 0},
             "iquam": {"success": 0, "failed": 0, "skipped": 0},
-            "mrva": {"success": 0, "failed": 0, "skipped": 0}
+            "mrva": {"success": 0, "failed": 0, "skipped": 0},
+            "purge": {"success": 0, "failed": 0, "skipped": 0}
         }
 
     def _load_config(self) -> Dict:
@@ -291,6 +298,7 @@ class MUROrchestrator:
         if not self.keep_containers:
             cmd.append("--rm")
         cmd.extend([
+            "--user", self.docker_user,
             "--platform", "linux/amd64",  # Required for Apple Silicon
             "--memory=6g",
             "--memory-reservation=2g",
@@ -499,6 +507,7 @@ class MUROrchestrator:
         if not self.keep_containers:
             cmd.append("--rm")
         cmd.extend([
+            "--user", self.docker_user,
             "--memory=8g",
             "--shm-size=2g",
             "-v", f"{input_dir.resolve()}:/data/input",
@@ -648,6 +657,7 @@ class MUROrchestrator:
         if not self.keep_containers:
             cmd.append("--rm")
         cmd.extend([
+            "--user", self.docker_user,
             "--memory=8g",
             "--memory-swap=8g",
             "--shm-size=2g",
@@ -798,6 +808,7 @@ class MUROrchestrator:
         if not self.keep_containers:
             cmd.append("--rm")
         cmd.extend([
+            "--user", self.docker_user,
             "--name", container_name,       # Named for explicit cleanup
             "--platform", "linux/amd64",    # Ensure compatibility
             "--memory=72g",                 # Observed max ~65GB, 72GB gives headroom
@@ -966,6 +977,110 @@ class MUROrchestrator:
             return False
 
     # ========================================================================
+    # Stage 6: Purge Old L2P Downloads
+    # ========================================================================
+
+    def run_purge(self) -> bool:
+        """
+        Purge old L2P download directories past the rolling window threshold.
+
+        Mirrors production mur_cron/purge/purge.py behavior but reads paths
+        and sensors from the pipeline config instead of hardcoded values.
+
+        Scans each active sensor's download directory for year/DOY subdirectories
+        and removes any where the DOY is older than the threshold (relative to
+        the current year). Logs a summary and detailed report of removals.
+
+        Returns:
+            True if purge completed successfully
+        """
+        purge_config = self.config.get("purge", {})
+        l2p_config = self.config["l2p"]
+
+        threshold_days = purge_config.get("threshold_days", 30)
+        download_dir = pathlib.Path(l2p_config["input_dir"])
+        logs_dir = pathlib.Path(purge_config.get("logs_dir", "testing/preprocessing/logs/purge"))
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        reference_today = self.get_reference_today()
+        current_year = str(reference_today.year)
+        current_doy = reference_today.timetuple().tm_yday
+        threshold = current_doy - threshold_days
+
+        logger.info(f"  Purge: removing L2P DOY dirs older than {threshold_days} days")
+        logger.info(f"    Current DOY: {current_doy}, threshold DOY: {threshold}")
+        logger.info(f"    Download dir: {download_dir}")
+
+        # Set up per-run log file matching production format
+        log_file = logs_dir / f"{reference_today.strftime('%Y%m%d')}_purge_report.log"
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s - %(module)s - %(levelname)s : %(message)s"
+        ))
+        logger.addHandler(file_handler)
+
+        active_sensors = l2p_config.get("active_sensors", [])
+        purge_dict: Dict[str, Dict[str, List[str]]] = {}
+        total_removed = 0
+
+        try:
+            for sensor in active_sensors:
+                sensor_year_dir = download_dir / sensor / current_year
+                purge_dict[sensor] = {}
+
+                if not sensor_year_dir.exists():
+                    logger.info(f"    {sensor}: no directory for {current_year}, skipping")
+                    continue
+
+                try:
+                    doy_dirs = sorted(sensor_year_dir.iterdir())
+                except OSError as e:
+                    logger.error(f"    {sensor}: error scanning {sensor_year_dir}: {e}")
+                    continue
+
+                for doy_path in doy_dirs:
+                    if not doy_path.is_dir():
+                        continue
+                    try:
+                        doy_val = int(doy_path.name)
+                    except ValueError:
+                        continue
+
+                    if doy_val < threshold:
+                        files = [f.name for f in doy_path.iterdir()]
+                        purge_dict[sensor][doy_path.name] = files
+                        shutil.rmtree(doy_path)
+                        total_removed += 1
+
+            # Summary report
+            logger.info("    ======= Summary Removals =======")
+            for sensor, doy_dict in purge_dict.items():
+                if doy_dict:
+                    doys = ",".join(sorted(doy_dict.keys(), key=int))
+                    logger.info(f"    Removed {sensor} DOY: {doys}")
+
+            # Detailed report
+            logger.info("    ======= Detailed Removals =======")
+            for sensor, doy_dict in purge_dict.items():
+                for doy, nc_files in sorted(doy_dict.items(), key=lambda x: int(x[0])):
+                    for nc_file in nc_files:
+                        logger.info(f"    Removed {sensor}/{doy}: {nc_file}")
+
+            logger.info(f"    Purge complete: {total_removed} DOY directories removed")
+            logger.info(f"    Log written to: {log_file}")
+            self.stats["purge"]["success"] += 1
+            return True
+
+        except Exception as e:
+            logger.error(f"    Purge failed: {e}")
+            self.stats["purge"]["failed"] += 1
+            return False
+        finally:
+            logger.removeHandler(file_handler)
+            file_handler.close()
+
+    # ========================================================================
     # Full Pipeline Orchestration
     # ========================================================================
 
@@ -1005,14 +1120,14 @@ class MUROrchestrator:
         # Stage 1: Land/Ice
         if execute_stages is None or "landice" in execute_stages:
             logger.info("")
-            logger.info("▶ STAGE 1/4: Land/Ice Mask Generation")
+            logger.info("▶ STAGE 1/5: Land/Ice Mask Generation")
             logger.info("-" * 80)
             results["landice"] = self.run_landice(process_date, is_nrt)
 
         # Stage 2: iQUAM (moved before L2P for faster feedback)
         if execute_stages is None or "iquam" in execute_stages:
             logger.info("")
-            logger.info("▶ STAGE 2/4: iQUAM Buoy Data Processing")
+            logger.info("▶ STAGE 2/5: iQUAM Buoy Data Processing")
             logger.info("-" * 80)
             results["iquam"] = self.run_iquam(process_date, is_nrt)
 
@@ -1024,7 +1139,7 @@ class MUROrchestrator:
         active_sensors = [s for s in all_sensors if s in sensor_filter] if sensor_filter else all_sensors
         if execute_stages is not None and "l2p-download" in execute_stages:
             logger.info("")
-            logger.info(f"▶ STAGE 3a/4: L2P Download ({len(active_sensors)} sensors)")
+            logger.info(f"▶ STAGE 3a/5: L2P Download ({len(active_sensors)} sensors)")
             logger.info("-" * 80)
             dl_results = []
             for idx, sensor in enumerate(active_sensors, 1):
@@ -1036,7 +1151,7 @@ class MUROrchestrator:
         # Stage 3b: L2P Processing (BIC creation per DOY with stablat rewrite)
         if execute_stages is None or "l2p" in execute_stages:
             logger.info("")
-            logger.info(f"▶ STAGE 3b/4: L2P Processing ({len(active_sensors)} sensors)")
+            logger.info(f"▶ STAGE 3b/5: L2P Processing ({len(active_sensors)} sensors)")
             logger.info("-" * 80)
             l2p_results = []
             for idx, sensor in enumerate(active_sensors, 1):
@@ -1048,9 +1163,16 @@ class MUROrchestrator:
         # Stage 4: MRVA
         if not preprocess_only and (execute_stages is None or "mrva" in execute_stages):
             logger.info("")
-            logger.info("▶ STAGE 4/4: MRVA Analysis")
+            logger.info("▶ STAGE 4/5: MRVA Analysis")
             logger.info("-" * 80)
             results["mrva"] = self.run_mrva(process_date, is_nrt)
+
+        # Stage 5: Purge old L2P downloads (only when explicitly requested)
+        if execute_stages is not None and "purge" in execute_stages:
+            logger.info("")
+            logger.info("▶ STAGE 5/5: Purge Old L2P Downloads")
+            logger.info("-" * 80)
+            results["purge"] = self.run_purge()
 
         # Summary
         logger.info("-" * 80)
@@ -1151,6 +1273,9 @@ Examples:
 
   # Execute only specific stages
   uv run run_mur_pipeline.py --config config.json --execute iquam,l2p
+
+  # Run only the purge cleanup stage
+  uv run run_mur_pipeline.py --config config.json --execute purge
         """
     )
 
@@ -1209,9 +1334,10 @@ Examples:
         default=[],
         help="Execute only specific stages (can be specified multiple times or "
              "comma-separated). Available stages: landice, l2p-download, l2p, "
-             "iquam, mrva. 'l2p-download' downloads L2P data (must be explicitly "
-             "requested, not included in default run). 'l2p' creates BIC files "
-             "from already-downloaded data. "
+             "iquam, mrva, purge. 'l2p-download' downloads L2P data (must be "
+             "explicitly requested, not included in default run). 'l2p' creates "
+             "BIC files from already-downloaded data. 'purge' removes old L2P "
+             "download directories past the rolling window threshold. "
              "Example: --execute l2p-download OR --execute iquam,landice"
     )
 
@@ -1257,7 +1383,7 @@ def parse_execute_stages(execute_args: List[str]) -> Optional[List[str]]:
         return None
 
     stages = []
-    valid_stages = {"landice", "l2p", "l2p-download", "iquam", "mrva"}
+    valid_stages = {"landice", "l2p", "l2p-download", "iquam", "mrva", "purge"}
 
     for arg in execute_args:
         # Support comma-separated values

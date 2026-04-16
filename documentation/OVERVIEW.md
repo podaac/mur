@@ -126,6 +126,7 @@ See [SENSOR_ADAPTATION.md](SENSOR_ADAPTATION.md) for adding new sensors.
 - Temporal window calculation
 - Component sequencing
 - Container execution management
+- L2P download purge (on-demand cleanup of old DOY directories)
 
 **Status:** Currently handles preprocessing; MRVA integration pending
 
