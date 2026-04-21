@@ -86,13 +86,17 @@ ENV MCR_INHIBIT_CTF_LOCK=1
 ENV MATLAB_LOG_DIR=/data/logs
 ENV MATLAB_PREFDIR=/tmp/.matlab
 ENV TMP_DIR=/tmp/l2p_tmp
+# HOME must point at a writable path so the MATLAB Runtime CTF extractor works
+# when the container is run with an arbitrary --user <uid> that isn't present in
+# /etc/passwd (getpwuid() returns NULL → default HOME of `/` is not writable).
+ENV HOME=/tmp
 
-# Create data directories with proper structure
-# Note: Container does not hardcode paths - they are passed as arguments
+# Create data/scratch directories (MATLAB_PREFDIR is pre-created so permissions can be set below)
 RUN mkdir -p /data/input \
              /data/output \
              /data/logs \
-             /tmp/l2p_tmp
+             /tmp/l2p_tmp \
+             /tmp/.matlab
 
 # Set working directory
 WORKDIR /data
@@ -122,6 +126,15 @@ RUN echo '#!/bin/bash' > /opt/l2p/bin/entrypoint.sh && \
     echo '# Call MATLAB executable with fixed paths inserted' >> /opt/l2p/bin/entrypoint.sh && \
     echo 'exec /opt/l2p/bin/run_L2pProcessor.sh "/opt/matlabruntime/R2024b" "$1" "$2" "$INDIR" "$OUTDIR" "$3" "$4" "$5"' >> /opt/l2p/bin/entrypoint.sh && \
     chmod +x /opt/l2p/bin/entrypoint.sh
+
+# Rootless / arbitrary-UID support (OpenShift pattern):
+# Assign group 0 (root group) and grant group perms equal to owner perms on all
+# paths the app may write to. Any UID added to group 0 at runtime (via
+# `docker run --group-add 0`) can then read/write these paths.
+# setgid on directories so new files/dirs inherit group 0.
+RUN chgrp -R 0 /data /tmp/.matlab /tmp/l2p_tmp && \
+    chmod -R g=u /data /tmp/.matlab /tmp/l2p_tmp && \
+    find /data /tmp/.matlab /tmp/l2p_tmp -type d -exec chmod g+s {} +
 
 # Set entrypoint
 ENTRYPOINT ["/opt/l2p/bin/entrypoint.sh"]

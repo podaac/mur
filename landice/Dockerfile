@@ -82,14 +82,18 @@ ENV MCR_INHIBIT_CTF_LOCK=1
 ENV MATLAB_LOG_DIR=/data/logs
 ENV MATLAB_PREFDIR=/tmp/.matlab
 ENV TMP_DIR=/tmp/landice_tmp
+# HOME must point at a writable path so the MATLAB Runtime CTF extractor works
+# when the container is run with an arbitrary --user <uid> that isn't present in
+# /etc/passwd (getpwuid() returns NULL → default HOME of `/` is not writable).
+ENV HOME=/tmp
 
 # Environment variables for OSI SAF FTP paths (to be overridden at runtime)
 ENV OSISAF_FTP_REPROCESSED=""
 ENV OSISAF_FTP_ARCHIVE=""
 ENV OSISAF_FTP_PROD=""
 
-# Create data directories
-RUN mkdir -p /data/input /data/output/p011 /data/output/p01 /data/logs /tmp/landice_tmp
+# Create data/scratch directories (MATLAB_PREFDIR is pre-created so permissions can be set below)
+RUN mkdir -p /data/input /data/output/p011 /data/output/p01 /data/logs /tmp/landice_tmp /tmp/.matlab
 
 # Set working directory
 WORKDIR /data
@@ -122,6 +126,15 @@ RUN echo '#!/bin/bash' > /opt/landice/bin/entrypoint.sh && \
     echo '# landice_wrapper expects: input_dir output_dir_p011 output_dir_p01 year doy' >> /opt/landice/bin/entrypoint.sh && \
     echo 'exec /opt/landice/bin/run_LandiceProcessor.sh "/opt/matlabruntime/R2024b" "$INDIR" "$OUTDIR_P011" "$OUTDIR_P01" "$1" "$2"' >> /opt/landice/bin/entrypoint.sh && \
     chmod +x /opt/landice/bin/entrypoint.sh
+
+# Rootless / arbitrary-UID support (OpenShift pattern):
+# Assign group 0 (root group) and grant group perms equal to owner perms on all
+# paths the app may write to. Any UID added to group 0 at runtime (via
+# `docker run --group-add 0`) can then read/write these paths.
+# setgid on directories so new files/dirs inherit group 0.
+RUN chgrp -R 0 /data /tmp/.matlab /tmp/landice_tmp && \
+    chmod -R g=u /data /tmp/.matlab /tmp/landice_tmp && \
+    find /data /tmp/.matlab /tmp/landice_tmp -type d -exec chmod g+s {} +
 
 # Set entrypoint
 ENTRYPOINT ["/opt/landice/bin/entrypoint.sh"]

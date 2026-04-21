@@ -141,7 +141,8 @@ class MUROrchestrator:
         netrc_path: Optional[pathlib.Path] = None,
         force_nrt: bool = False,
         keep_containers: bool = False,
-        force_date_range: bool = False
+        force_date_range: bool = False,
+        deep_purge: bool = False
     ):
         """Initialize orchestrator with configuration.
 
@@ -154,6 +155,9 @@ class MUROrchestrator:
                 of incremental mode. Saves/restores .update state so incremental
                 state isn't corrupted. Used when --date is specified for
                 testing/backfill.
+            deep_purge: If True, the purge stage uses SCAN_LATENCY (9) days as
+                its threshold and scans every year subdirectory under each
+                sensor's download root, not just the current year.
 
         Note:
             By default, mode (NRT vs REA) is automatically determined based on
@@ -172,10 +176,21 @@ class MUROrchestrator:
         self.force_nrt = force_nrt
         self.keep_containers = keep_containers
         self.force_date_range = force_date_range
+        self.deep_purge = deep_purge
 
         # Resolve host UID:GID so containers write files with the calling
         # user's ownership (passed as --user to every docker run).
         self.docker_user = f"{os.getuid()}:{os.getgid()}"
+
+        # Supplementary group passed to every MATLAB container via --group-add.
+        # The Dockerfiles follow the OpenShift "arbitrary-UID" pattern: writable
+        # paths (MATLAB cache, scratch, logs) are chgrp'd to root (0) with group
+        # perms equal to owner. Adding group 0 to the container process lets the
+        # arbitrary host UID read/write those paths even though it isn't in
+        # /etc/passwd inside the image. Output files on bind-mounted host dirs
+        # still land as self.docker_user because Linux uses the process's
+        # primary GID for new files.
+        self.docker_extra_groups = ["--group-add", "0"]
 
         # Track processing stats
         self.stats = {
@@ -299,6 +314,7 @@ class MUROrchestrator:
             cmd.append("--rm")
         cmd.extend([
             "--user", self.docker_user,
+            *self.docker_extra_groups,
             "--platform", "linux/amd64",  # Required for Apple Silicon
             "--memory=6g",
             "--memory-reservation=2g",
@@ -508,6 +524,7 @@ class MUROrchestrator:
             cmd.append("--rm")
         cmd.extend([
             "--user", self.docker_user,
+            *self.docker_extra_groups,
             "--memory=8g",
             "--shm-size=2g",
             "-v", f"{input_dir.resolve()}:/data/input",
@@ -658,6 +675,7 @@ class MUROrchestrator:
             cmd.append("--rm")
         cmd.extend([
             "--user", self.docker_user,
+            *self.docker_extra_groups,
             "--memory=8g",
             "--memory-swap=8g",
             "--shm-size=2g",
@@ -809,6 +827,7 @@ class MUROrchestrator:
             cmd.append("--rm")
         cmd.extend([
             "--user", self.docker_user,
+            *self.docker_extra_groups,
             "--name", container_name,       # Named for explicit cleanup
             "--platform", "linux/amd64",    # Ensure compatibility
             "--memory=72g",                 # Observed max ~65GB, 72GB gives headroom
@@ -987,9 +1006,15 @@ class MUROrchestrator:
         Mirrors production mur_cron/purge/purge.py behavior but reads paths
         and sensors from the pipeline config instead of hardcoded values.
 
-        Scans each active sensor's download directory for year/DOY subdirectories
-        and removes any where the DOY is older than the threshold (relative to
-        the current year). Logs a summary and detailed report of removals.
+        Standard mode (default): scans the current-year directory for each
+        active sensor and removes DOY subdirectories older than
+        `purge.threshold_days` (default 30).
+
+        Deep mode (`self.deep_purge=True`): uses SCAN_LATENCY (9) days as the
+        cutoff and scans every year subdirectory under each sensor, so
+        directories from prior years are also removed. Used when the caller
+        wants to trim the download area down to just the active REA+NRT
+        processing window.
 
         Returns:
             True if purge completed successfully
@@ -997,22 +1022,26 @@ class MUROrchestrator:
         purge_config = self.config.get("purge", {})
         l2p_config = self.config["l2p"]
 
-        threshold_days = purge_config.get("threshold_days", 30)
+        if self.deep_purge:
+            threshold_days = self.SCAN_LATENCY
+        else:
+            threshold_days = purge_config.get("threshold_days", 30)
         download_dir = pathlib.Path(l2p_config["input_dir"])
         logs_dir = pathlib.Path(purge_config.get("logs_dir", "testing/preprocessing/logs/purge"))
         logs_dir.mkdir(parents=True, exist_ok=True)
 
         reference_today = self.get_reference_today()
-        current_year = str(reference_today.year)
-        current_doy = reference_today.timetuple().tm_yday
-        threshold = current_doy - threshold_days
+        cutoff_date = reference_today - datetime.timedelta(days=threshold_days)
+        current_year = reference_today.year
 
-        logger.info(f"  Purge: removing L2P DOY dirs older than {threshold_days} days")
-        logger.info(f"    Current DOY: {current_doy}, threshold DOY: {threshold}")
+        mode_label = "DEEP PURGE (all years)" if self.deep_purge else "purge (current year)"
+        logger.info(f"  {mode_label}: removing L2P DOY dirs older than {threshold_days} days")
+        logger.info(f"    Cutoff date: {cutoff_date} (anything strictly before is removed)")
         logger.info(f"    Download dir: {download_dir}")
 
         # Set up per-run log file matching production format
-        log_file = logs_dir / f"{reference_today.strftime('%Y%m%d')}_purge_report.log"
+        log_name_prefix = "deep_purge" if self.deep_purge else "purge"
+        log_file = logs_dir / f"{reference_today.strftime('%Y%m%d')}_{log_name_prefix}_report.log"
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(logging.Formatter(
@@ -1026,44 +1055,91 @@ class MUROrchestrator:
 
         try:
             for sensor in active_sensors:
-                sensor_year_dir = download_dir / sensor / current_year
+                sensor_dir = download_dir / sensor
                 purge_dict[sensor] = {}
 
-                if not sensor_year_dir.exists():
-                    logger.info(f"    {sensor}: no directory for {current_year}, skipping")
+                if not sensor_dir.exists():
+                    logger.info(f"    {sensor}: no sensor directory, skipping")
                     continue
 
-                try:
-                    doy_dirs = sorted(sensor_year_dir.iterdir())
-                except OSError as e:
-                    logger.error(f"    {sensor}: error scanning {sensor_year_dir}: {e}")
-                    continue
-
-                for doy_path in doy_dirs:
-                    if not doy_path.is_dir():
-                        continue
+                # Collect year dirs to scan: deep mode covers all; standard
+                # mode stays limited to the current year to match production.
+                if self.deep_purge:
                     try:
-                        doy_val = int(doy_path.name)
+                        year_dirs = sorted(
+                            d for d in sensor_dir.iterdir()
+                            if d.is_dir() and d.name.isdigit()
+                        )
+                    except OSError as e:
+                        logger.error(f"    {sensor}: error scanning {sensor_dir}: {e}")
+                        continue
+                else:
+                    current_year_dir = sensor_dir / str(current_year)
+                    if not current_year_dir.exists():
+                        logger.info(f"    {sensor}: no directory for {current_year}, skipping")
+                        continue
+                    year_dirs = [current_year_dir]
+
+                for year_dir in year_dirs:
+                    try:
+                        year_val = int(year_dir.name)
                     except ValueError:
                         continue
 
-                    if doy_val < threshold:
-                        files = [f.name for f in doy_path.iterdir()]
-                        purge_dict[sensor][doy_path.name] = files
-                        shutil.rmtree(doy_path)
-                        total_removed += 1
+                    try:
+                        doy_dirs = sorted(year_dir.iterdir())
+                    except OSError as e:
+                        logger.error(f"    {sensor}: error scanning {year_dir}: {e}")
+                        continue
+
+                    for doy_path in doy_dirs:
+                        if not doy_path.is_dir():
+                            continue
+                        try:
+                            doy_val = int(doy_path.name)
+                            dir_date = (
+                                datetime.date(year_val, 1, 1)
+                                + datetime.timedelta(days=doy_val - 1)
+                            )
+                        except ValueError:
+                            continue
+
+                        if dir_date < cutoff_date:
+                            files = [f.name for f in doy_path.iterdir()]
+                            label = (
+                                f"{year_val}/{doy_path.name}"
+                                if self.deep_purge else doy_path.name
+                            )
+                            purge_dict[sensor][label] = files
+                            shutil.rmtree(doy_path)
+                            total_removed += 1
+
+                    # In deep mode, drop the year dir itself if it is now empty
+                    if self.deep_purge:
+                        try:
+                            if not any(year_dir.iterdir()):
+                                year_dir.rmdir()
+                        except OSError:
+                            pass
+
+            # Sort key handles both "DOY" (standard) and "YEAR/DOY" (deep)
+            def _label_sort_key(label: str) -> Tuple[int, int]:
+                if "/" in label:
+                    y, d = label.split("/", 1)
+                    return (int(y), int(d))
+                return (0, int(label))
 
             # Summary report
             logger.info("    ======= Summary Removals =======")
             for sensor, doy_dict in purge_dict.items():
                 if doy_dict:
-                    doys = ",".join(sorted(doy_dict.keys(), key=int))
+                    doys = ",".join(sorted(doy_dict.keys(), key=_label_sort_key))
                     logger.info(f"    Removed {sensor} DOY: {doys}")
 
             # Detailed report
             logger.info("    ======= Detailed Removals =======")
             for sensor, doy_dict in purge_dict.items():
-                for doy, nc_files in sorted(doy_dict.items(), key=lambda x: int(x[0])):
+                for doy, nc_files in sorted(doy_dict.items(), key=lambda x: _label_sort_key(x[0])):
                     for nc_file in nc_files:
                         logger.info(f"    Removed {sensor}/{doy}: {nc_file}")
 
@@ -1276,6 +1352,10 @@ Examples:
 
   # Run only the purge cleanup stage
   uv run run_mur_pipeline.py --config config.json --execute purge
+
+  # Deep purge: trim L2P downloads to only the active 9-day processing window
+  # (also spans prior-year directories). Implies --execute purge.
+  uv run run_mur_pipeline.py --config config.json --deep-purge
         """
     )
 
@@ -1364,6 +1444,17 @@ Examples:
              "restoring the .update state. Useful for testing/backfill. "
              "Default (without this flag) uses production-style incremental "
              "downloads via the subscriber's .update state file."
+    )
+
+    parser.add_argument(
+        "--deep-purge",
+        action="store_true",
+        help="Run the purge stage in deep mode: use SCAN_LATENCY (9) days as "
+             "the cutoff and sweep every year subdirectory under each sensor's "
+             "download root (not just the current year). Implies "
+             "'--execute purge' when no --execute flag is supplied. Intended "
+             "for trimming the L2P download area down to just the active "
+             "REA+NRT processing window."
     )
 
     parser.add_argument(
@@ -1500,6 +1591,16 @@ def main():
     # Parse execute stages
     execute_stages = parse_execute_stages(args.execute)
 
+    # --deep-purge implies the purge stage. If the user didn't pass --execute
+    # at all, narrow to purge-only so we don't accidentally run the whole
+    # pipeline. If they did pass --execute, leave the list untouched but
+    # ensure "purge" is present.
+    if args.deep_purge:
+        if execute_stages is None:
+            execute_stages = ["purge"]
+        elif "purge" not in execute_stages:
+            execute_stages.append("purge")
+
     # Set simulated "today" from --date flag via environment variable.
     # This affects all date calculations throughout the pipeline, including
     # any child processes and containers that use mur_date.today().
@@ -1516,7 +1617,8 @@ def main():
             netrc_path=args.netrc_path,
             force_nrt=args.force_nrt,
             keep_containers=args.keep_containers,
-            force_date_range=args.force_date_download
+            force_date_range=args.force_date_download,
+            deep_purge=args.deep_purge
         )
     except Exception as e:
         logger.error(f"Failed to initialize: {e}")
