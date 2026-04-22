@@ -99,9 +99,9 @@ RUN echo '#!/bin/bash' > /opt/iquam/bin/entrypoint.sh && \
 # paths the app may write to. Any UID added to group 0 at runtime (via
 # `docker run --group-add 0`) can then read/write these paths.
 # setgid on directories so new files/dirs inherit group 0.
-RUN chgrp -R 0 /data /tmp/.matlab /tmp/makebic && \
-    chmod -R g=u /data /tmp/.matlab /tmp/makebic && \
-    find /data /tmp/.matlab /tmp/makebic -type d -exec chmod g+s {} +
+RUN chgrp -R 0 /data /opt/iquam /tmp/.matlab /tmp/makebic && \
+    chmod -R g=u /data /opt/iquam /tmp/.matlab /tmp/makebic && \
+    find /data /opt/iquam /tmp/.matlab /tmp/makebic -type d -exec chmod g+s {} +
 
 # Set entrypoint
 ENTRYPOINT ["/opt/iquam/bin/entrypoint.sh"]

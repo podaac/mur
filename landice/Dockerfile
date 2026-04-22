@@ -132,9 +132,9 @@ RUN echo '#!/bin/bash' > /opt/landice/bin/entrypoint.sh && \
 # paths the app may write to. Any UID added to group 0 at runtime (via
 # `docker run --group-add 0`) can then read/write these paths.
 # setgid on directories so new files/dirs inherit group 0.
-RUN chgrp -R 0 /data /tmp/.matlab /tmp/landice_tmp && \
-    chmod -R g=u /data /tmp/.matlab /tmp/landice_tmp && \
-    find /data /tmp/.matlab /tmp/landice_tmp -type d -exec chmod g+s {} +
+RUN chgrp -R 0 /data /opt/landice /tmp/.matlab /tmp/landice_tmp && \
+    chmod -R g=u /data /opt/landice /tmp/.matlab /tmp/landice_tmp && \
+    find /data /opt/landice /tmp/.matlab /tmp/landice_tmp -type d -exec chmod g+s {} +
 
 # Set entrypoint
 ENTRYPOINT ["/opt/landice/bin/entrypoint.sh"]
