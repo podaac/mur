@@ -91,12 +91,13 @@ ENV TMP_DIR=/tmp/l2p_tmp
 # /etc/passwd (getpwuid() returns NULL → default HOME of `/` is not writable).
 ENV HOME=/tmp
 
-# Create data/scratch directories (MATLAB_PREFDIR is pre-created so permissions can be set below)
+# Create data directories. Scratch dirs under /tmp (/tmp/l2p_tmp, /tmp/.matlab,
+# MCR cache) are NOT pre-created: the sticky bit on /tmp would otherwise block
+# the runtime UID from rmdir'ing a root-owned dir. Letting the app create them
+# at runtime means they're owned by the runtime UID.
 RUN mkdir -p /data/input \
              /data/output \
-             /data/logs \
-             /tmp/l2p_tmp \
-             /tmp/.matlab
+             /data/logs
 
 # Set working directory
 WORKDIR /data
@@ -132,9 +133,9 @@ RUN echo '#!/bin/bash' > /opt/l2p/bin/entrypoint.sh && \
 # paths the app may write to. Any UID added to group 0 at runtime (via
 # `docker run --group-add 0`) can then read/write these paths.
 # setgid on directories so new files/dirs inherit group 0.
-RUN chgrp -R 0 /data /opt/l2p /tmp/.matlab /tmp/l2p_tmp && \
-    chmod -R g=u /data /opt/l2p /tmp/.matlab /tmp/l2p_tmp && \
-    find /data /opt/l2p /tmp/.matlab /tmp/l2p_tmp -type d -exec chmod g+s {} +
+RUN chgrp -R 0 /data /opt/l2p && \
+    chmod -R g=u /data /opt/l2p && \
+    find /data /opt/l2p -type d -exec chmod g+s {} +
 
 # Set entrypoint
 ENTRYPOINT ["/opt/l2p/bin/entrypoint.sh"]

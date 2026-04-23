@@ -82,8 +82,12 @@ ENV MATLAB_PREFDIR=/tmp/.matlab
 # /etc/passwd (getpwuid() returns NULL → default HOME of `/` is not writable).
 ENV HOME=/tmp
 
-# Create data/scratch directories (MATLAB_PREFDIR is pre-created so permissions can be set below)
-RUN mkdir -p /data/output/iquam /data/cache/iquam /data/logs /tmp/makebic /tmp/.matlab
+# Create data directories. Scratch dirs under /tmp (/tmp/makebic, /tmp/.matlab,
+# MCR cache) are NOT pre-created: the sticky bit on /tmp would otherwise block
+# the runtime UID from rmdir'ing a root-owned dir from a prior layer. Letting
+# the app create them at runtime means they're owned by the runtime UID and can
+# be cleaned up by that same UID on subsequent runs.
+RUN mkdir -p /data/output/iquam /data/cache/iquam /data/logs
 
 # Set working directory
 WORKDIR /data
@@ -99,9 +103,9 @@ RUN echo '#!/bin/bash' > /opt/iquam/bin/entrypoint.sh && \
 # paths the app may write to. Any UID added to group 0 at runtime (via
 # `docker run --group-add 0`) can then read/write these paths.
 # setgid on directories so new files/dirs inherit group 0.
-RUN chgrp -R 0 /data /opt/iquam /tmp/.matlab /tmp/makebic && \
-    chmod -R g=u /data /opt/iquam /tmp/.matlab /tmp/makebic && \
-    find /data /opt/iquam /tmp/.matlab /tmp/makebic -type d -exec chmod g+s {} +
+RUN chgrp -R 0 /data /opt/iquam && \
+    chmod -R g=u /data /opt/iquam && \
+    find /data /opt/iquam -type d -exec chmod g+s {} +
 
 # Set entrypoint
 ENTRYPOINT ["/opt/iquam/bin/entrypoint.sh"]

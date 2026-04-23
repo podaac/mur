@@ -230,16 +230,17 @@ ENV HOME=/tmp
 # Use KMP_STACKSIZE (Intel OpenMP runtime uses this; OMP_STACKSIZE would be ignored)
 ENV KMP_STACKSIZE=128M
 
-# Create data/scratch directories (MATLAB_PREFDIR is pre-created so permissions can be set below)
+# Create data directories. Scratch dirs under /tmp (/tmp/mrva_tmp, /tmp/.matlab,
+# MCR cache) are NOT pre-created: the sticky bit on /tmp would otherwise block
+# the runtime UID from rmdir'ing a root-owned dir. Letting the app create them
+# at runtime means they're owned by the runtime UID.
 RUN mkdir -p /data/input/bic \
              /data/input/iquam \
              /data/input/landice \
              /data/output/csp \
              /data/output/netcdf \
              /data/cache \
-             /data/logs \
-             /tmp/mrva_tmp \
-             /tmp/.matlab
+             /data/logs
 
 # Set working directory
 WORKDIR /data
@@ -399,9 +400,9 @@ EOF
 # paths the app may write to. Any UID added to group 0 at runtime (via
 # `docker run --group-add 0`) can then read/write these paths.
 # setgid on directories so new files/dirs inherit group 0.
-RUN chgrp -R 0 /data /opt/mrva /tmp/.matlab /tmp/mrva_tmp && \
-    chmod -R g=u /data /opt/mrva /tmp/.matlab /tmp/mrva_tmp && \
-    find /data /opt/mrva /tmp/.matlab /tmp/mrva_tmp -type d -exec chmod g+s {} +
+RUN chgrp -R 0 /data /opt/mrva && \
+    chmod -R g=u /data /opt/mrva && \
+    find /data /opt/mrva -type d -exec chmod g+s {} +
 
 # Set entrypoint
 ENTRYPOINT ["/opt/mrva/bin/entrypoint.sh"]
