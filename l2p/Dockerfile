@@ -124,6 +124,11 @@ RUN echo '#!/bin/bash' > /opt/l2p/bin/entrypoint.sh && \
     echo 'INDIR="/data/input"' >> /opt/l2p/bin/entrypoint.sh && \
     echo 'OUTDIR="/data/output"' >> /opt/l2p/bin/entrypoint.sh && \
     echo '' >> /opt/l2p/bin/entrypoint.sh && \
+    echo '# Ensure scratch dirs exist and are owned by the runtime UID.' >> /opt/l2p/bin/entrypoint.sh && \
+    echo '# These are not pre-created in the image so the sticky bit on /tmp' >> /opt/l2p/bin/entrypoint.sh && \
+    echo '# does not block the arbitrary runtime UID from managing them.' >> /opt/l2p/bin/entrypoint.sh && \
+    echo 'mkdir -p "${TMP_DIR:-/tmp/l2p_tmp}" "${MATLAB_PREFDIR:-/tmp/.matlab}" "${MCR_CACHE_ROOT:-/tmp}"' >> /opt/l2p/bin/entrypoint.sh && \
+    echo '' >> /opt/l2p/bin/entrypoint.sh && \
     echo '# Call MATLAB executable with fixed paths inserted' >> /opt/l2p/bin/entrypoint.sh && \
     echo 'exec /opt/l2p/bin/run_L2pProcessor.sh "/opt/matlabruntime/R2024b" "$1" "$2" "$INDIR" "$OUTDIR" "$3" "$4" "$5"' >> /opt/l2p/bin/entrypoint.sh && \
     chmod +x /opt/l2p/bin/entrypoint.sh

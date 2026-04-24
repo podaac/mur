@@ -83,6 +83,9 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
     % read L2P file:
     [head, body, tail] = fileparts( file );
     tmp_dir = getenv("TMP_DIR");
+    if length(tmp_dir) && ~exist(tmp_dir, 'dir'),
+      mkdir(tmp_dir);
+    end;
     tmpncfile=[tmp_dir,'/',body,'.nc'];
     if length(uncompresscmd),
       eval(sprintf('! %s %s > %s',uncompresscmd,file,tmpncfile));

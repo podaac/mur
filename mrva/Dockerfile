@@ -254,6 +254,14 @@ RUN cat > /opt/mrva/bin/entrypoint.sh <<'EOF' && chmod +x /opt/mrva/bin/entrypoi
 set -e
 
 # ========================================================================
+# Scratch Directories
+# ========================================================================
+# Ensure scratch dirs exist and are owned by the runtime UID. These are not
+# pre-created in the image so the sticky bit on /tmp does not block the
+# arbitrary runtime UID from managing them on subsequent runs.
+mkdir -p "${TMP_DIR:-/tmp/mrva_tmp}" "${MATLAB_PREFDIR:-/tmp/.matlab}" "${MCR_CACHE_ROOT:-/tmp}"
+
+# ========================================================================
 # Stack Size Configuration
 # ========================================================================
 # The Fortran PCG solver uses large local arrays that can exceed default stack

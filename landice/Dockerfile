@@ -125,6 +125,9 @@ RUN echo '#!/bin/bash' > /opt/landice/bin/entrypoint.sh && \
     echo 'OUTDIR_P011="/output/p011"' >> /opt/landice/bin/entrypoint.sh && \
     echo 'OUTDIR_P01="/output/p01"' >> /opt/landice/bin/entrypoint.sh && \
     echo '' >> /opt/landice/bin/entrypoint.sh && \
+    echo '# Ensure scratch dirs exist and are owned by the runtime UID.' >> /opt/landice/bin/entrypoint.sh && \
+    echo 'mkdir -p "${TMP_DIR:-/tmp/landice_tmp}" "${MATLAB_PREFDIR:-/tmp/.matlab}" "${MCR_CACHE_ROOT:-/tmp}"' >> /opt/landice/bin/entrypoint.sh && \
+    echo '' >> /opt/landice/bin/entrypoint.sh && \
     echo '# Call MATLAB executable with fixed paths inserted' >> /opt/landice/bin/entrypoint.sh && \
     echo '# landice_wrapper expects: input_dir output_dir_p011 output_dir_p01 year doy' >> /opt/landice/bin/entrypoint.sh && \
     echo 'exec /opt/landice/bin/run_LandiceProcessor.sh "/opt/matlabruntime/R2024b" "$INDIR" "$OUTDIR_P011" "$OUTDIR_P01" "$1" "$2"' >> /opt/landice/bin/entrypoint.sh && \
