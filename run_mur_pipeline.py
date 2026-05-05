@@ -142,7 +142,9 @@ class MUROrchestrator:
         force_nrt: bool = False,
         keep_containers: bool = False,
         force_date_range: bool = False,
-        deep_purge: bool = False
+        deep_purge: bool = False,
+        collection_filter: Optional[str] = None,
+        deep_sync_days: int = 0
     ):
         """Initialize orchestrator with configuration.
 
@@ -177,6 +179,8 @@ class MUROrchestrator:
         self.keep_containers = keep_containers
         self.force_date_range = force_date_range
         self.deep_purge = deep_purge
+        self.collection_filter = collection_filter
+        self.deep_sync_days = deep_sync_days
 
         # Resolve host UID:GID so containers write files with the calling
         # user's ownership (passed as --user to every docker run).
@@ -371,6 +375,9 @@ class MUROrchestrator:
         start_date = sensor_config.get("start_date", "2022-07-07T00:00:00Z")
 
         for collection in sensor_config["collection_name"]:
+            if self.collection_filter and collection != self.collection_filter:
+                logger.info(f"    → Skipping {sensor} ({collection}) — does not match --collection {self.collection_filter}")
+                continue
             logger.info(f"    → Downloading {sensor} ({collection}) incremental since {start_date}")
 
             try:
@@ -429,6 +436,9 @@ class MUROrchestrator:
 
         try:
             for collection in sensor_config["collection_name"]:
+                if self.collection_filter and collection != self.collection_filter:
+                    logger.info(f"    → Skipping {sensor} ({collection}) — does not match --collection {self.collection_filter}")
+                    continue
                 logger.info(f"    → Downloading {sensor} ({collection}) for {start_date} to {end_date}")
 
                 try:
@@ -558,6 +568,15 @@ class MUROrchestrator:
         sensor_config = config["sensors"][sensor]
         dayrange = sensor_config.get("day_range", [2, 2])
         reference_today = self.get_reference_today()
+
+        # Deep-sync mode: re-query a fixed window ending today, ignoring (and
+        # preserving) the .update watermark. Recovers granules that the
+        # incremental subscriber orphaned by advancing .update past a granule
+        # whose download was missed or whose CMR revision-date was returned
+        # out of order.
+        if self.deep_sync_days > 0:
+            earliest = reference_today - datetime.timedelta(days=self.deep_sync_days)
+            return self.run_l2p_download_daterange(sensor, earliest, reference_today)
 
         # Determine if we should use date-range mode (testing/backfill)
         # or incremental mode (production-style)
@@ -1465,6 +1484,27 @@ Examples:
              "Example: --sensors AMSR2R or --sensors AMSR2R,MODISA"
     )
 
+    parser.add_argument(
+        "--collection",
+        type=str,
+        help="When --sensors specifies a single sensor with multiple collections "
+             "(currently AMSR2R, which has both -L2P-v8.2 and -L2P_RT-v8.2), "
+             "filter the download to one collection name. Mirrors production's "
+             "separate amsr2r.sh / amsr2r_rt.sh cron entries. "
+             "Example: --sensors AMSR2R --collection AMSR2-REMSS-L2P_RT-v8.2"
+    )
+
+    parser.add_argument(
+        "--deep-sync-days",
+        type=int,
+        default=0,
+        help="When > 0, the l2p-download stage re-queries the trailing N-day "
+             "window via -sd/-ed instead of using the .update watermark, then "
+             "restores .update so the normal incremental cron is unaffected. "
+             "Use to recover granules orphaned by .update watermark drift. "
+             "Recommended value: 9 (matches the MRVA processing window)."
+    )
+
     return parser.parse_args()
 
 
@@ -1618,7 +1658,9 @@ def main():
             force_nrt=args.force_nrt,
             keep_containers=args.keep_containers,
             force_date_range=args.force_date_download,
-            deep_purge=args.deep_purge
+            deep_purge=args.deep_purge,
+            collection_filter=args.collection,
+            deep_sync_days=args.deep_sync_days
         )
     except Exception as e:
         logger.error(f"Failed to initialize: {e}")

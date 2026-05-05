@@ -3,7 +3,7 @@ set -euo pipefail
 
 export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH"
 
-LOGDIR="/data3/jleach/testing/logs"
+LOGDIR="${MUR_LOG_DIR:-/data1/jleach/testing/logs}"
 mkdir -p "$LOGDIR"
 DATE=$(date +%Y%m%d)
 LOGFILE="${LOGDIR}/mrva_${DATE}.log"
