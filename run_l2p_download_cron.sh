@@ -49,12 +49,13 @@ LOGFILE="${LOGDIR}/l2p_download_${SENSOR_ARG}_${DATE}.log"
 
 cd ~/containerized-mur
 source .venv/bin/activate
+source ./cron_env.sh
 
 echo "======================================== " >> "$LOGFILE"
 echo "L2P Download ${SENSOR_ARG}: $(date)" >> "$LOGFILE"
 echo "========================================" >> "$LOGFILE"
 
-CMD=(mur-pipeline --config config.prod.json --execute l2p-download --sensors "$SENSOR")
+CMD=(mur-pipeline --config "$MUR_CONFIG" --execute l2p-download --sensors "$SENSOR")
 if [ -n "$COLLECTION" ]; then
     CMD+=(--collection "$COLLECTION")
 fi

@@ -32,12 +32,13 @@ LOGFILE="${LOGDIR}/l2p_deepsync_${DATE}.log"
 
 cd ~/containerized-mur
 source .venv/bin/activate
+source ./cron_env.sh
 
 echo "========================================" >> "$LOGFILE"
 echo "L2P Deep Sync (last ${DAYS} days): $(date)" >> "$LOGFILE"
 echo "========================================" >> "$LOGFILE"
 
-if mur-pipeline --config config.prod.json --execute l2p-download --deep-sync-days "$DAYS" >> "$LOGFILE" 2>&1; then
+if mur-pipeline --config "$MUR_CONFIG" --execute l2p-download --deep-sync-days "$DAYS" >> "$LOGFILE" 2>&1; then
     echo "SUCCESS: $(date)" >> "$LOGFILE"
 else
     echo "FAILED (exit code: $?): $(date)" >> "$LOGFILE"

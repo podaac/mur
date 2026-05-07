@@ -1567,6 +1567,52 @@ def parse_process_days(process_days_arg: str) -> List[int]:
             sys.exit(1)
 
 
+def validate_pipeline_paths(config: Dict) -> None:
+    """Verify producer/consumer path pairs match across pipeline stages.
+
+    Each preprocessing stage writes to a directory that MRVA later reads
+    from via its own config key. If the two diverge (e.g. one points at a
+    different disk), MRVA silently sees an empty input dir and downstream
+    failures look like missing data rather than a config error.
+
+    Compares resolved absolute paths so relative vs. absolute spellings of
+    the same location still match.
+    """
+    pairs = [
+        ("landice.output_dir_p011", ("landice", "output_dir_p011"),
+         "mrva.input_dir_landice_p011", ("mrva", "input_dir_landice_p011")),
+        ("landice.output_dir_p01", ("landice", "output_dir_p01"),
+         "mrva.input_dir_landice_p01", ("mrva", "input_dir_landice_p01")),
+        ("l2p.output_dir", ("l2p", "output_dir"),
+         "mrva.input_dir_bic", ("mrva", "input_dir_bic")),
+        ("iquam.output_dir", ("iquam", "output_dir"),
+         "mrva.input_dir_iquam", ("mrva", "input_dir_iquam")),
+    ]
+
+    mismatches = []
+    for writer_label, (w_section, w_key), reader_label, (r_section, r_key) in pairs:
+        w_val = config.get(w_section, {}).get(w_key)
+        r_val = config.get(r_section, {}).get(r_key)
+        if w_val is None or r_val is None:
+            continue
+        w_resolved = pathlib.Path(w_val).resolve()
+        r_resolved = pathlib.Path(r_val).resolve()
+        if w_resolved != r_resolved:
+            mismatches.append(
+                (writer_label, w_val, w_resolved, reader_label, r_val, r_resolved)
+            )
+
+    if mismatches:
+        logger.error("Pipeline path validation failed:")
+        for w_lbl, w_val, w_res, r_lbl, r_val, r_res in mismatches:
+            logger.error(f"  Writer {w_lbl} = {w_val!r} -> {w_res}")
+            logger.error(f"  Reader {r_lbl} = {r_val!r} -> {r_res}")
+            logger.error(f"  These must resolve to the same directory.")
+        raise ValueError(
+            f"{len(mismatches)} producer/consumer path pair(s) do not match"
+        )
+
+
 def create_output_directories(config: Dict) -> None:
     """Create all output directories defined in config before running pipeline."""
     logger.info("Creating output directory structure...")
@@ -1677,6 +1723,14 @@ def main():
             logger.error(f"Valid sensors: {', '.join(sorted(valid_sensors))}")
             sys.exit(1)
         logger.info(f"Sensor filter: {', '.join(sensor_filter)}")
+
+    # Validate that preprocessing outputs and MRVA inputs point at the same
+    # directories before any work starts (catches split-disk misconfigs).
+    try:
+        validate_pipeline_paths(orchestrator.config)
+    except ValueError as e:
+        logger.error(str(e))
+        sys.exit(1)
 
     # Create output directories before running
     create_output_directories(orchestrator.config)
