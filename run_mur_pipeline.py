@@ -327,10 +327,15 @@ class MUROrchestrator:
             "--cpus=2.0",
             # Java/memory settings
             "-e", "_JAVA_OPTIONS=-Xmx2048m -Xms512m -XX:+UseG1GC",
-            # OSISAF FTP endpoints for ice concentration data
+            # OSISAF FTP endpoints for ice concentration data.
+            # Production uses the AMSR2-only product (OSI-408) — filenames are
+            # ice_conc_*_polstere-100_amsr2_*.nc — which lives in the amsr2_conc
+            # subtree. The conc/ subtree holds the multi-sensor product (OSI-401-d)
+            # which is what the icenew/ reference version was wired to; using it
+            # gives different marginal-ice-zone classifications than prod.
             "-e", "OSISAF_FTP_REPROCESSED=ftp://osisaf.met.no/reprocessed/ice/conc/v1p2",
-            "-e", "OSISAF_FTP_ARCHIVE=https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/conc",
-            "-e", "OSISAF_FTP_PROD=ftp://osisaf.met.no/prod/ice/conc",
+            "-e", "OSISAF_FTP_ARCHIVE=https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc",
+            "-e", "OSISAF_FTP_PROD=https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc",
             # Volume mounts (container expects /input and /output/p011, /output/p01)
             "-v", f"{input_dir.resolve()}:/input",
             "-v", f"{output_dir_p011.resolve()}:/output/p011",
