@@ -2356,11 +2356,13 @@ def create_comparison_plot(data1: dict, data2: dict, format_type: str,
         # Get valid difference values for statistics
         diff_valid = diff_plot[~np.isnan(diff_plot)].flatten()
 
-        # Calculate color limits: use 2*std or cap at 5°C, whichever is smaller
+        # Calculate color limits: symmetric 2-98% robust range, capped at 5°C
         if len(diff_valid) > 0:
             std_diff = np.std(diff_valid)
-            diff_limit = min(5.0, 2.0 * std_diff)
-            diff_limit = max(diff_limit, 0.1)  # minimum range
+            lo, hi = np.percentile(diff_valid, [2, 98])
+            diff_limit = min(5.0, max(abs(lo), abs(hi)))
+            if diff_limit == 0:  # truly identical files
+                diff_limit = 1e-6
         else:
             diff_limit = 5.0
 
