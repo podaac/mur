@@ -1970,6 +1970,12 @@ def compare_files_data(
                     max_diff = 0.0
                     valid_count = 0
                     num_diff = 0
+                    # Tail distribution (|diff| over thresholds) + worst-pixel location
+                    tail_thresholds = [0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0]
+                    tail_counts = [0] * len(tail_thresholds)
+                    max_row = -1
+                    max_col = -1
+                    max_signed = 0.0
 
                     # Handle 3D (time, lat, lon) or 2D (lat, lon)
                     if sst1.ndim == 3:
@@ -1995,11 +2001,24 @@ def compare_files_data(
                             valid = ~(np.isnan(chunk1) | np.isnan(chunk2))
                             if np.any(valid):
                                 diff = chunk1[valid] - chunk2[valid]
+                                abs_diff = np.abs(diff)
                                 total_diff += np.sum(diff)
                                 total_sq_diff += np.sum(diff ** 2)
-                                max_diff = max(max_diff, np.max(np.abs(diff)))
                                 valid_count += len(diff)
-                                num_diff += np.sum(np.abs(diff) > tolerance)
+                                num_diff += np.sum(abs_diff > tolerance)
+                                # Tail counts over fixed thresholds
+                                for _i, _t in enumerate(tail_thresholds):
+                                    tail_counts[_i] += int(np.sum(abs_diff > _t))
+                                # Track global worst pixel (and its grid location)
+                                chunk_max = float(abs_diff.max())
+                                if chunk_max > max_diff:
+                                    max_diff = chunk_max
+                                    signed_2d = chunk1 - chunk2
+                                    _idx = np.nanargmax(np.abs(signed_2d))
+                                    _lr, _lc = np.unravel_index(_idx, signed_2d.shape)
+                                    max_row = start + int(_lr)
+                                    max_col = int(_lc)
+                                    max_signed = float(signed_2d[_lr, _lc])
                     else:
                         nlat = sst1.shape[0]
                         for start in range(0, nlat, chunk_size):
@@ -2021,11 +2040,24 @@ def compare_files_data(
                             valid = ~(np.isnan(chunk1) | np.isnan(chunk2))
                             if np.any(valid):
                                 diff = chunk1[valid] - chunk2[valid]
+                                abs_diff = np.abs(diff)
                                 total_diff += np.sum(diff)
                                 total_sq_diff += np.sum(diff ** 2)
-                                max_diff = max(max_diff, np.max(np.abs(diff)))
                                 valid_count += len(diff)
-                                num_diff += np.sum(np.abs(diff) > tolerance)
+                                num_diff += np.sum(abs_diff > tolerance)
+                                # Tail counts over fixed thresholds
+                                for _i, _t in enumerate(tail_thresholds):
+                                    tail_counts[_i] += int(np.sum(abs_diff > _t))
+                                # Track global worst pixel (and its grid location)
+                                chunk_max = float(abs_diff.max())
+                                if chunk_max > max_diff:
+                                    max_diff = chunk_max
+                                    signed_2d = chunk1 - chunk2
+                                    _idx = np.nanargmax(np.abs(signed_2d))
+                                    _lr, _lc = np.unravel_index(_idx, signed_2d.shape)
+                                    max_row = start + int(_lr)
+                                    max_col = int(_lc)
+                                    max_signed = float(signed_2d[_lr, _lc])
 
                     if valid_count > 0:
                         mean_diff = total_diff / valid_count
@@ -2047,13 +2079,29 @@ def compare_files_data(
                             })
                             results['all_match'] = False
 
+                        # Map worst-pixel grid indices to lat/lon coordinates
+                        worst_lat = worst_lon = None
+                        if max_row >= 0:
+                            try:
+                                lat_arr = ds1.variables['lat'][:]
+                                lon_arr = ds1.variables['lon'][:]
+                                worst_lat = float(lat_arr[max_row])
+                                worst_lon = float(lon_arr[max_col])
+                            except Exception:
+                                worst_lat = worst_lon = None
+
                         results['stats']['analysed_sst'] = {
                             'max_diff': max_diff,
                             'mean_diff': mean_diff,
                             'rmse': rmse,
                             'num_diff': num_diff,
                             'pct_diff': pct_diff,
-                            'valid_count': valid_count
+                            'valid_count': valid_count,
+                            'tail_thresholds': tail_thresholds,
+                            'tail_counts': tail_counts,
+                            'worst_value': max_signed if max_row >= 0 else None,
+                            'worst_lat': worst_lat,
+                            'worst_lon': worst_lon,
                         }
                     else:
                         results['comparisons'].append({
@@ -2880,6 +2928,30 @@ def main():
                             st.write(
                                 f"{icon} **{comp['field']}**: {comp['message']}"
                             )
+
+                        # Difference tail distribution (computed over every valid pixel)
+                        sst_stats = results.get('stats', {}).get('analysed_sst')
+                        if sst_stats and sst_stats.get('tail_counts'):
+                            st.write("**Difference tail (all valid pixels):**")
+                            vc = sst_stats['valid_count']
+                            table_lines = [
+                                "| \\|diff\\| > | pixels | % of valid |",
+                                "|---|---:|---:|",
+                            ]
+                            for _t, _c in zip(sst_stats['tail_thresholds'],
+                                              sst_stats['tail_counts']):
+                                _pct = (100.0 * _c / vc) if vc else 0.0
+                                table_lines.append(
+                                    f"| {_t:g} K | {_c:,} | {_pct:.4f}% |"
+                                )
+                            st.markdown("\n".join(table_lines))
+                            if sst_stats.get('worst_lat') is not None:
+                                st.markdown(
+                                    f"**Worst pixel:** "
+                                    f"{sst_stats['worst_value']:+.4f} K at "
+                                    f"lat {sst_stats['worst_lat']:.4f}, "
+                                    f"lon {sst_stats['worst_lon']:.4f}"
+                                )
 
                         st.write("---")
 
