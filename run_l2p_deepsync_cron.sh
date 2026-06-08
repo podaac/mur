@@ -38,8 +38,27 @@ echo "========================================" >> "$LOGFILE"
 echo "L2P Deep Sync (last ${DAYS} days): $(date)" >> "$LOGFILE"
 echo "========================================" >> "$LOGFILE"
 
+# Run-start marker: any .nc the deep-sync writes is a file that was MISSING on
+# disk — i.e. an orphan the hourly incremental runs failed to fetch.
+LEDGER_DIR="${MUR_LEDGER_DIR:-${LOGDIR}/l2p_ledger}"
+RUN_MARKER="${LOGDIR}/.l2p_runstart_deepsync"
+touch "$RUN_MARKER"
+
 if mur-pipeline --config "$MUR_CONFIG" --execute l2p-download --deep-sync-days "$DAYS" >> "$LOGFILE" 2>&1; then
     echo "SUCCESS: $(date)" >> "$LOGFILE"
 else
     echo "FAILED (exit code: $?): $(date)" >> "$LOGFILE"
 fi
+
+# Capture the orphans this deep-sync recovered, across every active sensor.
+python utils/l2p_capture.py record \
+    --config "$MUR_CONFIG" --sensor ALL --run-type deepsync \
+    --marker "$RUN_MARKER" --ledger-dir "$LEDGER_DIR" --log-watermarks \
+    >> "$LOGFILE" 2>&1 || true
+
+# Emit the rolling orphan report so each deep-sync run leaves a fresh summary.
+SUMMARY="${LOGDIR}/l2p_orphan_summary_${DATE}.log"
+python utils/l2p_capture.py report \
+    --ledger-dir "$LEDGER_DIR" --days "$DAYS" \
+    --json "${LOGDIR}/l2p_orphan_summary_${DATE}.json" \
+    > "$SUMMARY" 2>&1 || true

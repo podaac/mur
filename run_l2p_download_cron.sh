@@ -55,6 +55,12 @@ echo "======================================== " >> "$LOGFILE"
 echo "L2P Download ${SENSOR_ARG}: $(date)" >> "$LOGFILE"
 echo "========================================" >> "$LOGFILE"
 
+# Run-start marker: l2p_capture records every .nc file whose mtime is newer
+# than this marker, i.e. exactly what this run just downloaded.
+LEDGER_DIR="${MUR_LEDGER_DIR:-${LOGDIR}/l2p_ledger}"
+RUN_MARKER="${LOGDIR}/.l2p_runstart_${SENSOR_ARG}"
+touch "$RUN_MARKER"
+
 CMD=(mur-pipeline --config "$MUR_CONFIG" --execute l2p-download --sensors "$SENSOR")
 if [ -n "$COLLECTION" ]; then
     CMD+=(--collection "$COLLECTION")
@@ -65,3 +71,10 @@ if "${CMD[@]}" >> "$LOGFILE" 2>&1; then
 else
     echo "FAILED (exit code: $?): $(date)" >> "$LOGFILE"
 fi
+
+# Capture what this incremental run wrote (additive; never fails the cron).
+python utils/l2p_capture.py record \
+    --config "$MUR_CONFIG" --sensor "$SENSOR" --run-type incremental \
+    ${COLLECTION:+--collection "$COLLECTION"} \
+    --marker "$RUN_MARKER" --ledger-dir "$LEDGER_DIR" --log-watermarks \
+    >> "$LOGFILE" 2>&1 || true
