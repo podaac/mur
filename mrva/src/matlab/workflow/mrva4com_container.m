@@ -686,9 +686,13 @@ function mrva4com_container(year, day, realtime, varargin)
     %% Clean up temporary files
     fprintf('Stage 11: Cleaning up temporary files...\n');
 
+    % Clean up per-run scratch directories. grd/ and ice25/ are intentional
+    % same-day skip-if-exists caches and are left alone.
     if delbipFlag
-        system('rm -f ./bip/*.bip ./bip/*.biq');
-        fprintf('  ✓ BIP/BIQ files removed\n');
+        system(sprintf('rm -f %s/*.bip %s/*.biq', bipdir, bipdir));
+        system(sprintf('rm -f %s/*.map', mapdir));
+        fprintf('  ✓ BIP/BIQ scratch removed (%s)\n', bipdir);
+        fprintf('  ✓ map scratch removed (%s)\n', mapdir);
     end
 
     % Clean up namelists

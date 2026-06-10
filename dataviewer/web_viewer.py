@@ -25,11 +25,15 @@ from typing import Optional, List, Tuple
 # Handle both relative imports (when imported as module) and absolute imports (when run by streamlit)
 try:
     from .format_readers import read_file, DataFileReader
-    from .dataviewer import compute_robust_stats, smart_downsample
+    from .dataviewer import (compute_robust_stats, smart_downsample,
+                             slice_to_bounds, block_mean_resample,
+                             nearest_resample)
 except ImportError:
     # Running as standalone script via streamlit
     from format_readers import read_file, DataFileReader
-    from dataviewer import compute_robust_stats, smart_downsample
+    from dataviewer import (compute_robust_stats, smart_downsample,
+                            slice_to_bounds, block_mean_resample,
+                            nearest_resample)
 
 # Note: streamlit-file-browser component doesn't work in sidebar, so we use native widgets
 
@@ -843,60 +847,46 @@ def create_netcdf_plot(data: dict, filepath: Path) -> plt.Figure:
     return fig
 
 
-def create_interactive_netcdf_plot(data: dict, filepath: Path):
+@st.cache_resource(show_spinner=False)
+def _read_file_cached(filepath_str: str, mtime: float) -> dict:
     """
-    Create interactive Plotly figure for NetCDF MUR GHRSST data.
+    Cache the raw read of a (potentially multi-GB) file by path + mtime.
 
-    Args:
-        data: Data dictionary from NetCDFReader
-        filepath: Path to file
-
-    Returns:
-        Plotly figure object
+    Box-select reruns trigger a full script rerun, so without caching the
+    NetCDF grid would be re-read from disk on every zoom. ``cache_resource``
+    stores the dict by reference (no pickling copy), keyed on mtime so edits
+    invalidate it.
     """
-    try:
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
-    except ImportError:
-        raise ImportError("Plotly not installed. Install with: pip install plotly")
+    return read_file(Path(filepath_str))
 
+
+@st.cache_resource(show_spinner=False)
+def load_netcdf_fields(filepath_str: str, mtime: float):
+    """
+    Load and cache the full-resolution fields needed for MUR GHRSST plotting.
+
+    Returns a compact dict (lon, lat, sst_celsius as float32 with NaN fills,
+    mask or None, plus metadata) so on-the-fly view-aware resampling can slice
+    the in-memory grid cheaply. Returns None for non-GHRSST NetCDF files.
+
+    Centralizes the K->C conversion and fill-value handling that previously
+    lived inline in create_interactive_netcdf_plot.
+    """
+    data = _read_file_cached(filepath_str, mtime)
     variables = data['variables']
+    if 'analysed_sst' not in variables:
+        return None
 
-    # Check if this is a MUR GHRSST file
-    is_mur_ghrsst = 'analysed_sst' in variables
-
-    if not is_mur_ghrsst:
-        # Generic NetCDF - show info
-        fig = go.Figure()
-        info_text = "NetCDF file (non-GHRSST format)<br><br>Variables:<br>"
-        for var_name in list(variables.keys())[:10]:
-            var = variables[var_name]
-            shape = var['data'].shape if hasattr(var['data'], 'shape') else 'scalar'
-            info_text += f"  - {var_name}: {shape}<br>"
-        fig.add_annotation(
-            text=info_text,
-            xref="paper", yref="paper",
-            x=0.5, y=0.5, showarrow=False,
-            font=dict(size=14, family="monospace"),
-            align="left"
-        )
-        fig.update_layout(title=f"{filepath.name} - NetCDF file")
-        return fig
-
-    # Extract key variables for MUR GHRSST
     sst_var = variables['analysed_sst']
-    lon = variables['lon']['data'][:]
-    lat = variables['lat']['data'][:]
-    # NOTE: netCDF4 auto-applies scale_factor and add_offset when reading
-    # So sst_data is already in Kelvin (NOT raw int16 values)
+    lon = np.asarray(variables['lon']['data'][:])
+    lat = np.asarray(variables['lat']['data'][:])
+
+    # NOTE: netCDF4 auto-applies scale_factor/add_offset, so this is Kelvin.
     sst_data = sst_var['data'][0, :, :] if sst_var['data'].ndim == 3 \
         else sst_var['data'][:, :]
-
-    # Data is already in Kelvin, just convert to Celsius
-    # DO NOT apply scale_factor/add_offset again - causes double-scaling bug!
+    # Already Kelvin -> Celsius. DO NOT re-apply scale/offset (double-scaling bug).
     sst_celsius = sst_data - 273.15
 
-    # Handle fill values - netCDF4 usually auto-masks, but convert to NaN for Plotly
     if isinstance(sst_celsius, np.ma.MaskedArray):
         sst_celsius = sst_celsius.filled(np.nan)
     else:
@@ -906,174 +896,246 @@ def create_interactive_netcdf_plot(data: dict, filepath: Path):
         scaled_fill = fill_value * scale + offset - 273.15
         sst_celsius = np.where(np.isclose(sst_celsius, scaled_fill),
                                np.nan, sst_celsius)
+    # float32 halves the resident footprint of the full grid (~5GB -> ~1.3GB).
+    sst_celsius = np.ascontiguousarray(sst_celsius, dtype=np.float32)
 
-    # Subsample for interactive display (Plotly heatmap can handle ~2000x2000)
-    max_display = 1500
-    subsample = max(1, max(len(lon), len(lat)) // max_display)
-
-    if subsample > 1:
-        lon_plot = lon[::subsample]
-        lat_plot = lat[::subsample]
-        sst_plot = sst_celsius[::subsample, ::subsample]
-    else:
-        lon_plot = lon
-        lat_plot = lat
-        sst_plot = sst_celsius
-
-    # Fixed color scale for MUR SST (0 to 32°C)
-    sst_valid = sst_plot[~np.isnan(sst_plot)]
-    vmin, vmax = 0, 32
-
-    # Get mask if available for display
     mask = None
-    mask_plot = None
     if 'mask' in variables:
         mask_var = variables['mask']
-        mask = mask_var['data'][0, :, :] if mask_var['data'].ndim == 3 else mask_var['data'][:, :]
-        if subsample > 1:
-            mask_plot = mask[::subsample, ::subsample]
-        else:
-            mask_plot = mask
+        mask = mask_var['data'][0, :, :] if mask_var['data'].ndim == 3 \
+            else mask_var['data'][:, :]
+        if isinstance(mask, np.ma.MaskedArray):
+            mask = mask.filled(-1)
+        mask = np.asarray(mask)
 
-    # Create figure with 2 rows:
-    # Row 1: Large SST map (full width, ~65% height)
-    # Row 2: Histogram and mask side-by-side (~35% height)
-    has_mask = mask is not None
+    return {
+        'lon': lon,
+        'lat': lat,
+        'sst_celsius': sst_celsius,
+        'mask': mask,
+        'title': data['attributes'].get('title', 'MUR SST L4 Analysis'),
+        'full_shape': (len(lat), len(lon)),  # (n_lat, n_lon)
+    }
 
+
+def create_interactive_netcdf_plot(fields: dict, filepath: Path,
+                                   view_bounds: Optional[tuple] = None):
+    """
+    Create interactive Plotly figures for MUR GHRSST data, resampling the
+    currently-viewed region from full resolution on the fly.
+
+    The full-resolution grid (from load_netcdf_fields) is sliced to
+    ``view_bounds`` and then area-mean resampled to ~1500 px. Zooming into a
+    smaller region therefore reveals more detail, down to native pixels once
+    the region fits in the output grid.
+
+    Args:
+        fields: compact dict from load_netcdf_fields()
+        filepath: path to the file (for titles)
+        view_bounds: (lon_min, lon_max, lat_min, lat_max), or None for global
+
+    Returns:
+        (fig_main, fig_aux): the selection-enabled SST map, and the
+        histogram + mask companion figure.
+    """
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError:
+        raise ImportError("Plotly not installed. Install with: pip install plotly")
+
+    lon_full = fields['lon']
+    lat_full = fields['lat']
+    sst_full = fields['sst_celsius']
+    mask_full = fields['mask']
+    target = 1500
+    vmin, vmax = 0, 32
+
+    # Slice the full-resolution grid to the region being viewed.
+    lon_slice, lat_slice = slice_to_bounds(lon_full, lat_full, view_bounds)
+    lon = lon_full[lon_slice]
+    lat = lat_full[lat_slice]
+    sst_region = sst_full[lat_slice, lon_slice]
+
+    # Area-mean resample the region to ~target px (native pixels when factor==1).
+    sst_plot, lon_plot, lat_plot, factor = block_mean_resample(
+        sst_region, lon, lat, target=target)
+
+    # ----- Main SST figure (box-select enabled) -----
+    fig_main = go.Figure()
+    fig_main.add_trace(go.Heatmap(
+        z=sst_plot, x=lon_plot, y=lat_plot,
+        colorscale='RdYlBu_r', zmin=vmin, zmax=vmax,
+        colorbar=dict(title="SST (°C)"),
+        hovertemplate="Lon: %{x:.3f}<br>Lat: %{y:.3f}<br>SST: %{z:.2f}°C<extra></extra>"
+    ))
+
+    full_ny, full_nx = fields['full_shape']
+    disp = f"{len(lon_plot)}×{len(lat_plot)}"
+    detail = "native resolution" if factor == 1 else f"÷{factor} of full"
+    if view_bounds is None:
+        region = "Full globe"
+    else:
+        region = (f"Lon [{float(np.nanmin(lon_plot)):.2f}, {float(np.nanmax(lon_plot)):.2f}], "
+                  f"Lat [{float(np.nanmin(lat_plot)):.2f}, {float(np.nanmax(lat_plot)):.2f}]")
+    fig_main.update_layout(
+        title=(f"{filepath.name}<br><sup>{fields['title']} | {region} | "
+               f"full {full_nx}×{full_ny}, displayed {disp} ({detail})</sup>"),
+        height=650,
+        dragmode='select',
+        showlegend=False,
+    )
+    fig_main.update_xaxes(title_text="Longitude")
+    fig_main.update_yaxes(title_text="Latitude", scaleanchor="x")
+
+    # ----- Companion figure: histogram (visible region) + mask -----
+    # Sample the sliced full-res region for the histogram/stats so the work is
+    # bounded regardless of zoom (a global view's region can be ~650M cells).
+    flat = sst_region.ravel()
+    if flat.size > 2_000_000:
+        idx = np.random.randint(0, flat.size, size=2_000_000)
+        flat = flat[idx]
+    sst_valid = flat[~np.isnan(flat)]
+
+    has_mask = mask_full is not None
     if has_mask:
-        fig = make_subplots(
-            rows=2, cols=2,
-            row_heights=[0.65, 0.35],
-            subplot_titles=[
-                "MUR SST Analysis (°C)", "",
-                "SST Distribution", "Land/Sea/Ice Mask"
-            ],
-            specs=[
-                [{"type": "heatmap", "colspan": 2}, None],
-                [{"type": "histogram"}, {"type": "heatmap"}]
-            ],
-            vertical_spacing=0.12,
-            horizontal_spacing=0.08
+        mask_region = mask_full[lat_slice, lon_slice]
+        mask_plot = nearest_resample(mask_region, factor)
+        fig_aux = make_subplots(
+            rows=1, cols=2,
+            subplot_titles=["SST Distribution (visible region)", "Land/Sea/Ice Mask"],
+            specs=[[{"type": "histogram"}, {"type": "heatmap"}]],
+            horizontal_spacing=0.12,
+            column_widths=[0.45, 0.55],
         )
     else:
-        fig = make_subplots(
-            rows=2, cols=1,
-            row_heights=[0.65, 0.35],
-            subplot_titles=["MUR SST Analysis (°C)", "SST Distribution"],
-            specs=[
-                [{"type": "heatmap"}],
-                [{"type": "histogram"}]
-            ],
-            vertical_spacing=0.12
+        fig_aux = make_subplots(
+            rows=1, cols=1,
+            subplot_titles=["SST Distribution (visible region)"],
+            specs=[[{"type": "histogram"}]],
         )
 
-    # SST heatmap - top row (full width)
-    fig.add_trace(
-        go.Heatmap(
-            z=sst_plot,
-            x=lon_plot,
-            y=lat_plot,
-            colorscale='RdYlBu_r',
-            zmin=vmin,
-            zmax=vmax,
-            colorbar=dict(title="SST (°C)", x=1.02, len=0.6, y=0.75),
-            hovertemplate="Lon: %{x:.2f}<br>Lat: %{y:.2f}<br>SST: %{z:.2f}°C<extra></extra>"
-        ),
-        row=1, col=1
-    )
-
-    # SST histogram - bottom left
     if len(sst_valid) > 0:
-        # Sample for histogram if too many points
-        if len(sst_valid) > 100000:
-            hist_data = np.random.choice(sst_valid, 100000, replace=False)
-        else:
-            hist_data = sst_valid
-
-        fig.add_trace(
+        hist_data = (np.random.choice(sst_valid, 100000, replace=False)
+                     if len(sst_valid) > 100000 else sst_valid)
+        fig_aux.add_trace(
             go.Histogram(
-                x=hist_data,
-                nbinsx=100,
-                marker_color='steelblue',
-                opacity=0.7,
+                x=hist_data, nbinsx=100, marker_color='steelblue', opacity=0.7,
                 hovertemplate="SST: %{x:.1f}°C<br>Count: %{y}<extra></extra>"
             ),
-            row=2, col=1
+            row=1, col=1
         )
 
-    # Mask heatmap - bottom right (if available)
-    if has_mask and mask_plot is not None:
-        # Create mask display with fill values masked
+    if has_mask:
         mask_display = np.where(mask_plot < 0, np.nan, mask_plot)
-
-        fig.add_trace(
+        fig_aux.add_trace(
             go.Heatmap(
-                z=mask_display,
-                x=lon_plot,
-                y=lat_plot,
+                z=mask_display, x=lon_plot, y=lat_plot,
                 colorscale='Viridis',
                 colorbar=dict(
                     title="Mask",
-                    x=1.02,
-                    len=0.3,
-                    y=0.15,
                     tickvals=[1, 2, 3, 5, 9],
                     ticktext=['Sea', 'Land', 'Coast', 'Lake', 'Ice']
                 ),
-                hovertemplate=(
-                    "Lon: %{x:.2f}<br>Lat: %{y:.2f}<br>"
-                    "Mask: %{z}<extra></extra>"
-                )
+                hovertemplate=("Lon: %{x:.2f}<br>Lat: %{y:.2f}<br>"
+                               "Mask: %{z}<extra></extra>")
             ),
-            row=2, col=2
+            row=1, col=2
         )
 
-    # Update layout
-    title_str = data['attributes'].get('title', 'MUR SST L4 Analysis')
-    resolution = f"{len(lon)}×{len(lat)}"
-    if subsample > 1:
-        resolution += f" (displayed at {len(lon_plot)}×{len(lat_plot)})"
-
-    fig.update_layout(
-        title=f"{filepath.name}<br><sup>{title_str} | Resolution: {resolution}</sup>",
-        height=900,
-        showlegend=False,
-    )
-
-    # Update axes for SST map (row 1)
-    fig.update_xaxes(title_text="Longitude", row=1, col=1)
-    fig.update_yaxes(title_text="Latitude", scaleanchor="x", row=1, col=1)
-
-    # Update axes for histogram (row 2, col 1)
-    fig.update_xaxes(title_text="SST (°C)", row=2, col=1)
-    fig.update_yaxes(title_text="Count", row=2, col=1)
-
-    # Update axes for mask (row 2, col 2) if present
+    fig_aux.update_layout(height=380, showlegend=False)
+    fig_aux.update_xaxes(title_text="SST (°C)", row=1, col=1)
+    fig_aux.update_yaxes(title_text="Count", row=1, col=1)
     if has_mask:
-        fig.update_xaxes(title_text="Longitude", row=2, col=2)
-        fig.update_yaxes(title_text="Latitude", row=2, col=2)
+        fig_aux.update_xaxes(title_text="Longitude", row=1, col=2)
+        fig_aux.update_yaxes(title_text="Latitude", row=1, col=2)
 
-    # Add statistics annotation on the histogram
     if len(sst_valid) > 0:
         stats_text = (
-            f"Valid pixels: {len(sst_valid):,}<br>"
+            f"Valid pixels (sampled): {len(sst_valid):,}<br>"
             f"Mean: {sst_valid.mean():.2f}°C<br>"
             f"Std: {sst_valid.std():.2f}°C<br>"
             f"Range: [{sst_valid.min():.2f}, {sst_valid.max():.2f}]°C"
         )
-        fig.add_annotation(
+        fig_aux.add_annotation(
             text=stats_text,
-            xref="x2 domain", yref="y2 domain",
-            x=0.98, y=0.98,
-            showarrow=False,
-            font=dict(size=10, family="monospace"),
-            align="right",
-            bgcolor="rgba(255,255,255,0.8)",
-            bordercolor="gray",
-            borderwidth=1
+            xref="x domain", yref="y domain",
+            x=0.98, y=0.98, showarrow=False,
+            font=dict(size=10, family="monospace"), align="right",
+            bgcolor="rgba(255,255,255,0.8)", bordercolor="gray", borderwidth=1
         )
 
-    return fig
+    return fig_main, fig_aux
+
+
+def _extract_box_bounds(event) -> Optional[tuple]:
+    """
+    Pull (lon_min, lon_max, lat_min, lat_max) from a Streamlit Plotly
+    box-selection event, or None if there is no box selection.
+    """
+    try:
+        sel = event.get("selection") if isinstance(event, dict) else event.selection
+        boxes = sel.get("box") if sel else None
+    except (AttributeError, KeyError, TypeError):
+        return None
+    if not boxes:
+        return None
+    box = boxes[0]
+    xs = box.get("x") if isinstance(box, dict) else None
+    ys = box.get("y") if isinstance(box, dict) else None
+    if not xs or not ys or len(xs) < 2 or len(ys) < 2:
+        return None
+    return (float(min(xs)), float(max(xs)), float(min(ys)), float(max(ys)))
+
+
+def _render_netcdf_plotly(fields: dict, filepath: Path):
+    """
+    Render the MUR GHRSST Plotly view with box-select driven, view-aware
+    full-resolution resampling.
+
+    Drawing a box on the SST map stores its lon/lat bounds in session state and
+    reruns so the region re-renders at full detail. A reset button returns to
+    the global view; it bumps a per-file "epoch" so the SST chart gets a fresh
+    widget key and its stale box selection is cleared (otherwise the reset would
+    immediately re-apply the old selection and zoom right back in).
+    """
+    file_key = str(filepath)
+    bounds_store = st.session_state.setdefault("nc_view_bounds", {})
+    epoch_store = st.session_state.setdefault("nc_view_epoch", {})
+    view_bounds = bounds_store.get(file_key)
+    epoch = epoch_store.get(file_key, 0)
+
+    ctrl1, ctrl2 = st.columns([1, 4])
+    with ctrl1:
+        if st.button("⟲ Reset to full view", key=f"nc_reset_{file_key}",
+                     disabled=view_bounds is None):
+            bounds_store.pop(file_key, None)
+            epoch_store[file_key] = epoch + 1
+            st.rerun()
+    with ctrl2:
+        st.caption(
+            "Use the **box select** tool (drag a rectangle) on the SST map to "
+            "zoom in — the region re-renders at full resolution. Click "
+            "**Reset to full view** to return to the global map."
+        )
+
+    fig_main, fig_aux = create_interactive_netcdf_plot(
+        fields, filepath, view_bounds)
+
+    event = st.plotly_chart(
+        fig_main, use_container_width=True,
+        key=f"nc_main_{file_key}_{epoch}",
+        on_select="rerun", selection_mode="box"
+    )
+
+    # A fresh box selection (different from the stored view) -> zoom and rerun.
+    new_bounds = _extract_box_bounds(event)
+    if new_bounds is not None and new_bounds != view_bounds:
+        bounds_store[file_key] = new_bounds
+        st.rerun()
+
+    st.plotly_chart(fig_aux, use_container_width=True,
+                    key=f"nc_aux_{file_key}_{epoch}")
 
 
 def create_coefficient_plot(data: dict, format_type: str, filepath: Path) -> plt.Figure:
@@ -2827,7 +2889,15 @@ def main():
                 format_type = DataFileReader.detect_format(selected_file)
 
                 with st.spinner(f"Reading {format_type.upper()} file..."):
-                    data = read_file(selected_file)
+                    if format_type == 'nc':
+                        # Cached read so box-select reruns don't re-read the
+                        # multi-GB grid from disk on every zoom.
+                        data = _read_file_cached(
+                            str(selected_file),
+                            os.path.getmtime(selected_file)
+                        )
+                    else:
+                        data = read_file(selected_file)
 
                 if show_info:
                     display_file_info(data, format_type, selected_file)
@@ -2868,25 +2938,34 @@ def main():
                         st.pyplot(fig)
                         plt.close(fig)
                     elif format_type == 'nc':
-                        st.info("NetCDF files are large. Rendering...")
                         if use_plotly:
-                            try:
-                                fig = create_interactive_netcdf_plot(
-                                    data, selected_file
+                            fields = load_netcdf_fields(
+                                str(selected_file),
+                                os.path.getmtime(selected_file)
+                            )
+                            if fields is None:
+                                st.info(
+                                    "NetCDF file is not MUR GHRSST format; "
+                                    "using matplotlib view."
                                 )
-                                if fig is not None:
-                                    st.plotly_chart(fig, use_container_width=True)
-                                else:
-                                    st.error("Failed to create Plotly figure")
-                            except Exception as e:
-                                st.warning(f"Plotly failed: {e}. Using matplotlib.")
-                                import traceback
-                                with st.expander("Plotly error details"):
-                                    st.code(traceback.format_exc())
                                 fig = create_netcdf_plot(data, selected_file)
                                 if fig is not None:
                                     st.pyplot(fig)
                                     plt.close(fig)
+                            else:
+                                try:
+                                    _render_netcdf_plotly(fields, selected_file)
+                                except Exception as e:
+                                    st.warning(
+                                        f"Plotly failed: {e}. Using matplotlib."
+                                    )
+                                    import traceback
+                                    with st.expander("Plotly error details"):
+                                        st.code(traceback.format_exc())
+                                    fig = create_netcdf_plot(data, selected_file)
+                                    if fig is not None:
+                                        st.pyplot(fig)
+                                        plt.close(fig)
                         else:
                             fig = create_netcdf_plot(data, selected_file)
                             if fig is not None:
