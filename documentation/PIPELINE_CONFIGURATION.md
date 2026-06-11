@@ -329,6 +329,15 @@ Each sensor entry contains:
 - `stability_latency`: Days before data is stable (2-3)
 - `dayrange`: Temporal window half-width (typically 2)
 
+**Purge Configuration:**
+
+| Parameter | Type | Description | Default |
+|-----------|------|-------------|---------|
+| `purge.threshold_days` | int | Days after which DOY directories are deleted | 30 |
+| `purge.logs_dir` | string | Directory for purge log reports | "testing/preprocessing/logs/purge" |
+
+The purge stage uses `l2p.input_dir` as the download root and `l2p.active_sensors` for the sensor list. It only runs when explicitly requested via `--execute purge`.
+
 **Paths:**
 
 All paths should be absolute. Adjust based on your storage layout:
@@ -427,7 +436,7 @@ required arguments:
 optional arguments:
   --date DATE           Process specific date (YYYY-MM-DD)
   --all-stages          Process full 9-day window (NRT + REA modes)
-  --execute STAGE       Execute specific stage(s): landice, iquam, l2p
+  --execute STAGE       Execute specific stage(s): landice, iquam, l2p, purge
   --run-mrva            Run MRVA analysis stage [NOT YET IMPLEMENTED]
   --netrc-path PATH     Path to .netrc file (default: ~/.netrc)
   --verbose, -v         Enable verbose logging
@@ -505,6 +514,14 @@ uv run mur-pipeline --config config.json --execute iquam
 # Process multiple stages
 uv run mur-pipeline --config config.json --execute landice --execute iquam
 ```
+
+**Example 4: Purge Old L2P Downloads**
+```bash
+# Clean up L2P download directories older than the configured threshold
+uv run mur-pipeline --config config.json --execute purge
+```
+
+The purge stage removes day-of-year directories from the L2P download area that are older than a rolling window threshold (default: 30 days). It reads paths and sensor lists from the pipeline config and writes a dated log report. This stage only runs when explicitly requested via `--execute purge` -- it is not part of the default pipeline run.
 
 ## Component-Specific Execution
 

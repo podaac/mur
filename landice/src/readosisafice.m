@@ -34,7 +34,7 @@ function [ice,lon,lat] = readosisafice( hem, year, doy, ...
   elseif current_mjd <= lastMJD_archive
 
     ftpdir = getenv("OSISAF_FTP_ARCHIVE");
-    filename = sprintf('ice_conc_%s_polstere-100_multi_%s1200.nc',hem,date);
+    filename = sprintf('ice_conc_%s_polstere-100_amsr2_%s1200.nc',hem,date);
     fprintf(1, 'readOSISAF: Date %s (%s, MJD=%d) > reprocessing cutoff (MJD=%d), <= archive cutoff (MJD=%d)\n', ...
         date, hem, current_mjd, lastMJD_reprocessed, lastMJD_archive);
     fprintf(1, 'readOSISAF: Using ARCHIVE FTP source: %s\n', ftpdir);
@@ -43,7 +43,7 @@ function [ice,lon,lat] = readosisafice( hem, year, doy, ...
 
     ftpdir = getenv("OSISAF_FTP_PROD");
     subdir = '';
-    filename = sprintf('ice_conc_%s_polstere-100_multi_%s1200.nc',hem,date);
+    filename = sprintf('ice_conc_%s_polstere-100_amsr2_%s1200.nc',hem,date);
     fprintf(1, 'readOSISAF: Date %s (%s, MJD=%d) > archive cutoff (MJD=%d)\n', ...
         date, hem, current_mjd, lastMJD_archive);
     fprintf(1, 'readOSISAF: Using PRODUCTION FTP source: %s\n', ftpdir);
@@ -66,9 +66,13 @@ function [ice,lon,lat] = readosisafice( hem, year, doy, ...
     [year,month,day] = ymd(dt);
     date = sprintf('%04d%02d%02d',year,month,day);
     
-    % Set new paths and filenames based on date
+    % Set new paths and filenames based on date.
+    % NOTE: this fallback only fires for current-date (PROD/ARCHIVE branch)
+    % runs, so the filename pattern must match the AMSR2-only product used
+    % above. The reprocessed branch (pre-cutoff dates) never reaches here
+    % because reprocessed files are always available historically.
     subdir = sprintf('/%04d/%02d',year,month);
-    filename = sprintf('ice_conc_%s_polstere-100_multi_%s1200.nc',hem,date);
+    filename = sprintf('ice_conc_%s_polstere-100_amsr2_%s1200.nc',hem,date);
     pathname = sprintf('%s%s/%s',ftpdir,subdir,filename);
     download_file(pathname, filename);
     

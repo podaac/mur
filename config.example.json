@@ -3,8 +3,9 @@
   "landice": {
     "container_image": "mur-landice:latest",
     "input_dir": "./testing/static-resources",
-    "output_dir": "./testing/preprocessing/output/landice",
-    "description": "Land/Ice mask generation from OSI-SAF data. Input directory contains static grids and mat transformation files. Output files are written to output_dir/land/p011/YEAR/ and output_dir/land/p01/YEAR/ subdirectories."
+    "output_dir_p011": "./testing/preprocessing/output/landice-p011",
+    "output_dir_p01": "./testing/preprocessing/output/landice-p01",
+    "description": "Land/Ice mask generation from OSI-SAF data. Input directory contains static grids and mat transformation files. Separate output directories per resolution matching production NAS layout (p011=/nas/ftp/.../landice, p01=/nas2/landice)."
   },
   "l2p": {
     "container_image": "mur-l2p:latest",
@@ -23,6 +24,7 @@
           "AMSR2-REMSS-L2P-v8.2",
           "AMSR2-REMSS-L2P_RT-v8.2"
         ],
+        "start_date": "2023-01-01T00:00:00Z",
         "region": "Global",
         "La": 2,
         "Lb": 8,
@@ -34,6 +36,7 @@
         "collection_name": [
           "MODIS_A-JPL-L2P-v2019.0"
         ],
+        "start_date": "2022-07-07T00:00:00Z",
         "region": "Global",
         "La": 2,
         "Lb": 12,
@@ -45,6 +48,7 @@
         "collection_name": [
           "MODIS_T-JPL-L2P-v2019.0"
         ],
+        "start_date": "2022-07-07T00:00:00Z",
         "region": "Global",
         "La": 2,
         "Lb": 12,
@@ -56,6 +60,7 @@
         "collection_name": [
           "AVHRRMTA_G-NAVO-L2P-v2.0"
         ],
+        "start_date": "2022-07-07T00:00:00Z",
         "region": "Global",
         "La": 2,
         "Lb": 9,
@@ -67,6 +72,7 @@
         "collection_name": [
           "AVHRRMTB_G-NAVO-L2P-v2.0"
         ],
+        "start_date": "2022-07-07T00:00:00Z",
         "region": "Global",
         "La": 2,
         "Lb": 9,
@@ -90,8 +96,9 @@
     "container_image": "mur-mrva:latest",
     "input_dir_bic": "./testing/preprocessing/output/l2p",
     "input_dir_iquam": "./testing/preprocessing/output/iquam",
-    "input_dir_landice": "./testing/preprocessing/output/landice",
-    "_input_dir_landice_note": "MRVA uses the land/p011 subdirectory (1km resolution) from this path",
+    "input_dir_landice_p011": "./testing/preprocessing/output/landice-p011",
+    "input_dir_landice_p01": "./testing/preprocessing/output/landice-p01",
+    "_input_dir_landice_note": "Separate paths per resolution: p011 for Global_ice/icefiles (mrva4com), p01 for landiceP01 grid (csp2nc4a/MUR25)",
     "static_resources_dir": "./testing/static-resources",
     "output_dir_csp": "./testing/mrva/output/csp",
     "output_dir_netcdf": "./testing/mrva/output/netcdf",
@@ -160,6 +167,11 @@
     "LF": 11,
     "decay": [48, 48, 48, 48, 48, 48, 42, 36, 30, 24, 18, 12],
     "description": "MRVA multi-scale analysis - combines all sensors into L4 product"
+  },
+  "purge": {
+    "threshold_days": 30,
+    "logs_dir": "./testing/preprocessing/logs/purge",
+    "description": "Purge old L2P download directories past the rolling window threshold. Uses l2p.input_dir as the download root and l2p.active_sensors for sensor list."
   },
   "notes": [
     "La/Lb: Multi-scale analysis parameters (minimum and maximum scales)",

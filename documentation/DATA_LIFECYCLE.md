@@ -985,6 +985,28 @@ Subsequent Runs (same date):
 - Cleanup of incomplete downloads
 - Archival of old data to slower storage
 
+### L2P Download Purge
+
+The pipeline includes a purge stage that removes old L2P download directories past a rolling window threshold, mirroring the production `mur_cron/purge/purge.py` behavior. This prevents unbounded growth of the L2P download area.
+
+**Configuration:**
+- `purge.threshold_days`: Number of days after which DOY directories are deleted (default: 30)
+- `purge.logs_dir`: Directory for dated purge log reports
+
+**Behavior:**
+- Scans each active sensor's `{input_dir}/{sensor}/{year}/` directory
+- Removes DOY subdirectories where `DOY < current_DOY - threshold_days`
+- Operates only within the current year
+- Writes summary and detailed removal reports to a dated log file
+
+**Usage:**
+```bash
+# Must be explicitly requested -- not part of the default pipeline run
+uv run mur-pipeline --config config.json --execute purge
+```
+
+**Note:** The purge stage only affects raw L2P download directories (NetCDF granules from PO.DAAC). It does not touch preprocessed BIC files, which are retained indefinitely for reuse.
+
 ---
 
 ## Summary

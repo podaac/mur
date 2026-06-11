@@ -82,20 +82,28 @@ ENV MCR_INHIBIT_CTF_LOCK=1
 ENV MATLAB_LOG_DIR=/data/logs
 ENV MATLAB_PREFDIR=/tmp/.matlab
 ENV TMP_DIR=/tmp/landice_tmp
+# HOME must point at a writable path so the MATLAB Runtime CTF extractor works
+# when the container is run with an arbitrary --user <uid> that isn't present in
+# /etc/passwd (getpwuid() returns NULL → default HOME of `/` is not writable).
+ENV HOME=/tmp
 
 # Environment variables for OSI SAF FTP paths (to be overridden at runtime)
 ENV OSISAF_FTP_REPROCESSED=""
 ENV OSISAF_FTP_ARCHIVE=""
 ENV OSISAF_FTP_PROD=""
 
-# Create data directories
-RUN mkdir -p /data/input /data/output /data/logs /tmp/landice_tmp
+# Create data directories. Scratch dirs under /tmp (/tmp/landice_tmp,
+# /tmp/.matlab, MCR cache) are NOT pre-created: the sticky bit on /tmp would
+# otherwise block the runtime UID from rmdir'ing a root-owned dir. Letting the
+# app create them at runtime means they're owned by the runtime UID.
+RUN mkdir -p /data/input /data/output/p011 /data/output/p01 /data/logs
 
 # Set working directory
 WORKDIR /data
 
 # Create entrypoint wrapper script
-# This wrapper uses fixed container paths (/input, /output)
+# This wrapper uses fixed container paths (/input, /output/p011, /output/p01)
+# matching production's separate output directories per resolution.
 # Arguments: year doy (2 args, paths are injected by entrypoint)
 RUN echo '#!/bin/bash' > /opt/landice/bin/entrypoint.sh && \
     echo '# LANDICE Container Entrypoint Wrapper' >> /opt/landice/bin/entrypoint.sh && \
@@ -110,13 +118,29 @@ RUN echo '#!/bin/bash' > /opt/landice/bin/entrypoint.sh && \
     echo 'fi' >> /opt/landice/bin/entrypoint.sh && \
     echo '' >> /opt/landice/bin/entrypoint.sh && \
     echo '# Fixed paths managed by Docker volume mounts' >> /opt/landice/bin/entrypoint.sh && \
+    echo '# Production uses separate paths per resolution:' >> /opt/landice/bin/entrypoint.sh && \
+    echo '#   p011 (1km):  /nas/ftp/mur_sst/tmchin/landice/' >> /opt/landice/bin/entrypoint.sh && \
+    echo '#   p01 (0.01°): /nas2/landice/' >> /opt/landice/bin/entrypoint.sh && \
     echo 'INDIR="/input"' >> /opt/landice/bin/entrypoint.sh && \
-    echo 'OUTDIR="/output"' >> /opt/landice/bin/entrypoint.sh && \
+    echo 'OUTDIR_P011="/output/p011"' >> /opt/landice/bin/entrypoint.sh && \
+    echo 'OUTDIR_P01="/output/p01"' >> /opt/landice/bin/entrypoint.sh && \
+    echo '' >> /opt/landice/bin/entrypoint.sh && \
+    echo '# Ensure scratch dirs exist and are owned by the runtime UID.' >> /opt/landice/bin/entrypoint.sh && \
+    echo 'mkdir -p "${TMP_DIR:-/tmp/landice_tmp}" "${MATLAB_PREFDIR:-/tmp/.matlab}" "${MCR_CACHE_ROOT:-/tmp}"' >> /opt/landice/bin/entrypoint.sh && \
     echo '' >> /opt/landice/bin/entrypoint.sh && \
     echo '# Call MATLAB executable with fixed paths inserted' >> /opt/landice/bin/entrypoint.sh && \
-    echo '# landice_wrapper expects: input_dir output_dir year doy' >> /opt/landice/bin/entrypoint.sh && \
-    echo 'exec /opt/landice/bin/run_LandiceProcessor.sh "/opt/matlabruntime/R2024b" "$INDIR" "$OUTDIR" "$1" "$2"' >> /opt/landice/bin/entrypoint.sh && \
+    echo '# landice_wrapper expects: input_dir output_dir_p011 output_dir_p01 year doy' >> /opt/landice/bin/entrypoint.sh && \
+    echo 'exec /opt/landice/bin/run_LandiceProcessor.sh "/opt/matlabruntime/R2024b" "$INDIR" "$OUTDIR_P011" "$OUTDIR_P01" "$1" "$2"' >> /opt/landice/bin/entrypoint.sh && \
     chmod +x /opt/landice/bin/entrypoint.sh
+
+# Rootless / arbitrary-UID support (OpenShift pattern):
+# Assign group 0 (root group) and grant group perms equal to owner perms on all
+# paths the app may write to. Any UID added to group 0 at runtime (via
+# `docker run --group-add 0`) can then read/write these paths.
+# setgid on directories so new files/dirs inherit group 0.
+RUN chgrp -R 0 /data /opt/landice && \
+    chmod -R g=u /data /opt/landice && \
+    find /data /opt/landice -type d -exec chmod g+s {} +
 
 # Set entrypoint
 ENTRYPOINT ["/opt/landice/bin/entrypoint.sh"]

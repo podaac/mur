@@ -42,8 +42,14 @@ function makedailyiquam(year, doy, rewrite, outputDir, sourceUrl)
   filename = sprintf('%s/Global_IQUAM0_%04d_%03d.bii', edir, year, doy);
 
   if (~rewrite) && exist(filename,'file')
-      fprintf('Processing %04d/%03d: Output exists, skipping\n', year, doy);
-      return
+      N_existing = read_bii_count(filename);
+      if N_existing > 0
+          fprintf('Processing %04d/%03d: Output exists with N=%d, skipping\n', ...
+                  year, doy, N_existing);
+          return
+      end
+      fprintf('Processing %04d/%03d: Existing file has N=0, re-fetching\n', ...
+              year, doy);
   end
 
   %% Determine which monthly NetCDF file to download
@@ -208,3 +214,20 @@ ncid=netcdf.open(ncfile,'nowrite');
 
 
 netcdf.close(ncid);
+
+
+function N = read_bii_count(filename)
+% Read the observation count N from an existing .bii file header.
+% Returns 0 if the file is missing, truncated, or unreadable. Used to
+% detect empty 24-byte stubs so makedailyiquam can re-fetch them once
+% NOAA back-fills the source month.
+%
+% Format from writeiquambii.m:46-49 — first Fortran record is
+%   int32 N + int16 year + int16 doy (payload after 4-byte length prefix).
+  N = 0;
+  f = fopen(filename, 'r');
+  if f == -1, return; end
+  c = onCleanup(@() fclose(f));
+  fread(f, 1, 'int32');       % Fortran record-length prefix
+  raw = fread(f, 1, 'int32'); % N (observation count)
+  if ~isempty(raw), N = raw; end

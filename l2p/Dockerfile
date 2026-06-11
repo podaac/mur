@@ -86,13 +86,18 @@ ENV MCR_INHIBIT_CTF_LOCK=1
 ENV MATLAB_LOG_DIR=/data/logs
 ENV MATLAB_PREFDIR=/tmp/.matlab
 ENV TMP_DIR=/tmp/l2p_tmp
+# HOME must point at a writable path so the MATLAB Runtime CTF extractor works
+# when the container is run with an arbitrary --user <uid> that isn't present in
+# /etc/passwd (getpwuid() returns NULL → default HOME of `/` is not writable).
+ENV HOME=/tmp
 
-# Create data directories with proper structure
-# Note: Container does not hardcode paths - they are passed as arguments
+# Create data directories. Scratch dirs under /tmp (/tmp/l2p_tmp, /tmp/.matlab,
+# MCR cache) are NOT pre-created: the sticky bit on /tmp would otherwise block
+# the runtime UID from rmdir'ing a root-owned dir. Letting the app create them
+# at runtime means they're owned by the runtime UID.
 RUN mkdir -p /data/input \
              /data/output \
-             /data/logs \
-             /tmp/l2p_tmp
+             /data/logs
 
 # Set working directory
 WORKDIR /data
@@ -119,9 +124,23 @@ RUN echo '#!/bin/bash' > /opt/l2p/bin/entrypoint.sh && \
     echo 'INDIR="/data/input"' >> /opt/l2p/bin/entrypoint.sh && \
     echo 'OUTDIR="/data/output"' >> /opt/l2p/bin/entrypoint.sh && \
     echo '' >> /opt/l2p/bin/entrypoint.sh && \
+    echo '# Ensure scratch dirs exist and are owned by the runtime UID.' >> /opt/l2p/bin/entrypoint.sh && \
+    echo '# These are not pre-created in the image so the sticky bit on /tmp' >> /opt/l2p/bin/entrypoint.sh && \
+    echo '# does not block the arbitrary runtime UID from managing them.' >> /opt/l2p/bin/entrypoint.sh && \
+    echo 'mkdir -p "${TMP_DIR:-/tmp/l2p_tmp}" "${MATLAB_PREFDIR:-/tmp/.matlab}" "${MCR_CACHE_ROOT:-/tmp}"' >> /opt/l2p/bin/entrypoint.sh && \
+    echo '' >> /opt/l2p/bin/entrypoint.sh && \
     echo '# Call MATLAB executable with fixed paths inserted' >> /opt/l2p/bin/entrypoint.sh && \
     echo 'exec /opt/l2p/bin/run_L2pProcessor.sh "/opt/matlabruntime/R2024b" "$1" "$2" "$INDIR" "$OUTDIR" "$3" "$4" "$5"' >> /opt/l2p/bin/entrypoint.sh && \
     chmod +x /opt/l2p/bin/entrypoint.sh
+
+# Rootless / arbitrary-UID support (OpenShift pattern):
+# Assign group 0 (root group) and grant group perms equal to owner perms on all
+# paths the app may write to. Any UID added to group 0 at runtime (via
+# `docker run --group-add 0`) can then read/write these paths.
+# setgid on directories so new files/dirs inherit group 0.
+RUN chgrp -R 0 /data /opt/l2p && \
+    chmod -R g=u /data /opt/l2p && \
+    find /data /opt/l2p -type d -exec chmod g+s {} +
 
 # Set entrypoint
 ENTRYPOINT ["/opt/l2p/bin/entrypoint.sh"]

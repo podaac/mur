@@ -17,6 +17,7 @@ Supports various binary formats used in MUR processing pipeline:
 
 import sys
 import argparse
+import warnings
 from pathlib import Path
 from typing import Optional, Tuple
 import numpy as np
@@ -117,7 +118,104 @@ def smart_downsample(x: np.ndarray, y: np.ndarray, c: Optional[np.ndarray] = Non
         return x_down, y_down
 
 
-def print_file_info(data: dict, format_type: str, filepath: Path):
+def slice_to_bounds(lon: np.ndarray, lat: np.ndarray,
+                    bounds: Optional[tuple]) -> Tuple[slice, slice]:
+    """
+    Map a lon/lat bounding box to index slices into the lon/lat axes.
+
+    Used to crop a full-resolution grid to the region currently being viewed
+    before resampling, so zooming shows progressively more detail.
+
+    Args:
+        lon: 1D longitude array, assumed monotonic ascending
+        lat: 1D latitude array, monotonic ascending OR descending
+        bounds: (lon_min, lon_max, lat_min, lat_max), or None for full extent
+
+    Returns:
+        (lon_slice, lat_slice). Degenerate/empty selections (<2 cells on an
+        axis) fall back to that axis's full extent.
+    """
+    n_lon, n_lat = len(lon), len(lat)
+    if bounds is None:
+        return slice(0, n_lon), slice(0, n_lat)
+
+    lon_min, lon_max, lat_min, lat_max = bounds
+
+    # Longitude: ascending
+    i0 = int(np.searchsorted(lon, lon_min, side='left'))
+    i1 = int(np.searchsorted(lon, lon_max, side='right'))
+    i0, i1 = max(0, i0), min(n_lon, i1)
+
+    # Latitude: handle ascending or descending axis
+    if n_lat > 1 and lat[0] > lat[-1]:
+        rev = lat[::-1]
+        j0 = n_lat - int(np.searchsorted(rev, lat_max, side='right'))
+        j1 = n_lat - int(np.searchsorted(rev, lat_min, side='left'))
+    else:
+        j0 = int(np.searchsorted(lat, lat_min, side='left'))
+        j1 = int(np.searchsorted(lat, lat_max, side='right'))
+    j0, j1 = max(0, j0), min(n_lat, j1)
+
+    # Guard degenerate selections -> full extent on the affected axis
+    if i1 - i0 < 2:
+        i0, i1 = 0, n_lon
+    if j1 - j0 < 2:
+        j0, j1 = 0, n_lat
+
+    return slice(i0, i1), slice(j0, j1)
+
+
+def block_mean_resample(arr2d: np.ndarray, lon: np.ndarray, lat: np.ndarray,
+                        target: int = 1500) -> tuple:
+    """
+    Area-mean (block) resample a 2D field and its coordinate axes to roughly
+    a target output size, ignoring NaNs.
+
+    Unlike stride decimation, area averaging preserves the field between
+    samples (fronts/eddies aren't dropped). When the region already fits in
+    ``target`` the inputs are returned unchanged (native resolution).
+
+    Args:
+        arr2d: 2D field indexed [lat, lon]
+        lon: 1D longitude axis matching arr2d's second dimension
+        lat: 1D latitude axis matching arr2d's first dimension
+        target: approximate maximum size of the longer output axis
+
+    Returns:
+        (z, x, y, factor) where z is the resampled field, x/y are the
+        resampled cell-center coordinates, and factor is the block size used.
+    """
+    from skimage.measure import block_reduce
+
+    n_lat, n_lon = arr2d.shape
+    factor = max(1, int(np.ceil(max(n_lat, n_lon) / float(target))))
+    if factor == 1:
+        return arr2d, lon, lat, 1
+
+    with warnings.catch_warnings():
+        # All-NaN blocks make nanmean warn; the NaN result is what we want.
+        warnings.simplefilter('ignore', category=RuntimeWarning)
+        z = block_reduce(arr2d, (factor, factor), func=np.nanmean, cval=np.nan)
+        x = block_reduce(lon, (factor,), func=np.nanmean, cval=np.nan)
+        y = block_reduce(lat, (factor,), func=np.nanmean, cval=np.nan)
+
+    return z, x, y, factor
+
+
+def nearest_resample(arr2d: np.ndarray, factor: int) -> np.ndarray:
+    """
+    Stride (nearest) downsample for categorical fields such as the land/sea/ice
+    mask, where area averaging would produce meaningless fractional classes.
+
+    Uses the same ``factor`` as :func:`block_mean_resample` so the output
+    dimensions line up with that function's coordinate axes.
+    """
+    if factor <= 1:
+        return arr2d
+    return arr2d[::factor, ::factor]
+
+
+def print_file_info(data: dict, format_type: str, filepath: Path, verbose: bool = False):
     """
     Print summary information about the data file.
 
@@ -293,13 +391,17 @@ def print_file_info(data: dict, format_type: str, filepath: Path):
             print(f"  {var_name:20s} {str(shape):20s} {dtype}")
 
         print(f"\nGlobal attributes:")
-        for attr, value in list(data['attributes'].items())[:10]:
-            value_str = str(value)
-            if len(value_str) > 60:
-                value_str = value_str[:57] + "..."
-            print(f"  {attr:30s} = {value_str}")
-        if len(data['attributes']) > 10:
-            print(f"  ... and {len(data['attributes']) - 10} more")
+        if verbose:
+            for attr, value in data['attributes'].items():
+                print(f"  {attr:30s} = {value}")
+        else:
+            for attr, value in list(data['attributes'].items())[:10]:
+                value_str = str(value)
+                if len(value_str) > 60:
+                    value_str = value_str[:57] + "..."
+                print(f"  {attr:30s} = {value_str}")
+            if len(data['attributes']) > 10:
+                print(f"  ... and {len(data['attributes']) - 10} more (use -v for all)")
 
     print()
 
@@ -1405,6 +1507,8 @@ Examples:
                         help='Data file(s) to view')
     parser.add_argument('--info', action='store_true',
                         help='Show info only (no plotting)')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='Show full details (e.g. all NetCDF global attributes)')
     parser.add_argument('--compare', action='store_true',
                         help='Compare two files (requires exactly 2 files)')
     parser.add_argument('--export', type=str, metavar='FILE',
@@ -1442,7 +1546,7 @@ Examples:
             data = read_file(filepath)
 
             # Print info
-            print_file_info(data, format_type, filepath)
+            print_file_info(data, format_type, filepath, verbose=args.verbose)
 
             # Plot by default unless --info flag is set
             if not args.info:

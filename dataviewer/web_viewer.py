@@ -25,11 +25,15 @@ from typing import Optional, List, Tuple
 # Handle both relative imports (when imported as module) and absolute imports (when run by streamlit)
 try:
     from .format_readers import read_file, DataFileReader
-    from .dataviewer import compute_robust_stats, smart_downsample
+    from .dataviewer import (compute_robust_stats, smart_downsample,
+                             slice_to_bounds, block_mean_resample,
+                             nearest_resample)
 except ImportError:
     # Running as standalone script via streamlit
     from format_readers import read_file, DataFileReader
-    from dataviewer import compute_robust_stats, smart_downsample
+    from dataviewer import (compute_robust_stats, smart_downsample,
+                            slice_to_bounds, block_mean_resample,
+                            nearest_resample)
 
 # Note: streamlit-file-browser component doesn't work in sidebar, so we use native widgets
 
@@ -843,60 +847,46 @@ def create_netcdf_plot(data: dict, filepath: Path) -> plt.Figure:
     return fig
 
 
-def create_interactive_netcdf_plot(data: dict, filepath: Path):
+@st.cache_resource(show_spinner=False)
+def _read_file_cached(filepath_str: str, mtime: float) -> dict:
     """
-    Create interactive Plotly figure for NetCDF MUR GHRSST data.
+    Cache the raw read of a (potentially multi-GB) file by path + mtime.
 
-    Args:
-        data: Data dictionary from NetCDFReader
-        filepath: Path to file
-
-    Returns:
-        Plotly figure object
+    Box-select reruns trigger a full script rerun, so without caching the
+    NetCDF grid would be re-read from disk on every zoom. ``cache_resource``
+    stores the dict by reference (no pickling copy), keyed on mtime so edits
+    invalidate it.
     """
-    try:
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
-    except ImportError:
-        raise ImportError("Plotly not installed. Install with: pip install plotly")
+    return read_file(Path(filepath_str))
 
+
+@st.cache_resource(show_spinner=False)
+def load_netcdf_fields(filepath_str: str, mtime: float):
+    """
+    Load and cache the full-resolution fields needed for MUR GHRSST plotting.
+
+    Returns a compact dict (lon, lat, sst_celsius as float32 with NaN fills,
+    mask or None, plus metadata) so on-the-fly view-aware resampling can slice
+    the in-memory grid cheaply. Returns None for non-GHRSST NetCDF files.
+
+    Centralizes the K->C conversion and fill-value handling that previously
+    lived inline in create_interactive_netcdf_plot.
+    """
+    data = _read_file_cached(filepath_str, mtime)
     variables = data['variables']
+    if 'analysed_sst' not in variables:
+        return None
 
-    # Check if this is a MUR GHRSST file
-    is_mur_ghrsst = 'analysed_sst' in variables
-
-    if not is_mur_ghrsst:
-        # Generic NetCDF - show info
-        fig = go.Figure()
-        info_text = "NetCDF file (non-GHRSST format)<br><br>Variables:<br>"
-        for var_name in list(variables.keys())[:10]:
-            var = variables[var_name]
-            shape = var['data'].shape if hasattr(var['data'], 'shape') else 'scalar'
-            info_text += f"  - {var_name}: {shape}<br>"
-        fig.add_annotation(
-            text=info_text,
-            xref="paper", yref="paper",
-            x=0.5, y=0.5, showarrow=False,
-            font=dict(size=14, family="monospace"),
-            align="left"
-        )
-        fig.update_layout(title=f"{filepath.name} - NetCDF file")
-        return fig
-
-    # Extract key variables for MUR GHRSST
     sst_var = variables['analysed_sst']
-    lon = variables['lon']['data'][:]
-    lat = variables['lat']['data'][:]
-    # NOTE: netCDF4 auto-applies scale_factor and add_offset when reading
-    # So sst_data is already in Kelvin (NOT raw int16 values)
+    lon = np.asarray(variables['lon']['data'][:])
+    lat = np.asarray(variables['lat']['data'][:])
+
+    # NOTE: netCDF4 auto-applies scale_factor/add_offset, so this is Kelvin.
     sst_data = sst_var['data'][0, :, :] if sst_var['data'].ndim == 3 \
         else sst_var['data'][:, :]
-
-    # Data is already in Kelvin, just convert to Celsius
-    # DO NOT apply scale_factor/add_offset again - causes double-scaling bug!
+    # Already Kelvin -> Celsius. DO NOT re-apply scale/offset (double-scaling bug).
     sst_celsius = sst_data - 273.15
 
-    # Handle fill values - netCDF4 usually auto-masks, but convert to NaN for Plotly
     if isinstance(sst_celsius, np.ma.MaskedArray):
         sst_celsius = sst_celsius.filled(np.nan)
     else:
@@ -906,174 +896,246 @@ def create_interactive_netcdf_plot(data: dict, filepath: Path):
         scaled_fill = fill_value * scale + offset - 273.15
         sst_celsius = np.where(np.isclose(sst_celsius, scaled_fill),
                                np.nan, sst_celsius)
+    # float32 halves the resident footprint of the full grid (~5GB -> ~1.3GB).
+    sst_celsius = np.ascontiguousarray(sst_celsius, dtype=np.float32)
 
-    # Subsample for interactive display (Plotly heatmap can handle ~2000x2000)
-    max_display = 1500
-    subsample = max(1, max(len(lon), len(lat)) // max_display)
-
-    if subsample > 1:
-        lon_plot = lon[::subsample]
-        lat_plot = lat[::subsample]
-        sst_plot = sst_celsius[::subsample, ::subsample]
-    else:
-        lon_plot = lon
-        lat_plot = lat
-        sst_plot = sst_celsius
-
-    # Fixed color scale for MUR SST (0 to 32°C)
-    sst_valid = sst_plot[~np.isnan(sst_plot)]
-    vmin, vmax = 0, 32
-
-    # Get mask if available for display
     mask = None
-    mask_plot = None
     if 'mask' in variables:
         mask_var = variables['mask']
-        mask = mask_var['data'][0, :, :] if mask_var['data'].ndim == 3 else mask_var['data'][:, :]
-        if subsample > 1:
-            mask_plot = mask[::subsample, ::subsample]
-        else:
-            mask_plot = mask
+        mask = mask_var['data'][0, :, :] if mask_var['data'].ndim == 3 \
+            else mask_var['data'][:, :]
+        if isinstance(mask, np.ma.MaskedArray):
+            mask = mask.filled(-1)
+        mask = np.asarray(mask)
 
-    # Create figure with 2 rows:
-    # Row 1: Large SST map (full width, ~65% height)
-    # Row 2: Histogram and mask side-by-side (~35% height)
-    has_mask = mask is not None
+    return {
+        'lon': lon,
+        'lat': lat,
+        'sst_celsius': sst_celsius,
+        'mask': mask,
+        'title': data['attributes'].get('title', 'MUR SST L4 Analysis'),
+        'full_shape': (len(lat), len(lon)),  # (n_lat, n_lon)
+    }
 
+
+def create_interactive_netcdf_plot(fields: dict, filepath: Path,
+                                   view_bounds: Optional[tuple] = None):
+    """
+    Create interactive Plotly figures for MUR GHRSST data, resampling the
+    currently-viewed region from full resolution on the fly.
+
+    The full-resolution grid (from load_netcdf_fields) is sliced to
+    ``view_bounds`` and then area-mean resampled to ~1500 px. Zooming into a
+    smaller region therefore reveals more detail, down to native pixels once
+    the region fits in the output grid.
+
+    Args:
+        fields: compact dict from load_netcdf_fields()
+        filepath: path to the file (for titles)
+        view_bounds: (lon_min, lon_max, lat_min, lat_max), or None for global
+
+    Returns:
+        (fig_main, fig_aux): the selection-enabled SST map, and the
+        histogram + mask companion figure.
+    """
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError:
+        raise ImportError("Plotly not installed. Install with: pip install plotly")
+
+    lon_full = fields['lon']
+    lat_full = fields['lat']
+    sst_full = fields['sst_celsius']
+    mask_full = fields['mask']
+    target = 1500
+    vmin, vmax = 0, 32
+
+    # Slice the full-resolution grid to the region being viewed.
+    lon_slice, lat_slice = slice_to_bounds(lon_full, lat_full, view_bounds)
+    lon = lon_full[lon_slice]
+    lat = lat_full[lat_slice]
+    sst_region = sst_full[lat_slice, lon_slice]
+
+    # Area-mean resample the region to ~target px (native pixels when factor==1).
+    sst_plot, lon_plot, lat_plot, factor = block_mean_resample(
+        sst_region, lon, lat, target=target)
+
+    # ----- Main SST figure (box-select enabled) -----
+    fig_main = go.Figure()
+    fig_main.add_trace(go.Heatmap(
+        z=sst_plot, x=lon_plot, y=lat_plot,
+        colorscale='RdYlBu_r', zmin=vmin, zmax=vmax,
+        colorbar=dict(title="SST (°C)"),
+        hovertemplate="Lon: %{x:.3f}<br>Lat: %{y:.3f}<br>SST: %{z:.2f}°C<extra></extra>"
+    ))
+
+    full_ny, full_nx = fields['full_shape']
+    disp = f"{len(lon_plot)}×{len(lat_plot)}"
+    detail = "native resolution" if factor == 1 else f"÷{factor} of full"
+    if view_bounds is None:
+        region = "Full globe"
+    else:
+        region = (f"Lon [{float(np.nanmin(lon_plot)):.2f}, {float(np.nanmax(lon_plot)):.2f}], "
+                  f"Lat [{float(np.nanmin(lat_plot)):.2f}, {float(np.nanmax(lat_plot)):.2f}]")
+    fig_main.update_layout(
+        title=(f"{filepath.name}<br><sup>{fields['title']} | {region} | "
+               f"full {full_nx}×{full_ny}, displayed {disp} ({detail})</sup>"),
+        height=650,
+        dragmode='select',
+        showlegend=False,
+    )
+    fig_main.update_xaxes(title_text="Longitude")
+    fig_main.update_yaxes(title_text="Latitude", scaleanchor="x")
+
+    # ----- Companion figure: histogram (visible region) + mask -----
+    # Sample the sliced full-res region for the histogram/stats so the work is
+    # bounded regardless of zoom (a global view's region can be ~650M cells).
+    flat = sst_region.ravel()
+    if flat.size > 2_000_000:
+        idx = np.random.randint(0, flat.size, size=2_000_000)
+        flat = flat[idx]
+    sst_valid = flat[~np.isnan(flat)]
+
+    has_mask = mask_full is not None
     if has_mask:
-        fig = make_subplots(
-            rows=2, cols=2,
-            row_heights=[0.65, 0.35],
-            subplot_titles=[
-                "MUR SST Analysis (°C)", "",
-                "SST Distribution", "Land/Sea/Ice Mask"
-            ],
-            specs=[
-                [{"type": "heatmap", "colspan": 2}, None],
-                [{"type": "histogram"}, {"type": "heatmap"}]
-            ],
-            vertical_spacing=0.12,
-            horizontal_spacing=0.08
+        mask_region = mask_full[lat_slice, lon_slice]
+        mask_plot = nearest_resample(mask_region, factor)
+        fig_aux = make_subplots(
+            rows=1, cols=2,
+            subplot_titles=["SST Distribution (visible region)", "Land/Sea/Ice Mask"],
+            specs=[[{"type": "histogram"}, {"type": "heatmap"}]],
+            horizontal_spacing=0.12,
+            column_widths=[0.45, 0.55],
         )
     else:
-        fig = make_subplots(
-            rows=2, cols=1,
-            row_heights=[0.65, 0.35],
-            subplot_titles=["MUR SST Analysis (°C)", "SST Distribution"],
-            specs=[
-                [{"type": "heatmap"}],
-                [{"type": "histogram"}]
-            ],
-            vertical_spacing=0.12
+        fig_aux = make_subplots(
+            rows=1, cols=1,
+            subplot_titles=["SST Distribution (visible region)"],
+            specs=[[{"type": "histogram"}]],
         )
 
-    # SST heatmap - top row (full width)
-    fig.add_trace(
-        go.Heatmap(
-            z=sst_plot,
-            x=lon_plot,
-            y=lat_plot,
-            colorscale='RdYlBu_r',
-            zmin=vmin,
-            zmax=vmax,
-            colorbar=dict(title="SST (°C)", x=1.02, len=0.6, y=0.75),
-            hovertemplate="Lon: %{x:.2f}<br>Lat: %{y:.2f}<br>SST: %{z:.2f}°C<extra></extra>"
-        ),
-        row=1, col=1
-    )
-
-    # SST histogram - bottom left
     if len(sst_valid) > 0:
-        # Sample for histogram if too many points
-        if len(sst_valid) > 100000:
-            hist_data = np.random.choice(sst_valid, 100000, replace=False)
-        else:
-            hist_data = sst_valid
-
-        fig.add_trace(
+        hist_data = (np.random.choice(sst_valid, 100000, replace=False)
+                     if len(sst_valid) > 100000 else sst_valid)
+        fig_aux.add_trace(
             go.Histogram(
-                x=hist_data,
-                nbinsx=100,
-                marker_color='steelblue',
-                opacity=0.7,
+                x=hist_data, nbinsx=100, marker_color='steelblue', opacity=0.7,
                 hovertemplate="SST: %{x:.1f}°C<br>Count: %{y}<extra></extra>"
             ),
-            row=2, col=1
+            row=1, col=1
         )
 
-    # Mask heatmap - bottom right (if available)
-    if has_mask and mask_plot is not None:
-        # Create mask display with fill values masked
+    if has_mask:
         mask_display = np.where(mask_plot < 0, np.nan, mask_plot)
-
-        fig.add_trace(
+        fig_aux.add_trace(
             go.Heatmap(
-                z=mask_display,
-                x=lon_plot,
-                y=lat_plot,
+                z=mask_display, x=lon_plot, y=lat_plot,
                 colorscale='Viridis',
                 colorbar=dict(
                     title="Mask",
-                    x=1.02,
-                    len=0.3,
-                    y=0.15,
                     tickvals=[1, 2, 3, 5, 9],
                     ticktext=['Sea', 'Land', 'Coast', 'Lake', 'Ice']
                 ),
-                hovertemplate=(
-                    "Lon: %{x:.2f}<br>Lat: %{y:.2f}<br>"
-                    "Mask: %{z}<extra></extra>"
-                )
+                hovertemplate=("Lon: %{x:.2f}<br>Lat: %{y:.2f}<br>"
+                               "Mask: %{z}<extra></extra>")
             ),
-            row=2, col=2
+            row=1, col=2
         )
 
-    # Update layout
-    title_str = data['attributes'].get('title', 'MUR SST L4 Analysis')
-    resolution = f"{len(lon)}×{len(lat)}"
-    if subsample > 1:
-        resolution += f" (displayed at {len(lon_plot)}×{len(lat_plot)})"
-
-    fig.update_layout(
-        title=f"{filepath.name}<br><sup>{title_str} | Resolution: {resolution}</sup>",
-        height=900,
-        showlegend=False,
-    )
-
-    # Update axes for SST map (row 1)
-    fig.update_xaxes(title_text="Longitude", row=1, col=1)
-    fig.update_yaxes(title_text="Latitude", scaleanchor="x", row=1, col=1)
-
-    # Update axes for histogram (row 2, col 1)
-    fig.update_xaxes(title_text="SST (°C)", row=2, col=1)
-    fig.update_yaxes(title_text="Count", row=2, col=1)
-
-    # Update axes for mask (row 2, col 2) if present
+    fig_aux.update_layout(height=380, showlegend=False)
+    fig_aux.update_xaxes(title_text="SST (°C)", row=1, col=1)
+    fig_aux.update_yaxes(title_text="Count", row=1, col=1)
     if has_mask:
-        fig.update_xaxes(title_text="Longitude", row=2, col=2)
-        fig.update_yaxes(title_text="Latitude", row=2, col=2)
+        fig_aux.update_xaxes(title_text="Longitude", row=1, col=2)
+        fig_aux.update_yaxes(title_text="Latitude", row=1, col=2)
 
-    # Add statistics annotation on the histogram
     if len(sst_valid) > 0:
         stats_text = (
-            f"Valid pixels: {len(sst_valid):,}<br>"
+            f"Valid pixels (sampled): {len(sst_valid):,}<br>"
             f"Mean: {sst_valid.mean():.2f}°C<br>"
             f"Std: {sst_valid.std():.2f}°C<br>"
             f"Range: [{sst_valid.min():.2f}, {sst_valid.max():.2f}]°C"
         )
-        fig.add_annotation(
+        fig_aux.add_annotation(
             text=stats_text,
-            xref="x2 domain", yref="y2 domain",
-            x=0.98, y=0.98,
-            showarrow=False,
-            font=dict(size=10, family="monospace"),
-            align="right",
-            bgcolor="rgba(255,255,255,0.8)",
-            bordercolor="gray",
-            borderwidth=1
+            xref="x domain", yref="y domain",
+            x=0.98, y=0.98, showarrow=False,
+            font=dict(size=10, family="monospace"), align="right",
+            bgcolor="rgba(255,255,255,0.8)", bordercolor="gray", borderwidth=1
         )
 
-    return fig
+    return fig_main, fig_aux
+
+
+def _extract_box_bounds(event) -> Optional[tuple]:
+    """
+    Pull (lon_min, lon_max, lat_min, lat_max) from a Streamlit Plotly
+    box-selection event, or None if there is no box selection.
+    """
+    try:
+        sel = event.get("selection") if isinstance(event, dict) else event.selection
+        boxes = sel.get("box") if sel else None
+    except (AttributeError, KeyError, TypeError):
+        return None
+    if not boxes:
+        return None
+    box = boxes[0]
+    xs = box.get("x") if isinstance(box, dict) else None
+    ys = box.get("y") if isinstance(box, dict) else None
+    if not xs or not ys or len(xs) < 2 or len(ys) < 2:
+        return None
+    return (float(min(xs)), float(max(xs)), float(min(ys)), float(max(ys)))
+
+
+def _render_netcdf_plotly(fields: dict, filepath: Path):
+    """
+    Render the MUR GHRSST Plotly view with box-select driven, view-aware
+    full-resolution resampling.
+
+    Drawing a box on the SST map stores its lon/lat bounds in session state and
+    reruns so the region re-renders at full detail. A reset button returns to
+    the global view; it bumps a per-file "epoch" so the SST chart gets a fresh
+    widget key and its stale box selection is cleared (otherwise the reset would
+    immediately re-apply the old selection and zoom right back in).
+    """
+    file_key = str(filepath)
+    bounds_store = st.session_state.setdefault("nc_view_bounds", {})
+    epoch_store = st.session_state.setdefault("nc_view_epoch", {})
+    view_bounds = bounds_store.get(file_key)
+    epoch = epoch_store.get(file_key, 0)
+
+    ctrl1, ctrl2 = st.columns([1, 4])
+    with ctrl1:
+        if st.button("⟲ Reset to full view", key=f"nc_reset_{file_key}",
+                     disabled=view_bounds is None):
+            bounds_store.pop(file_key, None)
+            epoch_store[file_key] = epoch + 1
+            st.rerun()
+    with ctrl2:
+        st.caption(
+            "Use the **box select** tool (drag a rectangle) on the SST map to "
+            "zoom in — the region re-renders at full resolution. Click "
+            "**Reset to full view** to return to the global map."
+        )
+
+    fig_main, fig_aux = create_interactive_netcdf_plot(
+        fields, filepath, view_bounds)
+
+    event = st.plotly_chart(
+        fig_main, use_container_width=True,
+        key=f"nc_main_{file_key}_{epoch}",
+        on_select="rerun", selection_mode="box"
+    )
+
+    # A fresh box selection (different from the stored view) -> zoom and rerun.
+    new_bounds = _extract_box_bounds(event)
+    if new_bounds is not None and new_bounds != view_bounds:
+        bounds_store[file_key] = new_bounds
+        st.rerun()
+
+    st.plotly_chart(fig_aux, use_container_width=True,
+                    key=f"nc_aux_{file_key}_{epoch}")
 
 
 def create_coefficient_plot(data: dict, format_type: str, filepath: Path) -> plt.Figure:
@@ -1906,8 +1968,8 @@ def compare_files_data(
             }
 
     elif format_type == 'nc':
-        # NetCDF comparison - memory efficient chunked approach
-        # data1/data2 should have '_filepath' key
+        # NetCDF comparison - delegates to the cached full-resolution diff
+        # builder, then maps its results into this function's output schema.
         file1_path = data1.get('_filepath')
         file2_path = data2.get('_filepath')
 
@@ -1931,138 +1993,291 @@ def compare_files_data(
             results['all_match'] = False
             return results
 
+        # Dimension check (cheap) before kicking off the full-res pass.
         with Dataset(file1_path, 'r') as ds1, Dataset(file2_path, 'r') as ds2:
-            # Compare dimensions
             dims1 = {k: len(v) for k, v in ds1.dimensions.items()}
             dims2 = {k: len(v) for k, v in ds2.dimensions.items()}
+            has_sst1 = 'analysed_sst' in ds1.variables
+            has_sst2 = 'analysed_sst' in ds2.variables
+            sst1_shape = ds1.variables['analysed_sst'].shape if has_sst1 else None
+            sst2_shape = ds2.variables['analysed_sst'].shape if has_sst2 else None
 
-            if dims1 == dims2:
+        if dims1 == dims2:
+            results['comparisons'].append({
+                'field': 'dimensions',
+                'match': True,
+                'message': f"Match: {dims1}"
+            })
+        else:
+            results['comparisons'].append({
+                'field': 'dimensions',
+                'match': False,
+                'message': f"Different: {dims1} vs {dims2}"
+            })
+            results['all_match'] = False
+
+        if not (has_sst1 and has_sst2):
+            return results
+
+        if sst1_shape != sst2_shape:
+            results['comparisons'].append({
+                'field': 'analysed_sst',
+                'match': False,
+                'message': f"Different shapes: {sst1_shape} vs {sst2_shape}"
+            })
+            results['all_match'] = False
+            return results
+
+        # Single full-resolution pass; cached for the plot to reuse.
+        diff_info = get_or_build_diff(file1_path, file2_path,
+                                      tolerance=tolerance)
+
+        valid_count = diff_info['n_valid']
+        if valid_count > 0:
+            max_diff = diff_info['max_abs']
+            mean_diff = diff_info['mean']
+            rmse = diff_info['rmse']
+            num_diff = diff_info['num_diff']
+            pct_diff = diff_info['pct_diff']
+
+            if num_diff == 0:
                 results['comparisons'].append({
-                    'field': 'dimensions',
+                    'field': 'analysed_sst',
                     'match': True,
-                    'message': f"Match: {dims1}"
+                    'message': f"Match within tolerance ({valid_count:,} valid pixels)"
                 })
             else:
                 results['comparisons'].append({
-                    'field': 'dimensions',
+                    'field': 'analysed_sst',
                     'match': False,
-                    'message': f"Different: {dims1} vs {dims2}"
+                    'message': (f"Differs: {num_diff:,} pixels "
+                                f"({pct_diff:.4f}%), "
+                                f"max={max_diff:.4f}K, "
+                                f"mean={mean_diff:.6f}K, "
+                                f"RMSE={rmse:.6f}K")
                 })
                 results['all_match'] = False
 
-            # Compare analysed_sst if present (chunked for memory efficiency)
-            if 'analysed_sst' in ds1.variables and 'analysed_sst' in ds2.variables:
-                sst1 = ds1.variables['analysed_sst']
-                sst2 = ds2.variables['analysed_sst']
-
-                if sst1.shape != sst2.shape:
-                    results['comparisons'].append({
-                        'field': 'analysed_sst',
-                        'match': False,
-                        'message': f"Different shapes: {sst1.shape} vs {sst2.shape}"
-                    })
-                    results['all_match'] = False
-                else:
-                    # Chunked comparison - process in lat strips
-                    chunk_size = 500  # Process 500 rows at a time
-                    total_diff = 0.0
-                    total_sq_diff = 0.0
-                    max_diff = 0.0
-                    valid_count = 0
-                    num_diff = 0
-
-                    # Handle 3D (time, lat, lon) or 2D (lat, lon)
-                    if sst1.ndim == 3:
-                        nlat = sst1.shape[1]
-                        for start in range(0, nlat, chunk_size):
-                            end = min(start + chunk_size, nlat)
-                            chunk1 = sst1[0, start:end, :]
-                            chunk2 = sst2[0, start:end, :]
-
-                            # Convert masked arrays
-                            if hasattr(chunk1, 'filled'):
-                                chunk1 = chunk1.filled(np.nan)
-                            if hasattr(chunk2, 'filled'):
-                                chunk2 = chunk2.filled(np.nan)
-
-                            chunk1 = np.array(chunk1, dtype=np.float64)
-                            chunk2 = np.array(chunk2, dtype=np.float64)
-
-                            # Mask invalid values
-                            chunk1[(chunk1 < 200) | (chunk1 > 350)] = np.nan
-                            chunk2[(chunk2 < 200) | (chunk2 > 350)] = np.nan
-
-                            valid = ~(np.isnan(chunk1) | np.isnan(chunk2))
-                            if np.any(valid):
-                                diff = chunk1[valid] - chunk2[valid]
-                                total_diff += np.sum(diff)
-                                total_sq_diff += np.sum(diff ** 2)
-                                max_diff = max(max_diff, np.max(np.abs(diff)))
-                                valid_count += len(diff)
-                                num_diff += np.sum(np.abs(diff) > tolerance)
-                    else:
-                        nlat = sst1.shape[0]
-                        for start in range(0, nlat, chunk_size):
-                            end = min(start + chunk_size, nlat)
-                            chunk1 = sst1[start:end, :]
-                            chunk2 = sst2[start:end, :]
-
-                            if hasattr(chunk1, 'filled'):
-                                chunk1 = chunk1.filled(np.nan)
-                            if hasattr(chunk2, 'filled'):
-                                chunk2 = chunk2.filled(np.nan)
-
-                            chunk1 = np.array(chunk1, dtype=np.float64)
-                            chunk2 = np.array(chunk2, dtype=np.float64)
-
-                            chunk1[(chunk1 < 200) | (chunk1 > 350)] = np.nan
-                            chunk2[(chunk2 < 200) | (chunk2 > 350)] = np.nan
-
-                            valid = ~(np.isnan(chunk1) | np.isnan(chunk2))
-                            if np.any(valid):
-                                diff = chunk1[valid] - chunk2[valid]
-                                total_diff += np.sum(diff)
-                                total_sq_diff += np.sum(diff ** 2)
-                                max_diff = max(max_diff, np.max(np.abs(diff)))
-                                valid_count += len(diff)
-                                num_diff += np.sum(np.abs(diff) > tolerance)
-
-                    if valid_count > 0:
-                        mean_diff = total_diff / valid_count
-                        rmse = np.sqrt(total_sq_diff / valid_count)
-                        pct_diff = 100.0 * num_diff / valid_count
-
-                        if num_diff == 0:
-                            results['comparisons'].append({
-                                'field': 'analysed_sst',
-                                'match': True,
-                                'message': f"Match within tolerance ({valid_count:,} valid pixels)"
-                            })
-                        else:
-                            results['comparisons'].append({
-                                'field': 'analysed_sst',
-                                'match': False,
-                                'message': f"Differs: {num_diff:,} pixels ({pct_diff:.4f}%), "
-                                          f"max={max_diff:.4f}K, mean={mean_diff:.6f}K, RMSE={rmse:.6f}K"
-                            })
-                            results['all_match'] = False
-
-                        results['stats']['analysed_sst'] = {
-                            'max_diff': max_diff,
-                            'mean_diff': mean_diff,
-                            'rmse': rmse,
-                            'num_diff': num_diff,
-                            'pct_diff': pct_diff,
-                            'valid_count': valid_count
-                        }
-                    else:
-                        results['comparisons'].append({
-                            'field': 'analysed_sst',
-                            'match': True,
-                            'message': 'No valid overlapping data'
-                        })
+            worst_row = diff_info['worst_row']
+            results['stats']['analysed_sst'] = {
+                'max_diff': max_diff,
+                'mean_diff': mean_diff,
+                'rmse': rmse,
+                'num_diff': num_diff,
+                'pct_diff': pct_diff,
+                'valid_count': valid_count,
+                'tail_thresholds': diff_info['tail_thresholds'],
+                'tail_counts': diff_info['tail_counts'],
+                'worst_value': (diff_info['worst_value']
+                                if worst_row >= 0 else None),
+                'worst_lat': (diff_info['worst_lat']
+                              if worst_row >= 0 else None),
+                'worst_lon': (diff_info['worst_lon']
+                              if worst_row >= 0 else None),
+            }
+        else:
+            results['comparisons'].append({
+                'field': 'analysed_sst',
+                'match': True,
+                'message': 'No valid overlapping data'
+            })
 
     return results
+
+
+def _max_abs_decimate(arr: np.ndarray, factor: int) -> np.ndarray:
+    """Block-reduce a 2D array by ``factor`` along each axis, keeping the
+    value with the largest absolute magnitude in each block (sign preserved).
+    NaNs are ignored; all-NaN blocks yield NaN. Edge blocks are NaN-padded."""
+    if factor <= 1:
+        return arr
+    h, w = arr.shape
+    out_h = (h + factor - 1) // factor
+    out_w = (w + factor - 1) // factor
+    pad_h = out_h * factor - h
+    pad_w = out_w * factor - w
+    if pad_h or pad_w:
+        arr = np.pad(arr, ((0, pad_h), (0, pad_w)), constant_values=np.nan)
+    blocks = arr.reshape(out_h, factor, out_w, factor)
+    blocks = blocks.transpose(0, 2, 1, 3).reshape(out_h, out_w, factor * factor)
+    abs_blocks = np.abs(blocks)
+    all_nan = np.all(np.isnan(abs_blocks), axis=-1)
+    safe = np.where(np.isnan(abs_blocks), -np.inf, abs_blocks)
+    idx = np.argmax(safe, axis=-1)
+    out = np.take_along_axis(blocks, idx[..., None], axis=-1).squeeze(-1)
+    out[all_nan] = np.nan
+    return out
+
+
+def build_full_res_diff(file1_path, file2_path, tolerance: float = 0.0001,
+                        max_display: int = 2000,
+                        chunk_rows: int = 1000) -> dict:
+    """One full-resolution pass over the two NetCDF files.
+
+    Materializes the full ``analysed_sst`` difference as a single in-memory
+    ``float32`` image, then computes every downstream metric from it: summary
+    statistics, tail-threshold counts, worst-pixel location, a fixed-edge
+    histogram, and a max-abs decimated array for plotting. The full diff
+    array is dropped before the function returns, so the cached result is
+    small (~few MB).
+
+    Diff is in Kelvin (== degrees Celsius for a difference). The valid
+    GHRSST range [200, 350] K is applied per pixel before differencing.
+
+    Memory peak (during the pass, before the diff array drops out of scope):
+    ``nlat * nlon * 4`` bytes for the diff, plus ~120 MB of transient chunk
+    buffers. For a global MUR pair (36000 x 17999) that's ~2.6 GB.
+    """
+    from netCDF4 import Dataset
+
+    with Dataset(file1_path, 'r') as ds1, Dataset(file2_path, 'r') as ds2:
+        if ('analysed_sst' not in ds1.variables
+                or 'analysed_sst' not in ds2.variables):
+            raise ValueError(
+                'analysed_sst missing from one of the NetCDF files'
+            )
+        sv1 = ds1.variables['analysed_sst']
+        sv2 = ds2.variables['analysed_sst']
+        lon = np.asarray(ds1.variables['lon'][:])
+        lat = np.asarray(ds1.variables['lat'][:])
+        is_3d_1 = sv1.ndim == 3
+        is_3d_2 = sv2.ndim == 3
+        shape1 = sv1.shape[1:] if is_3d_1 else sv1.shape
+        shape2 = sv2.shape[1:] if is_3d_2 else sv2.shape
+        if shape1 != shape2:
+            raise ValueError(
+                f'analysed_sst shape mismatch: {shape1} vs {shape2}'
+            )
+        nlat, nlon = shape1
+        if (nlat, nlon) != (len(lat), len(lon)):
+            raise ValueError(
+                f'coord shape ({len(lat)}, {len(lon)}) != data shape {shape1}'
+            )
+
+        subsample = max(1, max(nlon, nlat) // max_display)
+        chunk_rows = max(1, chunk_rows)
+
+        diff = np.full((nlat, nlon), np.nan, dtype=np.float32)
+
+        for start in range(0, nlat, chunk_rows):
+            end = min(start + chunk_rows, nlat)
+            c1 = sv1[0, start:end, :] if is_3d_1 else sv1[start:end, :]
+            c2 = sv2[0, start:end, :] if is_3d_2 else sv2[start:end, :]
+            if hasattr(c1, 'filled'):
+                c1 = c1.filled(np.nan)
+            if hasattr(c2, 'filled'):
+                c2 = c2.filled(np.nan)
+            c1 = np.asarray(c1, dtype=np.float32)
+            c2 = np.asarray(c2, dtype=np.float32)
+            c1[(c1 < 200) | (c1 > 350)] = np.nan
+            c2[(c2 < 200) | (c2 > 350)] = np.nan
+            diff[start:end, :] = c1 - c2
+
+    # Stats from the full diff image. Use float64 accumulators for accuracy.
+    n_valid = int(np.count_nonzero(~np.isnan(diff)))
+    tail_thresholds = [0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0]
+
+    if n_valid > 0:
+        sum_d = float(np.nansum(diff, dtype=np.float64))
+        sq_temp = np.multiply(diff, diff, dtype=np.float32)  # ~2.6 GB transient
+        sum_sq = float(np.nansum(sq_temp, dtype=np.float64))
+        del sq_temp
+        mean = sum_d / n_valid
+        var = max(0.0, sum_sq / n_valid - mean * mean)
+        std = float(np.sqrt(var))
+        rmse = float(np.sqrt(sum_sq / n_valid))
+        min_d = float(np.nanmin(diff))
+        max_d = float(np.nanmax(diff))
+
+        abs_diff = np.abs(diff)  # ~2.6 GB transient
+        max_abs = float(np.nanmax(abs_diff))
+        tail_counts = [int(np.nansum(abs_diff > t)) for t in tail_thresholds]
+        num_diff = int(np.nansum(abs_diff > tolerance))
+        pct_diff = 100.0 * num_diff / n_valid
+        flat_idx = int(np.nanargmax(abs_diff))
+        worst_row, worst_col = (int(x) for x in np.unravel_index(flat_idx,
+                                                                 diff.shape))
+        worst_value = float(diff[worst_row, worst_col])
+        worst_lat = float(lat[worst_row])
+        worst_lon = float(lon[worst_col])
+        del abs_diff
+
+        HIST_LO, HIST_HI, HIST_N = -10.0, 10.0, 200
+        hist_edges = np.linspace(HIST_LO, HIST_HI, HIST_N + 1)
+        # np.histogram drops NaN and out-of-range values
+        hist_counts, _ = np.histogram(diff, bins=hist_edges)
+        overflow_low = int(np.nansum(diff < HIST_LO))
+        overflow_high = int(np.nansum(diff > HIST_HI))
+    else:
+        mean = std = rmse = 0.0
+        min_d = max_d = max_abs = 0.0
+        tail_counts = [0] * len(tail_thresholds)
+        num_diff = 0
+        pct_diff = 0.0
+        worst_row = worst_col = -1
+        worst_value = 0.0
+        worst_lat = worst_lon = 0.0
+        hist_edges = np.linspace(-10.0, 10.0, 201)
+        hist_counts = np.zeros(200, dtype=np.int64)
+        overflow_low = overflow_high = 0
+
+    diff_plot = _max_abs_decimate(diff, subsample)
+    lon_plot = lon[::subsample][: diff_plot.shape[1]]
+    lat_plot = lat[::subsample][: diff_plot.shape[0]]
+
+    # `diff` goes out of scope here; only derived (small) artifacts returned.
+    return {
+        'shape': (nlat, nlon),
+        'lon': lon,
+        'lat': lat,
+        'subsample': subsample,
+        'n_valid': n_valid,
+        'mean': mean,
+        'std': std,
+        'rmse': rmse,
+        'min': min_d,
+        'max': max_d,
+        'max_abs': max_abs,
+        'num_diff': num_diff,
+        'pct_diff': pct_diff,
+        'tolerance': tolerance,
+        'tail_thresholds': tail_thresholds,
+        'tail_counts': tail_counts,
+        'worst_row': worst_row,
+        'worst_col': worst_col,
+        'worst_value': worst_value,
+        'worst_lat': worst_lat,
+        'worst_lon': worst_lon,
+        'hist_counts': hist_counts,
+        'hist_edges': hist_edges,
+        'overflow_low': overflow_low,
+        'overflow_high': overflow_high,
+        'diff_plot': diff_plot,
+        'lon_plot': lon_plot,
+        'lat_plot': lat_plot,
+    }
+
+
+def get_or_build_diff(file1_path, file2_path,
+                      tolerance: float = 0.0001) -> dict:
+    """Session-cached wrapper around :func:`build_full_res_diff`.
+
+    Keyed by file paths + mtimes + tolerance. Only the most recent result is
+    retained to bound memory.
+    """
+    try:
+        mt1 = os.path.getmtime(file1_path)
+        mt2 = os.path.getmtime(file2_path)
+    except OSError:
+        mt1 = mt2 = 0.0
+    key = ('full_res_diff', str(file1_path), str(file2_path),
+           mt1, mt2, float(tolerance))
+    cache = st.session_state.setdefault('_diff_cache', {})
+    if key not in cache:
+        cache.clear()
+        cache[key] = build_full_res_diff(file1_path, file2_path,
+                                         tolerance=tolerance)
+    return cache[key]
 
 
 def create_comparison_plot(data1: dict, data2: dict, format_type: str,
@@ -2220,155 +2435,78 @@ def create_comparison_plot(data1: dict, data2: dict, format_type: str,
         return fig
 
     elif format_type == 'nc':
-        # NetCDF comparison - memory efficient: read with subsampling
-        # data1/data2 contain file paths in 'filepath' key for nc files
-        # or we use the pre-loaded data if available
-
-        # For NetCDF, we need to read directly with subsampling to avoid memory issues
-        # The data dicts should have 'filepath' from the comparison code
+        # NetCDF comparison: pull the cached full-resolution diff (built once
+        # per file pair) and plot the max-abs decimated array with full-res
+        # stats from the same single in-memory diff image.
         file1_path = data1.get('_filepath')
         file2_path = data2.get('_filepath')
 
-        # If filepaths not available, try to use pre-loaded data (may fail for large files)
         if not file1_path or not file2_path:
-            variables1 = data1.get('variables', {})
-            variables2 = data2.get('variables', {})
-
-            if 'analysed_sst' not in variables1 or 'analysed_sst' not in variables2:
-                fig, ax = plt.subplots(figsize=(10, 6))
-                ax.text(0.5, 0.5,
-                        'NetCDF comparison requires MUR GHRSST files\n'
-                        '(must contain analysed_sst variable)',
-                        ha='center', va='center', fontsize=14)
-                ax.axis('off')
-                return fig
-
-            # Use pre-loaded data (original code path)
-            sst_var1 = variables1['analysed_sst']
-            sst_var2 = variables2['analysed_sst']
-            lon = np.array(variables1['lon']['data'][:])
-            lat = np.array(variables1['lat']['data'][:])
-            sst_data1 = sst_var1['data']
-            sst_data2 = sst_var2['data']
-
-            if sst_data1.ndim == 3:
-                sst_data1 = sst_data1[0, :, :]
-            if sst_data2.ndim == 3:
-                sst_data2 = sst_data2[0, :, :]
-
-            sst1 = np.array(sst_data1)
-            sst2 = np.array(sst_data2)
-
-            if isinstance(sst_data1, np.ma.MaskedArray):
-                sst1 = sst_data1.filled(np.nan)
-            if isinstance(sst_data2, np.ma.MaskedArray):
-                sst2 = sst_data2.filled(np.nan)
-
-            max_display = 2000
-            nlon, nlat = len(lon), len(lat)
-            subsample = max(1, max(nlon, nlat) // max_display)
-
-            lon_plot = lon[::subsample]
-            lat_plot = lat[::subsample]
-            sst1 = sst1[::subsample, ::subsample]
-            sst2 = sst2[::subsample, ::subsample]
-        else:
-            # Memory-efficient path: read directly with subsampling
-            try:
-                from netCDF4 import Dataset
-            except ImportError:
-                fig, ax = plt.subplots(figsize=(10, 6))
-                ax.text(0.5, 0.5, 'netCDF4 package required',
-                        ha='center', va='center', fontsize=14)
-                ax.axis('off')
-                return fig
-
-            # Determine subsample rate from file dimensions
-            with Dataset(file1_path, 'r') as ds1:
-                if 'analysed_sst' not in ds1.variables:
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    ax.text(0.5, 0.5,
-                            'NetCDF comparison requires MUR GHRSST files\n'
-                            '(must contain analysed_sst variable)',
-                            ha='center', va='center', fontsize=14)
-                    ax.axis('off')
-                    return fig
-
-                lon_full = ds1.variables['lon'][:]
-                lat_full = ds1.variables['lat'][:]
-                nlon, nlat = len(lon_full), len(lat_full)
-
-                # Calculate subsample to get ~2000 pixels max dimension
-                max_display = 2000
-                subsample = max(1, max(nlon, nlat) // max_display)
-
-                # Read subsampled coordinates
-                lon_plot = lon_full[::subsample]
-                lat_plot = lat_full[::subsample]
-
-                # Read subsampled SST data
-                sst_var1 = ds1.variables['analysed_sst']
-                if sst_var1.ndim == 3:
-                    sst1 = sst_var1[0, ::subsample, ::subsample]
-                else:
-                    sst1 = sst_var1[::subsample, ::subsample]
-
-                if isinstance(sst1, np.ma.MaskedArray):
-                    sst1 = sst1.filled(np.nan)
-                sst1 = np.array(sst1, dtype=np.float64)
-
-            with Dataset(file2_path, 'r') as ds2:
-                sst_var2 = ds2.variables['analysed_sst']
-                if sst_var2.ndim == 3:
-                    sst2 = sst_var2[0, ::subsample, ::subsample]
-                else:
-                    sst2 = sst_var2[::subsample, ::subsample]
-
-                if isinstance(sst2, np.ma.MaskedArray):
-                    sst2 = sst2.filled(np.nan)
-                sst2 = np.array(sst2, dtype=np.float64)
-
-        # Process SST data
-        sst1[(sst1 < 200) | (sst1 > 350)] = np.nan
-        sst2[(sst2 < 200) | (sst2 > 350)] = np.nan
-        sst1 = sst1 - 273.15  # Kelvin to Celsius
-        sst2 = sst2 - 273.15
-
-        # Check shapes match
-        if sst1.shape != sst2.shape:
             fig, ax = plt.subplots(figsize=(10, 6))
             ax.text(0.5, 0.5,
-                    f'Cannot compare: different grid sizes\n'
-                    f'File 1: {sst1.shape}\nFile 2: {sst2.shape}',
+                    'NetCDF comparison requires file paths\n'
+                    '(re-open the files via the comparison UI)',
                     ha='center', va='center', fontsize=14)
             ax.axis('off')
             return fig
 
-        # Calculate difference
-        diff_plot = sst1 - sst2
+        try:
+            diff_info = get_or_build_diff(file1_path, file2_path)
+        except ValueError as exc:
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.text(0.5, 0.5, str(exc),
+                    ha='center', va='center', fontsize=14)
+            ax.axis('off')
+            return fig
+        except ImportError:
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.text(0.5, 0.5, 'netCDF4 package required',
+                    ha='center', va='center', fontsize=14)
+            ax.axis('off')
+            return fig
 
-        # Handle dimension ordering (data should be lat, lon)
-        expected_shape = (len(lat_plot), len(lon_plot))
-        if diff_plot.shape != expected_shape:
-            if diff_plot.shape == (len(lon_plot), len(lat_plot)):
-                diff_plot = diff_plot.T
+        diff_plot = diff_info['diff_plot']
+        lon_plot = diff_info['lon_plot']
+        lat_plot = diff_info['lat_plot']
 
-        # Get valid difference values for statistics
-        diff_valid = diff_plot[~np.isnan(diff_plot)].flatten()
+        n_valid = diff_info['n_valid']
+        mean_diff = diff_info['mean']
+        std_diff = diff_info['std']
+        rmse = diff_info['rmse']
+        min_diff = diff_info['min']
+        max_diff = diff_info['max']
+        hist_counts = diff_info['hist_counts']
+        hist_edges = diff_info['hist_edges']
+        overflow_low = diff_info['overflow_low']
+        overflow_high = diff_info['overflow_high']
 
-        # Calculate color limits: use 2*std or cap at 5°C, whichever is smaller
-        if len(diff_valid) > 0:
-            std_diff = np.std(diff_valid)
-            diff_limit = min(5.0, 2.0 * std_diff)
-            diff_limit = max(diff_limit, 0.1)  # minimum range
+        # Color limits: robust ±max(|2%|,|98%|), capped at 5°C, derived from
+        # the full-resolution streaming histogram.
+        if n_valid > 0:
+            total = hist_counts.sum() + overflow_low + overflow_high
+            cum = np.cumsum(hist_counts) + overflow_low
+            target_lo = 0.02 * total
+            target_hi = 0.98 * total
+            # Place overflow at the edges (-10 / +10 °C) for limit computation
+            if overflow_low >= target_lo:
+                lo = -10.0
+            else:
+                lo_idx = int(np.searchsorted(cum, target_lo))
+                lo = hist_edges[min(lo_idx, len(hist_edges) - 1)]
+            if (total - overflow_high) <= target_hi:
+                hi = 10.0
+            else:
+                hi_idx = int(np.searchsorted(cum, target_hi))
+                hi = hist_edges[min(hi_idx, len(hist_edges) - 1)]
+            diff_limit = min(5.0, max(abs(lo), abs(hi)))
+            if diff_limit == 0:
+                diff_limit = 1e-6
         else:
             diff_limit = 5.0
 
-        # Create figure: difference map on top, histogram on bottom
         fig = plt.figure(figsize=(14, 10), constrained_layout=True)
         gs = fig.add_gridspec(2, 1, height_ratios=[2, 1])
 
-        # Difference map
         ax_diff = fig.add_subplot(gs[0])
         im_diff = ax_diff.pcolormesh(lon_plot, lat_plot, diff_plot,
                                      cmap='RdBu_r',
@@ -2377,14 +2515,12 @@ def create_comparison_plot(data1: dict, data2: dict, format_type: str,
         ax_diff.set_xlabel('Longitude (degrees)', fontsize=11)
         ax_diff.set_ylabel('Latitude (degrees)', fontsize=11)
 
-        # Statistics for title
-        if len(diff_valid) > 0:
-            mean_diff = np.mean(diff_valid)
-            rmse = np.sqrt(np.mean(diff_valid**2))
+        if n_valid > 0:
             ax_diff.set_title(
                 f'SST Difference: {file1_name} - {file2_name}\n'
                 f'Mean: {mean_diff:.4f}°C | Std: {std_diff:.4f}°C | '
-                f'RMSE: {rmse:.4f}°C | Color range: ±{diff_limit:.2f}°C',
+                f'RMSE: {rmse:.4f}°C | Color range: ±{diff_limit:.2f}°C '
+                f'(max-abs decimation, full-res stats)',
                 fontsize=12, fontweight='bold'
             )
         else:
@@ -2395,43 +2531,48 @@ def create_comparison_plot(data1: dict, data2: dict, format_type: str,
 
         ax_diff.set_aspect('equal', adjustable='box')
         ax_diff.grid(True, alpha=0.3)
-        cbar = plt.colorbar(im_diff, ax=ax_diff, label='Difference (°C)',
-                            shrink=0.8, pad=0.02)
+        plt.colorbar(im_diff, ax=ax_diff, label='Difference (°C)',
+                     shrink=0.8, pad=0.02)
 
-        # Histogram
         ax_hist = fig.add_subplot(gs[1])
-        if len(diff_valid) > 0:
-            # Clip histogram to reasonable range for display
-            hist_data = diff_valid[np.abs(diff_valid) < 10]
-            if len(hist_data) > 0:
-                ax_hist.hist(hist_data, bins=100, edgecolor='black',
-                             alpha=0.7, color='steelblue')
-                ax_hist.axvline(x=0, color='r', linestyle='--', linewidth=2,
-                                label='Zero')
-                ax_hist.axvline(x=mean_diff, color='orange',
-                                linestyle='-', linewidth=2, label='Mean')
-                ax_hist.set_xlabel('Difference (°C)', fontsize=11)
-                ax_hist.set_ylabel('Count', fontsize=11)
-                ax_hist.set_title('Difference Distribution', fontsize=12)
-                ax_hist.legend(loc='upper right')
-                ax_hist.grid(True, alpha=0.3)
+        if n_valid > 0 and hist_counts.sum() > 0:
+            bin_centers = 0.5 * (hist_edges[:-1] + hist_edges[1:])
+            ax_hist.bar(bin_centers, hist_counts,
+                        width=(hist_edges[1] - hist_edges[0]),
+                        edgecolor='black', alpha=0.7, color='steelblue')
+            ax_hist.axvline(x=0, color='r', linestyle='--', linewidth=2,
+                            label='Zero')
+            ax_hist.axvline(x=mean_diff, color='orange',
+                            linestyle='-', linewidth=2, label='Mean')
+            ax_hist.set_xlabel('Difference (°C)', fontsize=11)
+            ax_hist.set_ylabel('Count', fontsize=11)
+            ax_hist.set_title('Difference Distribution (full resolution)',
+                              fontsize=12)
+            ax_hist.legend(loc='upper right')
+            ax_hist.grid(True, alpha=0.3)
 
-                # Statistics text box
-                stats_text = (
-                    f"N valid: {len(diff_valid):,}\n"
-                    f"Mean: {mean_diff:.4f}°C\n"
-                    f"Std: {std_diff:.4f}°C\n"
-                    f"Min: {np.min(diff_valid):.4f}°C\n"
-                    f"Max: {np.max(diff_valid):.4f}°C\n"
-                    f"RMSE: {rmse:.4f}°C"
+            overflow_note = ''
+            if overflow_low or overflow_high:
+                overflow_note = (
+                    f"\nClipped: {overflow_low:,} < -10°C, "
+                    f"{overflow_high:,} > +10°C"
                 )
-                ax_hist.text(0.98, 0.98, stats_text,
-                             transform=ax_hist.transAxes,
-                             verticalalignment='top',
-                             horizontalalignment='right',
-                             bbox=dict(boxstyle='round', facecolor='wheat',
-                                       alpha=0.8),
-                             fontsize=10, family='monospace')
+            stats_text = (
+                f"N valid: {n_valid:,}\n"
+                f"Mean: {mean_diff:.4f}°C\n"
+                f"Std: {std_diff:.4f}°C\n"
+                f"Min: {min_diff:.4f}°C\n"
+                f"Max: {max_diff:.4f}°C\n"
+                f"RMSE: {rmse:.4f}°C"
+                f"{overflow_note}"
+            )
+            ax_hist.text(0.98, 0.98, stats_text,
+                         transform=ax_hist.transAxes,
+                         verticalalignment='top',
+                         horizontalalignment='right',
+                         bbox=dict(boxstyle='round', facecolor='wheat',
+                                   alpha=0.8),
+                         fontsize=10, family='monospace')
         else:
             ax_hist.text(0.5, 0.5, 'No valid difference data',
                          ha='center', va='center', fontsize=14)
@@ -2748,7 +2889,15 @@ def main():
                 format_type = DataFileReader.detect_format(selected_file)
 
                 with st.spinner(f"Reading {format_type.upper()} file..."):
-                    data = read_file(selected_file)
+                    if format_type == 'nc':
+                        # Cached read so box-select reruns don't re-read the
+                        # multi-GB grid from disk on every zoom.
+                        data = _read_file_cached(
+                            str(selected_file),
+                            os.path.getmtime(selected_file)
+                        )
+                    else:
+                        data = read_file(selected_file)
 
                 if show_info:
                     display_file_info(data, format_type, selected_file)
@@ -2789,25 +2938,34 @@ def main():
                         st.pyplot(fig)
                         plt.close(fig)
                     elif format_type == 'nc':
-                        st.info("NetCDF files are large. Rendering...")
                         if use_plotly:
-                            try:
-                                fig = create_interactive_netcdf_plot(
-                                    data, selected_file
+                            fields = load_netcdf_fields(
+                                str(selected_file),
+                                os.path.getmtime(selected_file)
+                            )
+                            if fields is None:
+                                st.info(
+                                    "NetCDF file is not MUR GHRSST format; "
+                                    "using matplotlib view."
                                 )
-                                if fig is not None:
-                                    st.plotly_chart(fig, use_container_width=True)
-                                else:
-                                    st.error("Failed to create Plotly figure")
-                            except Exception as e:
-                                st.warning(f"Plotly failed: {e}. Using matplotlib.")
-                                import traceback
-                                with st.expander("Plotly error details"):
-                                    st.code(traceback.format_exc())
                                 fig = create_netcdf_plot(data, selected_file)
                                 if fig is not None:
                                     st.pyplot(fig)
                                     plt.close(fig)
+                            else:
+                                try:
+                                    _render_netcdf_plotly(fields, selected_file)
+                                except Exception as e:
+                                    st.warning(
+                                        f"Plotly failed: {e}. Using matplotlib."
+                                    )
+                                    import traceback
+                                    with st.expander("Plotly error details"):
+                                        st.code(traceback.format_exc())
+                                    fig = create_netcdf_plot(data, selected_file)
+                                    if fig is not None:
+                                        st.pyplot(fig)
+                                        plt.close(fig)
                         else:
                             fig = create_netcdf_plot(data, selected_file)
                             if fig is not None:
@@ -2878,6 +3036,30 @@ def main():
                             st.write(
                                 f"{icon} **{comp['field']}**: {comp['message']}"
                             )
+
+                        # Difference tail distribution (computed over every valid pixel)
+                        sst_stats = results.get('stats', {}).get('analysed_sst')
+                        if sst_stats and sst_stats.get('tail_counts'):
+                            st.write("**Difference tail (all valid pixels):**")
+                            vc = sst_stats['valid_count']
+                            table_lines = [
+                                "| \\|diff\\| > | pixels | % of valid |",
+                                "|---|---:|---:|",
+                            ]
+                            for _t, _c in zip(sst_stats['tail_thresholds'],
+                                              sst_stats['tail_counts']):
+                                _pct = (100.0 * _c / vc) if vc else 0.0
+                                table_lines.append(
+                                    f"| {_t:g} K | {_c:,} | {_pct:.4f}% |"
+                                )
+                            st.markdown("\n".join(table_lines))
+                            if sst_stats.get('worst_lat') is not None:
+                                st.markdown(
+                                    f"**Worst pixel:** "
+                                    f"{sst_stats['worst_value']:+.4f} K at "
+                                    f"lat {sst_stats['worst_lat']:.4f}, "
+                                    f"lon {sst_stats['worst_lon']:.4f}"
+                                )
 
                         st.write("---")
 

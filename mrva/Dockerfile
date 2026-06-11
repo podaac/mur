@@ -25,7 +25,7 @@ ARG DEBUG=0
 # ========================================================================
 FROM intel/oneapi-hpckit:2024.0.1-devel-ubuntu22.04 AS fortran-builder
 
-# Re-declare ARG after FROM to make it available in this stage
+# Re-declare ARGs after FROM to make them available in this stage
 ARG DEBUG
 
 # Remove problematic Intel GPU repository (not needed for Fortran compilation)
@@ -142,10 +142,10 @@ RUN cd /app/matlab && \
 # ========================================================================
 FROM debian:bookworm-slim
 
-# Re-declare DEBUG arg from build to persist in runtime image
+# Re-declare build args to persist in runtime image
 ARG DEBUG=0
 
-# Persist DEBUG flag as environment variable for runtime detection
+# Persist build flags as environment variables for runtime detection
 # If built with DEBUG=1, runtime will automatically enable debug output
 ENV MRVA_DEBUG_BUILD=${DEBUG}
 
@@ -218,6 +218,10 @@ ENV MATLAB_LOG_DIR=/data/logs
 ENV MATLAB_PREFDIR=/tmp/.matlab
 ENV TMP_DIR=/tmp/mrva_tmp
 ENV PATH="/opt/mrva/bin:${PATH}"
+# HOME must point at a writable path so the MATLAB Runtime CTF extractor works
+# when the container is run with an arbitrary --user <uid> that isn't present in
+# /etc/passwd (getpwuid() returns NULL → default HOME of `/` is not writable).
+ENV HOME=/tmp
 
 # Stack size configuration for Fortran executables
 # The PCG solver uses large local arrays that can overflow the default stack
@@ -226,15 +230,17 @@ ENV PATH="/opt/mrva/bin:${PATH}"
 # Use KMP_STACKSIZE (Intel OpenMP runtime uses this; OMP_STACKSIZE would be ignored)
 ENV KMP_STACKSIZE=128M
 
-# Create data directories with proper structure
+# Create data directories. Scratch dirs under /tmp (/tmp/mrva_tmp, /tmp/.matlab,
+# MCR cache) are NOT pre-created: the sticky bit on /tmp would otherwise block
+# the runtime UID from rmdir'ing a root-owned dir. Letting the app create them
+# at runtime means they're owned by the runtime UID.
 RUN mkdir -p /data/input/bic \
              /data/input/iquam \
              /data/input/landice \
              /data/output/csp \
              /data/output/netcdf \
              /data/cache \
-             /data/logs \
-             /tmp/mrva_tmp
+             /data/logs
 
 # Set working directory
 WORKDIR /data
@@ -246,6 +252,14 @@ RUN cat > /opt/mrva/bin/entrypoint.sh <<'EOF' && chmod +x /opt/mrva/bin/entrypoi
 #!/bin/bash
 # MRVA Container Entrypoint Wrapper
 set -e
+
+# ========================================================================
+# Scratch Directories
+# ========================================================================
+# Ensure scratch dirs exist and are owned by the runtime UID. These are not
+# pre-created in the image so the sticky bit on /tmp does not block the
+# arbitrary runtime UID from managing them on subsequent runs.
+mkdir -p "${TMP_DIR:-/tmp/mrva_tmp}" "${MATLAB_PREFDIR:-/tmp/.matlab}" "${MCR_CACHE_ROOT:-/tmp}"
 
 # ========================================================================
 # Stack Size Configuration
@@ -388,6 +402,15 @@ else
     exec /opt/mrva/bin/run_MrvaProcessor.sh "/opt/matlabruntime/R2024b" "$YEAR" "$DOY" "$MODE" "$SENSORS"
 fi
 EOF
+
+# Rootless / arbitrary-UID support (OpenShift pattern):
+# Assign group 0 (root group) and grant group perms equal to owner perms on all
+# paths the app may write to. Any UID added to group 0 at runtime (via
+# `docker run --group-add 0`) can then read/write these paths.
+# setgid on directories so new files/dirs inherit group 0.
+RUN chgrp -R 0 /data /opt/mrva && \
+    chmod -R g=u /data /opt/mrva && \
+    find /data /opt/mrva -type d -exec chmod g+s {} +
 
 # Set entrypoint
 ENTRYPOINT ["/opt/mrva/bin/entrypoint.sh"]

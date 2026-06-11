@@ -90,11 +90,19 @@ def main():
     logging.info("Running l2p operations on %s for %s (%s)", sensor, day, doy)
     data = get_config_data(config, sensor)
 
-    # Download files for sensor for DOY
-    data_dir = input_dir.joinpath(sensor).joinpath(str(doy))
-    data_dir.mkdir(parents=True, exist_ok=True)
-    files = download_files(data["collection_name"], sensor, day, data_dir,
+    # Download files for sensor into parent directory; -dydoy sorts into
+    # YYYY/DOY/ subdirectories based on granule timestamp, matching production
+    # cron behavior (boundary granules go to the correct DOY).
+    download_dir = input_dir.joinpath(sensor)
+    download_dir.mkdir(parents=True, exist_ok=True)
+    files = download_files(data["collection_name"], sensor, day, download_dir,
                            use_s3)
+
+    # Files are in YYYY/DOY/ subdirectory (created by -dydoy flag)
+    data_dir = download_dir.joinpath(str(year)).joinpath(f"{doy:03d}")
+    if not data_dir.exists():
+        logging.warning("No files sorted into %s for DOY %03d", data_dir, doy)
+        data_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine stability of source file (respects MUR_SIMULATED_DATE env var)
     if mur_date.today().toordinal() - day.toordinal() < data["stable"]:
@@ -192,14 +200,17 @@ def download_files(collections, sensor, day, data_dir, use_s3):
 def download_http(collection, sensor, sd, ed, data_dir):
     """Download data files using podaac-data-subscriber.
 
-    Uses single-day temporal range matching cron job infrastructure.
+    Uses -dydoy flag to sort granules into YYYY/DOY/ subdirectories based
+    on granule timestamp, matching production cron job behavior. This ensures
+    boundary granules (e.g., late previous day orbits) are placed in the
+    correct DOY directory rather than being included in adjacent days.
     """
 
     cmd = [SUBSCRIBER_BIN, "-c", collection, "-d", str(data_dir),
-           "-e", ".nc", "-sd", sd, "-ed", ed, "--verbose"]
+           "-e", ".nc", "-sd", sd, "-ed", ed, "-dydoy", "--verbose"]
     execute_subprocess(cmd)
 
-    files = list(data_dir.glob("*.nc"))
+    files = list(data_dir.glob("**/*.nc"))
     files.sort()
     return files
 

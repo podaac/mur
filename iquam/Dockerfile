@@ -77,9 +77,17 @@ ENV AGREE_TO_MATLAB_RUNTIME_LICENSE=yes
 ENV MCR_INHIBIT_CTF_LOCK=1
 ENV MATLAB_LOG_DIR=/data/logs
 ENV MATLAB_PREFDIR=/tmp/.matlab
+# HOME must point at a writable path so the MATLAB Runtime CTF extractor works
+# when the container is run with an arbitrary --user <uid> that isn't present in
+# /etc/passwd (getpwuid() returns NULL → default HOME of `/` is not writable).
+ENV HOME=/tmp
 
-# Create data directories
-RUN mkdir -p /data/output/iquam /data/cache/iquam /data/logs /tmp/makebic
+# Create data directories. Scratch dirs under /tmp (/tmp/makebic, /tmp/.matlab,
+# MCR cache) are NOT pre-created: the sticky bit on /tmp would otherwise block
+# the runtime UID from rmdir'ing a root-owned dir from a prior layer. Letting
+# the app create them at runtime means they're owned by the runtime UID and can
+# be cleaned up by that same UID on subsequent runs.
+RUN mkdir -p /data/output/iquam /data/cache/iquam /data/logs
 
 # Set working directory
 WORKDIR /data
@@ -89,6 +97,15 @@ RUN echo '#!/bin/bash' > /opt/iquam/bin/entrypoint.sh && \
     echo '# IQUAM Container Entrypoint' >> /opt/iquam/bin/entrypoint.sh && \
     echo 'exec /opt/iquam/bin/run_IquamProcessor.sh "/opt/matlabruntime/R2024b" "$@"' >> /opt/iquam/bin/entrypoint.sh && \
     chmod +x /opt/iquam/bin/entrypoint.sh
+
+# Rootless / arbitrary-UID support (OpenShift pattern):
+# Assign group 0 (root group) and grant group perms equal to owner perms on all
+# paths the app may write to. Any UID added to group 0 at runtime (via
+# `docker run --group-add 0`) can then read/write these paths.
+# setgid on directories so new files/dirs inherit group 0.
+RUN chgrp -R 0 /data /opt/iquam && \
+    chmod -R g=u /data /opt/iquam && \
+    find /data /opt/iquam -type d -exec chmod g+s {} +
 
 # Set entrypoint
 ENTRYPOINT ["/opt/iquam/bin/entrypoint.sh"]

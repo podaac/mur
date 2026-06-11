@@ -24,9 +24,9 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
   %filedir=sprintf('%s/%s/%04d',bicdir,sensor,year);
   filedir=bicdir;
   mkdir(filedir)
-  bicfilegz=sprintf('%s/%s_%s_%04d_%03d.bic.gz',filedir,region,sensor,year,day);
-  if exist(bicfilegz,'file')&(rewrite==0),
-    fprintf(1,'File exists; will NOT be reproduced:\n ... %s\n',bicfilegz);
+  bicfile_check=sprintf('%s/%s_%s_%04d_%03d.bic',filedir,region,sensor,year,day);
+  if exist(bicfile_check,'file')&(rewrite==0),
+    fprintf(1,'File exists; will NOT be reproduced:\n ... %s\n',bicfile_check);
     return;
   end;
 
@@ -83,6 +83,9 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
     % read L2P file:
     [head, body, tail] = fileparts( file );
     tmp_dir = getenv("TMP_DIR");
+    if length(tmp_dir) && ~exist(tmp_dir, 'dir'),
+      mkdir(tmp_dir);
+    end;
     tmpncfile=[tmp_dir,'/',body,'.nc'];
     if length(uncompresscmd),
       eval(sprintf('! %s %s > %s',uncompresscmd,file,tmpncfile));
@@ -207,22 +210,6 @@ function l2p2bic(sensor,region,indir,bicdir,year,day,rewrite)
   bias = bias(valid_mask);
   rms = rms(valid_mask);
   flag = flag(valid_mask);
-
-  % Filter to only include data within the target day (0 <= hour < 24)
-  % This matches historical behavior where only same-day observations are included
-  day_mask = (hour >= 0) & (hour < 24);
-  n_outside_day = sum(~day_mask);
-  if n_outside_day > 0
-      fprintf('  Filtering %d observations outside target day (hour < 0 or >= 24)\n', n_outside_day);
-  end
-
-  lon = lon(day_mask);
-  lat = lat(day_mask);
-  hour = hour(day_mask);
-  sst = sst(day_mask);
-  bias = bias(day_mask);
-  rms = rms(day_mask);
-  flag = flag(day_mask);
 
   % Safety check: filter out any zero-filled entries from pre-allocation
   % that may have slipped through (quality=0 with lat=lon=0)

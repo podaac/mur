@@ -64,8 +64,11 @@ else
     FCOPT = $(FCOPT_BASE) $(FCOPT_PROD)
 endif
 
-# Matrix-free mode disabled - causes NaN in PCG solver due to cumulative rounding errors
-#FCOPT += -DMATRIX_FREE
+# Matrix-free mode: explored but not pursued.
+# Computed stencil coefficients on-the-fly instead of storing infoMatrix to reduce memory ~21x.
+# Had NaN issues in PCG solver due to cumulative rounding errors.
+# Code remains in spmm.f behind #ifdef MATRIX_FREE guards but is not built.
+# See MATRIX_FREE_IMPLEMENTATION_NOTES.txt for details.
 
 
 

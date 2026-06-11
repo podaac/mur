@@ -19,8 +19,8 @@ for DOY in $(seq $START_DOY $END_DOY); do
         --cpus="2.0" \
         -e _JAVA_OPTIONS="-Xmx2048m -Xms512m -XX:+UseG1GC" \
         -e OSISAF_FTP_REPROCESSED="ftp://osisaf.met.no/reprocessed/ice/conc/v1p2" \
-        -e OSISAF_FTP_ARCHIVE="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/conc" \
-        -e OSISAF_FTP_PROD="ftp://osisaf.met.no/prod/ice/conc" \
+        -e OSISAF_FTP_ARCHIVE="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
+        -e OSISAF_FTP_PROD="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
         -v /Users/jleach/Documents/Development/MUR/mur/landice/tests/in:/input:ro \
         -v /Users/jleach/Documents/Development/MUR/mur/landice/tests/out:/output \
         landice:latest \
