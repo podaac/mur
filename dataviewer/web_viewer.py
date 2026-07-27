@@ -2280,8 +2280,207 @@ def get_or_build_diff(file1_path, file2_path,
     return cache[key]
 
 
+def _region_diff_stats(diff: np.ndarray) -> dict:
+    """Summary stats + fixed-edge histogram for an in-memory diff image.
+
+    Uses the same metric definitions and histogram edges as
+    :func:`build_full_res_diff` so a zoomed region's numbers stay consistent
+    with the global pass.
+    """
+    n_valid = int(np.count_nonzero(~np.isnan(diff)))
+    HIST_LO, HIST_HI, HIST_N = -10.0, 10.0, 200
+    hist_edges = np.linspace(HIST_LO, HIST_HI, HIST_N + 1)
+    if n_valid > 0:
+        sum_d = float(np.nansum(diff, dtype=np.float64))
+        mean = sum_d / n_valid
+        sq = np.multiply(diff, diff, dtype=np.float32)
+        sum_sq = float(np.nansum(sq, dtype=np.float64))
+        del sq
+        var = max(0.0, sum_sq / n_valid - mean * mean)
+        std = float(np.sqrt(var))
+        rmse = float(np.sqrt(sum_sq / n_valid))
+        min_d = float(np.nanmin(diff))
+        max_d = float(np.nanmax(diff))
+        hist_counts, _ = np.histogram(diff, bins=hist_edges)
+        overflow_low = int(np.nansum(diff < HIST_LO))
+        overflow_high = int(np.nansum(diff > HIST_HI))
+    else:
+        mean = std = rmse = min_d = max_d = 0.0
+        hist_counts = np.zeros(HIST_N, dtype=np.int64)
+        overflow_low = overflow_high = 0
+    return {
+        'n_valid': n_valid, 'mean': mean, 'std': std, 'rmse': rmse,
+        'min': min_d, 'max': max_d,
+        'hist_counts': hist_counts, 'hist_edges': hist_edges,
+        'overflow_low': overflow_low, 'overflow_high': overflow_high,
+    }
+
+
+def build_region_diff(file1_path, file2_path, view_bounds,
+                      target: int = 2000, chunk_rows: int = 1000) -> dict:
+    """Full-resolution ``analysed_sst`` difference for one lon/lat sub-region.
+
+    Reads only the rows/columns covering ``view_bounds`` from both NetCDF
+    files (chunked to bound memory), differences them at native resolution,
+    then max-abs decimates the region to ~``target`` px for display. This
+    powers the box-select "zoom re-renders at full resolution" behavior of the
+    Plotly comparison view, mirroring the single-file viewer.
+
+    Diff is in Kelvin (== °C for a difference); the valid GHRSST range
+    [200, 350] K is applied per pixel before differencing, matching
+    :func:`build_full_res_diff`.
+
+    Returns a dict with the decimated region image (``diff_plot``), its
+    coordinate axes (``lon_plot``/``lat_plot``), the decimation ``factor``,
+    and region-only summary stats + a fixed-edge histogram.
+    """
+    from netCDF4 import Dataset
+
+    with Dataset(file1_path, 'r') as ds1, Dataset(file2_path, 'r') as ds2:
+        if ('analysed_sst' not in ds1.variables
+                or 'analysed_sst' not in ds2.variables):
+            raise ValueError(
+                'analysed_sst missing from one of the NetCDF files')
+        lon = np.asarray(ds1.variables['lon'][:])
+        lat = np.asarray(ds1.variables['lat'][:])
+        lon_slice, lat_slice = slice_to_bounds(lon, lat, view_bounds)
+
+        sv1 = ds1.variables['analysed_sst']
+        sv2 = ds2.variables['analysed_sst']
+        is_3d_1 = sv1.ndim == 3
+        is_3d_2 = sv2.ndim == 3
+        shape1 = sv1.shape[1:] if is_3d_1 else sv1.shape
+        shape2 = sv2.shape[1:] if is_3d_2 else sv2.shape
+        if shape1 != shape2:
+            raise ValueError(
+                f'analysed_sst shape mismatch: {shape1} vs {shape2}')
+
+        lat0, lat1 = lat_slice.start, lat_slice.stop
+        nlat_r = lat1 - lat0
+        nlon_r = lon_slice.stop - lon_slice.start
+        # Region diff held at full res; chunked reads keep the two source
+        # arrays from being resident simultaneously (peak ~ region + a chunk).
+        diff = np.full((nlat_r, nlon_r), np.nan, dtype=np.float32)
+        step = max(1, chunk_rows)
+        for start in range(lat0, lat1, step):
+            end = min(start + step, lat1)
+            c1 = (sv1[0, start:end, lon_slice] if is_3d_1
+                  else sv1[start:end, lon_slice])
+            c2 = (sv2[0, start:end, lon_slice] if is_3d_2
+                  else sv2[start:end, lon_slice])
+            if hasattr(c1, 'filled'):
+                c1 = c1.filled(np.nan)
+            if hasattr(c2, 'filled'):
+                c2 = c2.filled(np.nan)
+            c1 = np.asarray(c1, dtype=np.float32)
+            c2 = np.asarray(c2, dtype=np.float32)
+            c1[(c1 < 200) | (c1 > 350)] = np.nan
+            c2[(c2 < 200) | (c2 > 350)] = np.nan
+            diff[start - lat0:end - lat0, :] = c1 - c2
+
+    lon_r = lon[lon_slice]
+    lat_r = lat[lat_slice]
+    factor = max(1, int(np.ceil(max(nlat_r, nlon_r) / float(target))))
+    diff_plot = _max_abs_decimate(diff, factor)
+    lon_plot = lon_r[::factor][: diff_plot.shape[1]]
+    lat_plot = lat_r[::factor][: diff_plot.shape[0]]
+
+    stats = _region_diff_stats(diff)
+    del diff  # drop the full-res region image before returning
+    stats.update({
+        'diff_plot': diff_plot,
+        'lon_plot': lon_plot,
+        'lat_plot': lat_plot,
+        'factor': factor,
+        'region_shape': (nlat_r, nlon_r),
+    })
+    return stats
+
+
+def get_or_build_region_diff(file1_path, file2_path, view_bounds) -> dict:
+    """Session-cached wrapper around :func:`build_region_diff`.
+
+    Keyed by file paths + mtimes + (rounded) view bounds. Only the most recent
+    region is retained so repeated reruns at one zoom level don't re-read the
+    files, while panning/zooming to a new region drops the previous one.
+    """
+    try:
+        mt1 = os.path.getmtime(file1_path)
+        mt2 = os.path.getmtime(file2_path)
+    except OSError:
+        mt1 = mt2 = 0.0
+    bkey = (tuple(round(float(b), 6) for b in view_bounds)
+            if view_bounds is not None else None)
+    key = ('region_diff', str(file1_path), str(file2_path), mt1, mt2, bkey)
+    cache = st.session_state.setdefault('_region_diff_cache', {})
+    if key not in cache:
+        cache.clear()
+        cache[key] = build_region_diff(file1_path, file2_path, view_bounds)
+    return cache[key]
+
+
+def _diff_color_limit(diff_info: dict, override: float = 0.0) -> float:
+    """Robust ±color limit for the SST difference image.
+
+    If ``override`` is greater than 0, it is used directly (e.g. ``0.5`` →
+    color range ±0.5°C). Otherwise the limit is derived from the
+    full-resolution streaming histogram in ``diff_info``:
+    ±max(|2nd pct|, |98th pct|), capped at 5°C. Shared by the matplotlib and
+    Plotly comparison renderers so both use identical limits.
+    """
+    if override and override > 0:
+        return float(override)
+
+    n_valid = diff_info['n_valid']
+    if n_valid <= 0:
+        return 5.0
+
+    hist_counts = diff_info['hist_counts']
+    hist_edges = diff_info['hist_edges']
+    overflow_low = diff_info['overflow_low']
+    overflow_high = diff_info['overflow_high']
+
+    total = hist_counts.sum() + overflow_low + overflow_high
+    cum = np.cumsum(hist_counts) + overflow_low
+    target_lo = 0.02 * total
+    target_hi = 0.98 * total
+    # Place overflow at the edges (-10 / +10 °C) for limit computation
+    if overflow_low >= target_lo:
+        lo = -10.0
+    else:
+        lo_idx = int(np.searchsorted(cum, target_lo))
+        lo = hist_edges[min(lo_idx, len(hist_edges) - 1)]
+    if (total - overflow_high) <= target_hi:
+        hi = 10.0
+    else:
+        hi_idx = int(np.searchsorted(cum, target_hi))
+        hi = hist_edges[min(hi_idx, len(hist_edges) - 1)]
+    diff_limit = min(5.0, max(abs(lo), abs(hi)))
+    return diff_limit if diff_limit != 0 else 1e-6
+
+
+def _discrete_colorscale(name: str, n: int, reverse: bool = False):
+    """Build a piecewise-constant Plotly colorscale of ``n`` bands sampled
+    from the named continuous scale (e.g. ``'RdBu'``). Used to quantize the
+    difference heatmap into a fixed number of colors."""
+    import plotly.colors as pc
+
+    n = max(2, int(n))
+    positions = [i / (n - 1) for i in range(n)]
+    colors = pc.sample_colorscale(name, positions, colortype='rgb')
+    if reverse:
+        colors = colors[::-1]
+    scale = []
+    for i, c in enumerate(colors):
+        scale.append([i / n, c])
+        scale.append([(i + 1) / n, c])
+    return scale
+
+
 def create_comparison_plot(data1: dict, data2: dict, format_type: str,
-                           file1_name: str, file2_name: str) -> plt.Figure:
+                           file1_name: str, file2_name: str,
+                           diff_color_limit: float = 0.0,
+                           diff_color_levels: int = 0) -> plt.Figure:
     """
     Create a comparison visualization showing both datasets and their difference.
 
@@ -2291,6 +2490,10 @@ def create_comparison_plot(data1: dict, data2: dict, format_type: str,
         format_type: File format type
         file1_name: Name of first file
         file2_name: Name of second file
+        diff_color_limit: Manual ±color limit (°C) for the NetCDF difference
+            image; 0 (default) auto-scales from the difference histogram.
+        diff_color_levels: Number of discrete color bands for the NetCDF
+            difference image; 0 (default) uses a continuous colormap.
 
     Returns:
         Matplotlib figure
@@ -2480,36 +2683,19 @@ def create_comparison_plot(data1: dict, data2: dict, format_type: str,
         overflow_low = diff_info['overflow_low']
         overflow_high = diff_info['overflow_high']
 
-        # Color limits: robust ±max(|2%|,|98%|), capped at 5°C, derived from
-        # the full-resolution streaming histogram.
-        if n_valid > 0:
-            total = hist_counts.sum() + overflow_low + overflow_high
-            cum = np.cumsum(hist_counts) + overflow_low
-            target_lo = 0.02 * total
-            target_hi = 0.98 * total
-            # Place overflow at the edges (-10 / +10 °C) for limit computation
-            if overflow_low >= target_lo:
-                lo = -10.0
-            else:
-                lo_idx = int(np.searchsorted(cum, target_lo))
-                lo = hist_edges[min(lo_idx, len(hist_edges) - 1)]
-            if (total - overflow_high) <= target_hi:
-                hi = 10.0
-            else:
-                hi_idx = int(np.searchsorted(cum, target_hi))
-                hi = hist_edges[min(hi_idx, len(hist_edges) - 1)]
-            diff_limit = min(5.0, max(abs(lo), abs(hi)))
-            if diff_limit == 0:
-                diff_limit = 1e-6
-        else:
-            diff_limit = 5.0
+        # Robust color limits from the full-resolution streaming histogram,
+        # unless the caller pinned an explicit ±limit.
+        diff_limit = _diff_color_limit(diff_info, override=diff_color_limit)
 
         fig = plt.figure(figsize=(14, 10), constrained_layout=True)
         gs = fig.add_gridspec(2, 1, height_ratios=[2, 1])
 
         ax_diff = fig.add_subplot(gs[0])
+        diff_cmap = 'RdBu_r'
+        if diff_color_levels and diff_color_levels >= 2:
+            diff_cmap = plt.colormaps['RdBu_r'].resampled(int(diff_color_levels))
         im_diff = ax_diff.pcolormesh(lon_plot, lat_plot, diff_plot,
-                                     cmap='RdBu_r',
+                                     cmap=diff_cmap,
                                      vmin=-diff_limit, vmax=diff_limit,
                                      shading='nearest')
         ax_diff.set_xlabel('Longitude (degrees)', fontsize=11)
@@ -2590,6 +2776,257 @@ def create_comparison_plot(data1: dict, data2: dict, format_type: str,
         return fig
 
 
+def create_comparison_plot_interactive(data1: dict, data2: dict,
+                                       format_type: str,
+                                       file1_name: str, file2_name: str,
+                                       diff_color_limit: float = 0.0,
+                                       diff_color_levels: int = 0,
+                                       view_bounds: Optional[tuple] = None):
+    """Interactive Plotly version of the comparison visualization.
+
+    Renders the ``analysed_sst`` difference as a box-select-enabled
+    zoom/pan/hover heatmap plus a difference histogram. When ``view_bounds`` is
+    ``None`` the global view uses the cached, max-abs-decimated full-resolution
+    diff from :func:`get_or_build_diff`. When a box is selected the region is
+    re-read from both files at native resolution via
+    :func:`get_or_build_region_diff`, so zooming in reveals progressively more
+    detail (down to native pixels) — matching the single-file viewer.
+
+    The color limit is always derived from the *global* difference histogram
+    (or the manual override) so colors stay stable across zoom levels; the
+    histogram and summary stats reflect the currently-viewed region.
+
+    Returns ``(fig_main, fig_aux)`` — the selection-enabled difference map and
+    its companion histogram figure — or ``None`` for formats/conditions
+    without an interactive view so the caller can fall back to matplotlib.
+
+    Args:
+        diff_color_limit: Manual ±color limit (°C); 0 auto-scales from the
+            difference histogram.
+        diff_color_levels: Number of discrete color bands; 0 uses a continuous
+            colorscale.
+        view_bounds: (lon_min, lon_max, lat_min, lat_max) of the zoomed region,
+            or None for the global view.
+    """
+    if format_type != 'nc':
+        return None
+
+    file1_path = data1.get('_filepath')
+    file2_path = data2.get('_filepath')
+    if not file1_path or not file2_path:
+        return None
+
+    import plotly.graph_objects as go
+
+    # Global pass (cached). Provides the stable color limit and the global
+    # decimated image used when not zoomed in. May raise ValueError (shape
+    # mismatch) / ImportError; the caller catches and falls back to matplotlib.
+    diff_info = get_or_build_diff(file1_path, file2_path)
+    diff_limit = _diff_color_limit(diff_info, override=diff_color_limit)
+
+    # Region-aware data: cached global decimation for the full view, or a
+    # freshly read full-resolution slice when zoomed in.
+    if view_bounds is None:
+        stats = diff_info
+        diff_plot = diff_info['diff_plot']
+        lon_plot = diff_info['lon_plot']
+        lat_plot = diff_info['lat_plot']
+        factor = diff_info['subsample']
+        region_note = 'Full globe'
+    else:
+        stats = get_or_build_region_diff(file1_path, file2_path, view_bounds)
+        diff_plot = stats['diff_plot']
+        lon_plot = stats['lon_plot']
+        lat_plot = stats['lat_plot']
+        factor = stats['factor']
+        if len(lon_plot) and len(lat_plot):
+            region_note = (
+                f'Lon [{float(np.nanmin(lon_plot)):.2f}, '
+                f'{float(np.nanmax(lon_plot)):.2f}], '
+                f'Lat [{float(np.nanmin(lat_plot)):.2f}, '
+                f'{float(np.nanmax(lat_plot)):.2f}]')
+        else:
+            region_note = 'Selected region'
+
+    n_valid = stats['n_valid']
+    mean_diff = stats['mean']
+    std_diff = stats['std']
+    rmse = stats['rmse']
+    min_diff = stats['min']
+    max_diff = stats['max']
+    hist_counts = stats['hist_counts']
+    hist_edges = stats['hist_edges']
+    overflow_low = stats['overflow_low']
+    overflow_high = stats['overflow_high']
+
+    limit_note = (f'manual ±{diff_limit:.3g}°C' if diff_color_limit and
+                  diff_color_limit > 0 else f'auto ±{diff_limit:.2f}°C')
+    detail = 'native resolution' if factor == 1 else f'÷{factor} of full'
+    if n_valid > 0:
+        diff_title = (
+            f'SST Difference: {file1_name} - {file2_name}<br>'
+            f'<sub>{region_note} | Mean {mean_diff:.4f}°C | '
+            f'Std {std_diff:.4f}°C | RMSE {rmse:.4f}°C | '
+            f'Color range {limit_note} ({detail}, max-abs)</sub>'
+        )
+    else:
+        diff_title = (f'SST Difference: {file1_name} - {file2_name}'
+                      f'<br><sub>{region_note}</sub>')
+
+    # ----- Main difference map (box-select enabled, standalone figure) -----
+    # Quantize into discrete bands when requested, else continuous RdBu.
+    if diff_color_levels and diff_color_levels >= 2:
+        heat_colorscale = _discrete_colorscale('RdBu', diff_color_levels,
+                                               reverse=True)
+        heat_reverse = False
+    else:
+        heat_colorscale = 'RdBu'
+        heat_reverse = True
+
+    fig_main = go.Figure()
+    fig_main.add_trace(
+        go.Heatmap(
+            z=diff_plot, x=lon_plot, y=lat_plot,
+            colorscale=heat_colorscale, reversescale=heat_reverse,
+            zmin=-diff_limit, zmax=diff_limit, zmid=0.0,
+            colorbar=dict(title='Diff (°C)'),
+            hovertemplate=('lon %{x:.3f}°<br>lat %{y:.3f}°<br>'
+                           'diff %{z:.4f} °C<extra></extra>'),
+        )
+    )
+    fig_main.update_layout(
+        title=diff_title, height=650,
+        margin=dict(t=90, b=50, l=60, r=20),
+        dragmode='select', showlegend=False,
+    )
+    fig_main.update_xaxes(title_text='Longitude (°)')
+    fig_main.update_yaxes(title_text='Latitude (°)',
+                          scaleanchor='x', scaleratio=1.0)
+
+    # ----- Companion difference histogram -----
+    hist_title = ('Difference Distribution (visible region)'
+                  if view_bounds is not None
+                  else 'Difference Distribution (full resolution)')
+    fig_aux = go.Figure()
+    if n_valid > 0 and hist_counts.sum() > 0:
+        bin_centers = 0.5 * (hist_edges[:-1] + hist_edges[1:])
+        fig_aux.add_trace(
+            go.Bar(
+                x=bin_centers, y=hist_counts,
+                width=(hist_edges[1] - hist_edges[0]),
+                marker_color='steelblue', marker_line_color='black',
+                marker_line_width=0.3, opacity=0.8,
+                hovertemplate='diff %{x:.3f}°C<br>%{y:,} px<extra></extra>',
+                showlegend=False,
+            )
+        )
+        fig_aux.add_vline(x=0.0, line_dash='dash', line_color='red',
+                          line_width=2)
+        fig_aux.add_vline(x=mean_diff, line_color='orange', line_width=2)
+        fig_aux.update_xaxes(title_text='Difference (°C)')
+        fig_aux.update_yaxes(title_text='Count')
+
+        overflow_note = ''
+        if overflow_low or overflow_high:
+            overflow_note = (f'<br>Clipped: {overflow_low:,} < -10°C, '
+                             f'{overflow_high:,} > +10°C')
+        stats_text = (
+            f'N valid: {n_valid:,}<br>'
+            f'Mean: {mean_diff:.4f}°C<br>'
+            f'Std: {std_diff:.4f}°C<br>'
+            f'Min: {min_diff:.4f}°C<br>'
+            f'Max: {max_diff:.4f}°C<br>'
+            f'RMSE: {rmse:.4f}°C{overflow_note}'
+        )
+        fig_aux.add_annotation(
+            xref='x domain', yref='y domain', x=0.99, y=0.98,
+            xanchor='right', yanchor='top', align='right',
+            text=stats_text, showarrow=False,
+            font=dict(size=11, family='monospace'),
+            bgcolor='wheat', opacity=0.85, bordercolor='black',
+            borderwidth=1,
+        )
+    else:
+        fig_aux.add_annotation(
+            xref='x domain', yref='y domain', x=0.5, y=0.5,
+            text='No valid difference data', showarrow=False,
+            font=dict(size=14),
+        )
+    fig_aux.update_layout(height=320, title=hist_title,
+                          margin=dict(t=50, b=50, l=60, r=20), bargap=0)
+
+    return fig_main, fig_aux
+
+
+def _render_comparison_plotly(data1: dict, data2: dict, format_type: str,
+                              file1_name: str, file2_name: str,
+                              diff_color_limit: float = 0.0,
+                              diff_color_levels: int = 0) -> bool:
+    """Render the Plotly comparison view with box-select driven, view-aware
+    full-resolution re-rendering of the SST difference.
+
+    Mirrors :func:`_render_netcdf_plotly`: drawing a box on the difference map
+    stores its lon/lat bounds in session state and reruns so the region
+    re-reads from both files at native resolution. A reset button returns to
+    the global view, bumping a per-pair "epoch" so the chart gets a fresh
+    widget key and its stale box selection is cleared.
+
+    Returns True if an interactive view was rendered, False if this
+    format/condition has no interactive comparison (caller falls back to
+    matplotlib).
+    """
+    file1_path = data1.get('_filepath')
+    file2_path = data2.get('_filepath')
+    if format_type != 'nc' or not file1_path or not file2_path:
+        return False
+
+    pair_key = f"{file1_path}|{file2_path}"
+    bounds_store = st.session_state.setdefault('cmp_view_bounds', {})
+    epoch_store = st.session_state.setdefault('cmp_view_epoch', {})
+    view_bounds = bounds_store.get(pair_key)
+    epoch = epoch_store.get(pair_key, 0)
+
+    ctrl1, ctrl2 = st.columns([1, 4])
+    with ctrl1:
+        if st.button('⟲ Reset to full view', key=f'cmp_reset_{pair_key}',
+                     disabled=view_bounds is None):
+            bounds_store.pop(pair_key, None)
+            epoch_store[pair_key] = epoch + 1
+            st.rerun()
+    with ctrl2:
+        st.caption(
+            'Use the **box select** tool (drag a rectangle) on the difference '
+            'map to zoom in — the region re-renders at full resolution. Click '
+            '**Reset to full view** to return to the global map.'
+        )
+
+    figs = create_comparison_plot_interactive(
+        data1, data2, format_type, file1_name, file2_name,
+        diff_color_limit=diff_color_limit,
+        diff_color_levels=diff_color_levels,
+        view_bounds=view_bounds,
+    )
+    if figs is None:
+        return False
+    fig_main, fig_aux = figs
+
+    event = st.plotly_chart(
+        fig_main, use_container_width=True,
+        key=f'cmp_main_{pair_key}_{epoch}',
+        on_select='rerun', selection_mode='box',
+    )
+
+    # A fresh box selection (different from the stored view) -> zoom and rerun.
+    new_bounds = _extract_box_bounds(event)
+    if new_bounds is not None and new_bounds != view_bounds:
+        bounds_store[pair_key] = new_bounds
+        st.rerun()
+
+    st.plotly_chart(fig_aux, use_container_width=True,
+                    key=f'cmp_aux_{pair_key}_{epoch}')
+    return True
+
+
 def check_password() -> bool:
     """Prompt for a password and return True if correct.
 
@@ -2661,8 +3098,10 @@ def main():
     )
     use_plotly = plot_type.startswith("Plotly")
 
-    # Default tolerance (used if Compare mode selected)
+    # Defaults (overridden in the sidebar when Compare mode is selected)
     tolerance = 1e-6
+    diff_color_limit = 0.0
+    diff_color_levels = 0
 
     # Compare mode: reference file status
     if mode == "Compare Files":
@@ -2684,6 +3123,28 @@ def main():
             max_value=1.0,
             value=1e-6,
             format="%.2e",
+        )
+
+        diff_color_limit = st.sidebar.number_input(
+            "Diff color scale ±°C (0 = auto):",
+            min_value=0.0,
+            max_value=20.0,
+            value=0.0,
+            step=0.1,
+            format="%.3g",
+            help="NetCDF difference image color range. 0 auto-scales from the "
+                 "difference histogram; e.g. 0.5 pins the range to -0.5…+0.5°C.",
+        )
+
+        diff_color_levels = st.sidebar.number_input(
+            "Diff color levels (0 = continuous):",
+            min_value=0,
+            max_value=256,
+            value=0,
+            step=1,
+            help="Number of discrete colors for the NetCDF difference image. "
+                 "0 uses a continuous colormap (default); e.g. 8 buckets the "
+                 "range into 8 colors.",
         )
 
     # Initialize directory navigation state
@@ -3101,15 +3562,37 @@ def main():
                     st.subheader("Comparison Visualization")
 
                     with st.spinner("Creating comparison plots (subsampled for display)..."):
-                        fig = create_comparison_plot(
-                            ref_data, cmp_data, ref_fmt,
-                            Path(ref_file).name, cmp_path.name
-                        )
-                        if fig is not None:
-                            st.pyplot(fig)
-                            plt.close(fig)
-                        else:
-                            st.error("Figure was not created")
+                        rendered = False
+                        # Honor the Plotly radio button for formats that have
+                        # an interactive comparison view (currently NetCDF).
+                        # Box-select on the difference map zooms in and
+                        # re-renders the region at full resolution.
+                        if use_plotly:
+                            try:
+                                rendered = _render_comparison_plotly(
+                                    ref_data, cmp_data, ref_fmt,
+                                    Path(ref_file).name, cmp_path.name,
+                                    diff_color_limit=diff_color_limit,
+                                    diff_color_levels=diff_color_levels,
+                                )
+                            except Exception as e:
+                                st.warning(
+                                    f"Plotly comparison failed, falling back "
+                                    f"to matplotlib: {e}"
+                                )
+
+                        if not rendered:
+                            fig = create_comparison_plot(
+                                ref_data, cmp_data, ref_fmt,
+                                Path(ref_file).name, cmp_path.name,
+                                diff_color_limit=diff_color_limit,
+                                diff_color_levels=diff_color_levels,
+                            )
+                            if fig is not None:
+                                st.pyplot(fig)
+                                plt.close(fig)
+                            else:
+                                st.error("Figure was not created")
 
             except Exception as e:
                 st.error(f"Error comparing files: {e}")
