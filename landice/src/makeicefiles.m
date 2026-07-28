@@ -1,4 +1,4 @@
-function [icesstfile,landicefile]=makeicefiles(input_dir,output_dir,year,day,resolution)
+function [icesstfile,landicefile]=makeicefiles(landmaskfile,gridinxnorth,gridinxsouth,output_dir,year,day,resolution)
 %% makeicefile.m (modified from saf2bip.m)
 %% -- reads OSI_SAF ice concentration data (both hemispheres).
 %% -- produces daily *.bip file for ice sst, in "icesstfile".
@@ -35,7 +35,9 @@ function [icesstfile,landicefile]=makeicefiles(input_dir,output_dir,year,day,res
 % day = int32(str2double(day))
 
 % Print arugments
-fprintf(1, 'makeicefiles: input_dir - %s\n', input_dir);
+fprintf(1, 'makeicefiles: landmaskfile - %s\n', landmaskfile);
+fprintf(1, 'makeicefiles: gridinxnorth - %s\n', gridinxnorth);
+fprintf(1, 'makeicefiles: gridinxsouth - %s\n', gridinxsouth);
 fprintf(1, 'makeicefiles: output_dir - %s\n', output_dir);
 fprintf(1, 'makeicefiles: year - %s\n', year);
 fprintf(1, 'makeicefiles: day - %s\n', day);
@@ -67,9 +69,6 @@ wgtmax = 5.0;   % max weight (given for 100% ice concentration).
 switch resolution,
 
   case 'p011',
-    landmaskfile = append(input_dir, '/grids/maskGlob1km.gds');
-    gridinxnorth = append(input_dir, '/mat/p011/saf2north');
-    gridinxsouth = append(input_dir, '/mat/p011/saf2south');
     odir = append(output_dir, '/', year);  % output dir.
     icefiles_odir = odir;  % icefiles.txt goes in same dir as GDS for container mapping
     landicefile = append(odir, '/landice_', year, '_', day, '.gds')
@@ -83,9 +82,6 @@ switch resolution,
 
   case 'p01',
 
-    landmaskfile = append(input_dir, '/grids/maskGLOBp01deg.gds');
-    gridinxnorth = append(input_dir, '/mat/p01/saf2north');
-    gridinxsouth = append(input_dir, '/mat/p01/saf2south');
     odir = append(output_dir, '/', year);  % output dir.
     icefiles_odir = odir;  % icefiles.txt goes in same dir as GDS for container mapping
     landicefile = append(odir, '/landiceP01_', year, '_', day, '.gds')
