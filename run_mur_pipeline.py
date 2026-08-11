@@ -76,6 +76,17 @@ os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 # Import centralized date handling for historical reprocessing support
 import mur_date  # noqa: E402
 
+from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
+
+
+def resolve_landice_static_files(static_resources_dir: pathlib.Path) -> Dict[str, pathlib.Path]:
+    """Resolve landice's six explicit static input files from the static-resources root."""
+    return {
+        name: static_resources_dir / relative
+        for name, relative in LANDICE_STATIC_RELATIVE_PATHS.items()
+    }
+
+
 # Configure logging
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -297,8 +308,11 @@ class MUROrchestrator:
         year = process_date.year
         doy = process_date.timetuple().tm_yday
 
-        # Set up paths
-        input_dir = pathlib.Path(config["input_dir"])
+        # Resolve landice's six explicit static input files from the
+        # static-resources root (documentation/STATIC_DATA.md layout).
+        static_resources_dir = pathlib.Path(config["static_resources_dir"])
+        static_files = resolve_landice_static_files(static_resources_dir)
+
         # Two separate output directories matching production's NAS layout:
         #   p011 (1km):  /nas/ftp/mur_sst/tmchin/landice/
         #   p01 (0.01°): /nas2/landice/
@@ -311,8 +325,6 @@ class MUROrchestrator:
         logger.info(f"  Land/Ice ({mode_str}): {process_date} (DOY {doy})")
 
         # Docker command with required environment variables
-        # Note: Container expects positional args (year, doy) and uses
-        # hardcoded /input and /output paths inside the container
         cmd = ["docker", "run"]
         if not self.keep_containers:
             cmd.append("--rm")
@@ -336,14 +348,25 @@ class MUROrchestrator:
             "-e", "OSISAF_FTP_REPROCESSED=ftp://osisaf.met.no/reprocessed/ice/conc/v1p2",
             "-e", "OSISAF_FTP_ARCHIVE=https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc",
             "-e", "OSISAF_FTP_PROD=https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc",
-            # Volume mounts (container expects /input and /output/p011, /output/p01)
-            "-v", f"{input_dir.resolve()}:/input",
+            # Bind-mount each static file individually — one arg, one file,
+            # never the whole static-resources directory.
+            "-v", f"{static_files['landmask_p01'].resolve()}:/input/landmask-p01.gds:ro",
+            "-v", f"{static_files['gridindex_north_p01'].resolve()}:/input/gridindex-north-p01.mat:ro",
+            "-v", f"{static_files['gridindex_south_p01'].resolve()}:/input/gridindex-south-p01.mat:ro",
+            "-v", f"{static_files['landmask_p011'].resolve()}:/input/landmask-p011.gds:ro",
+            "-v", f"{static_files['gridindex_north_p011'].resolve()}:/input/gridindex-north-p011.mat:ro",
+            "-v", f"{static_files['gridindex_south_p011'].resolve()}:/input/gridindex-south-p011.mat:ro",
             "-v", f"{output_dir_p011.resolve()}:/output/p011",
             "-v", f"{output_dir_p01.resolve()}:/output/p01",
             container_image,
-            # Positional arguments: year doy
-            str(year),
-            str(doy)
+            "--year", str(year),
+            "--doy", str(doy),
+            "--landmask-p01-file", "/input/landmask-p01.gds",
+            "--gridindex-north-p01-file", "/input/gridindex-north-p01.mat",
+            "--gridindex-south-p01-file", "/input/gridindex-south-p01.mat",
+            "--landmask-p011-file", "/input/landmask-p011.gds",
+            "--gridindex-north-p011-file", "/input/gridindex-north-p011.mat",
+            "--gridindex-south-p011-file", "/input/gridindex-south-p011.mat",
         ])
 
         try:

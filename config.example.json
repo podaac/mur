@@ -2,7 +2,7 @@
   "description": "MUR SST Pre-processing Configuration",
   "landice": {
     "container_image": "mur-landice:latest",
-    "input_dir": "./testing/static-resources",
+    "static_resources_dir": "./testing/static-resources",
     "output_dir_p011": "./testing/preprocessing/output/landice-p011",
     "output_dir_p01": "./testing/preprocessing/output/landice-p01",
     "description": "Land/Ice mask generation from OSI-SAF data. Input directory contains static grids and mat transformation files. Separate output directories per resolution matching production NAS layout (p011=/nas/ftp/.../landice, p01=/nas2/landice)."
