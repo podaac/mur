@@ -26,14 +26,16 @@ Meanwhile, `run_mur_pipeline.py`'s own `run()` loop already iterates `day0..day2
 function buoyDataProcessing(year, doy, mode, referenceToday, ...
                             workDir, logDir, outputDir, sourceUrl, ...
                             buoyDayRange, buoyStabilityLatency, ...
-                            enableREA, testing, ...
+                            sourceUrl, enableREA, testing, ...
                             reaAggregationWindow, reaOutputDir)
 ```
 
 - `year`, `doy`: the one target day to process (replaces the outer loop entirely).
 - `mode`: `'nrt'` or `'rea'` string, replacing the internally-derived `realtime` flag (`dayOrdinal > day1Ordinal`). Computed by Python's existing `is_nrt_mode()` and passed straight through — matches `mrva`'s `--mode` convention exactly.
 - `referenceToday`: `'YYYY-MM-DD'`, replaces `simulatedToday`/`now()`/env var as the *only* source of "what day is it" — used for the "skip future dates" check and the `daysOld`/stability comparison in the inner loop. No longer optional; always supplied.
-- `workDir`, `logDir`, `outputDir`, `sourceUrl`, `buoyDayRange`, `buoyStabilityLatency`, `enableREA`, `testing`, `reaAggregationWindow`, `reaOutputDir`: unchanged in meaning, already explicit today, kept as-is.
+- `workDir`, `logDir`, `outputDir`, `buoyDayRange`, `buoyStabilityLatency`, `sourceUrl`, `enableREA`, `testing`, `reaAggregationWindow`, `reaOutputDir`: unchanged in meaning, already explicit today, kept as-is.
+
+**Ordering note:** `sourceUrl` moves to *after* `buoyDayRange`/`buoyStabilityLatency` in the parameter list (it was between `outputDir` and `buoyDayRange` before). This isn't cosmetic — compiled MATLAB executables receive positional arguments, and a caller can only supply a *prefix* of the parameter list before letting the rest default; it can't skip an un-exposed middle parameter to reach a later one it does want to set. Since the entrypoint exposes `buoyDayRange`/`buoyStabilityLatency` as flags but not `sourceUrl`, `sourceUrl` has to move past them so the entrypoint can supply exactly nine positional values (through `stability-latency`) and stop, letting `sourceUrl` onward default naturally — without the entrypoint needing to hardcode a duplicate copy of MATLAB's default URL just to "skip over" it positionally.
 
 **Inner-loop logic changes minimally:** `todayDatenum` is now `datenum(referenceToday, 'yyyy-mm-dd')` (always — no branching on whether a simulated date was supplied). `realtime` is now `strcmpi(mode, 'nrt')` instead of the `dayOrdinal > day1Ordinal` comparison. Everything else in the inner loop (the `±buoyDayRange` iteration, `adjustDoy`, the "skip future" check, the rewrite/stability decision, the `makedailyiquam` call, the REA-aggregation-stub branch gated on `enableREA && ~realtime`) is unchanged, just now driven by parameters instead of internally-derived state.
 
