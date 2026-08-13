@@ -76,6 +76,7 @@ os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 # Import centralized date handling for historical reprocessing support
 import mur_date  # noqa: E402
 
+from iquam_date_flags import format_iquam_mode, format_iquam_reference_date
 from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
 
 
@@ -714,9 +715,6 @@ class MUROrchestrator:
             return True
 
         # Docker command
-        # Note: The iQUAM container determines what to process based on today's date
-        # internally via buoyDataProcessing.m. Pass MUR_SIMULATED_DATE env var so
-        # the container uses simulated "today" for historical reprocessing.
         cmd = ["docker", "run"]
         if not self.keep_containers:
             cmd.append("--rm")
@@ -730,16 +728,17 @@ class MUROrchestrator:
             "-v", f"{logs_dir.resolve()}:/data/logs",
         ])
 
-        # Pass simulated date to container if set (for historical reprocessing)
-        if mur_date.is_simulated():
-            simulated = mur_date.get_simulated_date()
-            cmd.extend(["-e", f"MUR_SIMULATED_DATE={simulated.strftime('%Y-%m-%d')}"])
-
         cmd.extend([
             container_image,
-            "/tmp/makebic",
-            "/data/logs",
-            "/data/output/iquam"
+            "--year", str(year),
+            "--doy", str(doy),
+            "--mode", format_iquam_mode(is_nrt),
+            "--reference-date", format_iquam_reference_date(reference_today),
+            "--work-dir", "/tmp/makebic",
+            "--log-dir", "/data/logs",
+            "--output-dir", "/data/output/iquam",
+            "--buoy-day-range", str(buoydayrange),
+            "--stability-latency", str(stablat),
         ])
 
         try:
