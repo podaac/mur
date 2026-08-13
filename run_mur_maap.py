@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 import mur_date
+from iquam_date_flags import format_iquam_reference_date
 from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
 
 logger = logging.getLogger(__name__)
@@ -188,7 +189,15 @@ class MAAPOrchestrator:
             "gridindex_north_p01_file": landice_hrefs["gridindex_north_p01"],
             "gridindex_south_p01_file": landice_hrefs["gridindex_south_p01"],
         })
-        iquam_job = self.client.submit_job("mur-iquam", {"year": year, "doy": doy})
+        iquam_config = self.config["iquam"]
+        iquam_job = self.client.submit_job("mur-iquam", {
+            "year": year,
+            "doy": doy,
+            "mode": mode,
+            "reference_date": format_iquam_reference_date(self.get_reference_today()),
+            "buoy_day_range": iquam_config["buoy_day_range"],
+            "stability_latency": iquam_config["stability_latency"],
+        })
 
         l2p_jobs = []
         l2p_config = self.config["l2p"]

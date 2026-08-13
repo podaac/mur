@@ -17,6 +17,10 @@ CONFIG = {
     "landice": {
         "static_resources_root": "s3://podaac-bucket/mur/static-resources",
     },
+    "iquam": {
+        "buoy_day_range": 3,
+        "stability_latency": 2,
+    },
     "l2p": {
         "active_sensors": ["AMSR2R", "MODISA"],
         "sensors": {
@@ -123,6 +127,15 @@ def test_run_day_submits_landice_and_iquam_with_named_args(orchestrator):
         "gridindex_north_p01_file": "s3://podaac-bucket/mur/static-resources/mat/p01/saf2north.mat",
         "gridindex_south_p01_file": "s3://podaac-bucket/mur/static-resources/mat/p01/saf2south.mat",
     }
+    iquam_args = next(a for p, a in orchestrator.client.submitted if p == "mur-iquam")
+    assert iquam_args == {
+        "year": 2026,
+        "doy": 218,
+        "mode": "nrt",
+        "reference_date": "2026-08-09",
+        "buoy_day_range": 3,
+        "stability_latency": 2,
+    }
 
 
 def test_run_day_submits_l2p_per_sensor_across_day_range(orchestrator):
@@ -141,6 +154,10 @@ def test_run_day_skips_l2p_when_bic_cached_and_not_due_for_rewrite(orchestrator)
     config = {
         "landice": {
             "static_resources_root": "s3://podaac-bucket/mur/static-resources",
+        },
+        "iquam": {
+            "buoy_day_range": 3,
+            "stability_latency": 2,
         },
         "l2p": {
             "active_sensors": ["AMSR2R"],
