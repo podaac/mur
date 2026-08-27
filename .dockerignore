@@ -74,3 +74,5 @@ LICENSE
 
 # Exclude shell scripts (not needed in most containers)
 **/*.sh
+!*/bin/entrypoint.sh
+!common/bin/localize.sh
