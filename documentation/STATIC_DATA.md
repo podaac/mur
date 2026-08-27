@@ -15,26 +15,36 @@ This document describes all static data files required by the MUR processing pip
 
 ## Overview
 
-Static data is stored in the `static-resources/` directory and mounted into containers at `/data/static-resources/`. Unlike dynamic inputs (L2P, iQUAM, land/ice), these files are:
+Static data is stored in the `static-resources/` directory on disk — the layout documented below never changes. Unlike dynamic inputs (L2P, iQUAM, land/ice), these files are:
 
 - **Immutable:** Never modified during processing
 - **Resolution-specific:** Different files for 0.01° vs 0.011° grids
 - **Shared across modules:** Used by both landice and MRVA containers
 
+**Both landice and MRVA now take every static file as an individually resolved, explicitly-named flag** (`--landmask-p01-file`, `--polar-cap-edge-file`, `--seasonal-file`, etc. — see [landice/README.md](../landice/README.md), `mrva/bin/entrypoint.sh`); nothing is discovered by scanning a directory or bind-mounting a whole `static-resources/` tree. MRVA additionally takes three per-day landice-output files (`--landice-ice-p011-file`, `--landice-grid-p01-file`, `--landice-icefiles-p011-file`) and a `--sensor-inputs-manifest` covering its per-sensor BIC/iQuam fan-in (see `docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md` section 3) the same way.
+
+**Local paths or S3 hrefs, uniformly.** Every flag value may be either a local filesystem path (bind-mounted for local `docker run`) or an `s3://` href (MAAP, or any S3-accessible environment) — `entrypoint.sh` sources a shared helper (`common/bin/localize.sh`) that fetches `s3://` values to local scratch space via `aws s3 cp` before MATLAB runs; local paths pass through unchanged. This is why the flags are described as "explicitly-named" rather than "bind-mounted": bind-mounting is how the local orchestrator (`run_mur_pipeline.py`) happens to supply a local path, not a requirement of the flag contract itself. See `docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md` section 4 for the full rationale (why this has to happen inside the container rather than in Python).
+
+**MRVA's `static-resources/` mount is now genuinely read-only.** `makeMUR25_container.m`'s seasonal climatology cache (`seasonal25/mur_###.mat`) previously wrote back into `static_resources_root` at runtime — this was fixed to write into the writable `cache_dir` instead, matching its sibling ice-cache's already-correct pattern.
+
+**One directory-shaped exception:** `--l4-reference-root` (the optional GHRSST L4 bootstrap reference, only used when no prior-day coefficient exists) is a directory tree, not a single file. `common/bin/localize.sh` doesn't do recursive S3 sync (`aws s3 cp` without `--recursive`), so this flag is bind-mounted/passed through as-is locally; real S3-recursive localization for this specific input is not implemented.
+
 ### Configuration
 
-The static resources directory is configured in `config.json`:
+`run_mur_pipeline.py` resolves landice's six files from a single root path, configured in `config.json`:
 
 ```json
 {
   "landice": {
-    "input_dir": "testing/static-resources"
+    "static_resources_dir": "testing/static-resources"
   },
   "mrva": {
     "static_resources_dir": "testing/static-resources"
   }
 }
 ```
+
+(`landice.static_resources_dir` was named `landice.input_dir` before landice's explicit-input-flags conversion — the value is the same root, just the key was renamed for clarity now that it's resolved into six explicit files rather than bind-mounted whole.)
 
 ## Directory Structure
 

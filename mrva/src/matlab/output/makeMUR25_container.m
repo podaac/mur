@@ -6,12 +6,17 @@ function makeMUR25_container(year, day, realtime, config)
 %   year:     4-digit year (numeric)
 %   day:      Day of year (1-366)
 %   realtime: 1 for NRT, 0 for REA
-%   config:   Configuration struct with paths:
+%   config:   Configuration struct with already-resolved paths -- every
+%             value below is a real local file/directory path (localized
+%             from a --*-file flag by entrypoint.sh if it came from an
+%             s3:// href; see common/bin/localize.sh), never a root this
+%             function constructs a path from:
 %             - cspdir:      Directory containing CSP coefficient files
 %             - cspfmt:      CSP file name format
 %             - netcdf_dir:  Output directory for NetCDF files
-%             - landice_root: Land/ice input directory
-%             - static_resources_root: Static resources directory
+%             - landice_grid_p01_file: Resolved landiceP01_YYYY_DDD.gds.gz file for this day
+%             - mur25_grid_file: Resolved MUR25grid.gds file
+%             - seasonal_file: Resolved seasonal climatology file for this day
 %             - fortran_bin: Fortran executables directory
 %             - cache_dir:   Writable cache directory (default: '/data/cache')
 %             - region:      Region name (default: 'Global')
@@ -20,8 +25,6 @@ function makeMUR25_container(year, day, realtime, config)
 % Container paths (mounted from host):
 %   /data/output/csp/        - Input CSP coefficient files
 %   /data/output/netcdf/     - Output MUR25 NetCDF files
-%   /data/input/landice/     - Land/ice masks
-%   /data/static-resources/  - Static resources (grids, seasonal)
 
     fprintf('\n========================================\n');
     fprintf('MUR25 Product Generation\n');
@@ -35,8 +38,9 @@ function makeMUR25_container(year, day, realtime, config)
     cspdir = config.cspdir;
     cspfmt = config.cspfmt;
     netcdf_dir = config.netcdf_dir;
-    landice_root = config.landice_root;
-    static_resources_root = config.static_resources_root;
+    landice_grid_p01_file = config.landice_grid_p01_file;
+    mur25_grid_file = config.mur25_grid_file;
+    seasonal_file = config.seasonal_file;
     fortran_bin = config.fortran_bin;
 
     if isfield(config, 'cache_dir')
@@ -93,20 +97,15 @@ function makeMUR25_container(year, day, realtime, config)
     targetMin = 0.3;
 
     %% Static files
-    % MUR25 grid file (0.25 degree landmask)
-    landmaskfile = sprintf('%s/grids/MUR25grid.gds', static_resources_root);
+    % MUR25 grid file (0.25 degree landmask) -- already resolved by the
+    % caller; mrva4com_container.m only calls makeMUR25_container at all
+    % when this file is confirmed present (see its own mur25Flag check), so
+    % this is a defensive re-check, not the primary guard.
+    landmaskfile = mur25_grid_file;
 
-    % Check if MUR25 grid exists, if not provide guidance
     if ~exist(landmaskfile, 'file')
-        error(['MUR25_STATIC:GRID_NOT_FOUND\n', ...
-               'MUR25 grid file not found: %s\n\n', ...
-               'The MUR25grid.gds file is required for 0.25-degree product generation.\n', ...
-               'This file defines the land/sea mask at 0.25-degree resolution (1440x720).\n\n', ...
-               'To obtain this file:\n', ...
-               '  1. Copy from production: /home/tmchin/grids/MUR25grid.gds\n', ...
-               '  2. Or generate from the 0.01-degree mask using MURto25 function\n\n', ...
-               'Place the file at: %s/grids/MUR25grid.gds'], ...
-               landmaskfile, static_resources_root);
+        error('MUR25_STATIC:GRID_NOT_FOUND', ...
+              'MUR25 grid file not found: %s', landmaskfile);
     end
 
     %% Creation date/time
@@ -147,7 +146,7 @@ function makeMUR25_container(year, day, realtime, config)
     fprintf('Processing ice data for MUR25...\n');
 
     if iceIncluded
-        icemap = makeMUR25ice_container(year, day, landice_root, static_resources_root, cache_dir);
+        icemap = makeMUR25ice_container(year, day, landice_grid_p01_file, cache_dir);
         fprintf('  Ice data loaded: %d x %d\n', size(icemap, 1), size(icemap, 2));
     end
 
@@ -251,7 +250,7 @@ function makeMUR25_container(year, day, realtime, config)
         fprintf('Computing SST anomaly...\n');
 
         ssta = double(msst) * sscale_out + offset;
-        seasonal_sst = makeSeasonal_container(day, static_resources_root);
+        seasonal_sst = makeSeasonal_container(day, seasonal_file, cache_dir);
         ssta = ssta - seasonal_sst;
 
         fprintf('  Anomaly computed\n');
@@ -637,11 +636,14 @@ function out = iif(condition, true_val, false_val)
 end
 
 %% Helper function: makeMUR25ice for container
-function icemap = makeMUR25ice_container(year, doy, landice_root, static_resources_root, cache_dir)
+function icemap = makeMUR25ice_container(year, doy, landice_grid_p01_file, cache_dir)
 % Generate MUR25 ice map from landice data by downsampling
 %
-% Reads the full-resolution landice file and downsamples to 0.25 degree
-% Cache is written to cache_dir (writable) rather than landice_root (read-only)
+% Reads the already-resolved, already-localized landice grid file for this
+% day (landice_grid_p01_file, e.g. landiceP01_YYYY_DDD.gds.gz -- resolved
+% by the caller, no root/pattern construction here) and downsamples to
+% 0.25 degree. Cache is written to cache_dir (writable), never back into
+% wherever landice_grid_p01_file itself came from.
 
     % Check for cached MUR25 ice file first
     icecachedir = sprintf('%s/ice25', cache_dir);
@@ -661,13 +663,13 @@ function icemap = makeMUR25ice_container(year, doy, landice_root, static_resourc
         return;
     end
 
-    % Generate from full-resolution landice data
-    gridfile = sprintf('%s/%04d/landiceP01_%04d_%03d.gds.gz', landice_root, year, year, doy);
+    % Generate from the resolved landice grid file
     tmpgridfile = sprintf('/tmp/landice_%04d_%03d.gds', year, doy);
 
-    if exist(gridfile, 'file')
-        % Decompress
-        system(sprintf('zcat -f %s > %s', gridfile, tmpgridfile));
+    if exist(landice_grid_p01_file, 'file')
+        % Decompress (zcat -f passes uncompressed input through unchanged,
+        % so this works whether landice_grid_p01_file is .gds.gz or .gds)
+        system(sprintf('zcat -f %s > %s', landice_grid_p01_file, tmpgridfile));
 
         f = fopen(tmpgridfile, 'r');
         if f > 0
@@ -717,34 +719,31 @@ function icemap = makeMUR25ice_container(year, doy, landice_root, static_resourc
             icemap = zeros(1440, 720);
         end
     else
-        % Try uncompressed version
-        gridfile_unc = sprintf('%s/%04d/landiceP01_%04d_%03d.gds', landice_root, year, year, doy);
-        if exist(gridfile_unc, 'file')
-            f = fopen(gridfile_unc, 'r');
-            % ... same reading logic ...
-            warning('Reading uncompressed landice not fully implemented');
-            icemap = zeros(1440, 720);
-            if f > 0, fclose(f); end
-        else
-            warning('Landice file not found: %s', gridfile);
-            icemap = zeros(1440, 720);
-        end
+        warning('Landice grid file not found: %s', landice_grid_p01_file);
+        icemap = zeros(1440, 720);
     end
 end
 
 %% Helper function: makeSeasonal for container
-function sst = makeSeasonal_container(doy, static_resources_root)
+function sst = makeSeasonal_container(doy, seasonal_file, cache_dir)
 % Get MUR25 seasonal climatology for the specified day of year
 %
-% First tries to read pre-computed MUR25 seasonal file.
-% If not found, reads full-resolution seasonal and downsamples.
+% First tries to read pre-computed MUR25 seasonal cache. If not found,
+% reads the already-resolved full-resolution seasonal_file and downsamples.
+% doy is kept only to key the seasonal25 cache filename -- readSeasonal
+% itself no longer needs it, since seasonal_file is already resolved.
+%
+% Cache is written to cache_dir (writable), mirroring
+% makeMUR25ice_container's already-correct cache_dir/ice25/ pattern --
+% previously this wrote into static_resources_root, which should be
+% read-only under the explicit-args contract.
 
     if doy == 366
         doy = 365;
     end
 
-    % Check for pre-computed MUR25 seasonal file
-    seasonaldir = sprintf('%s/seasonal25', static_resources_root);
+    % Check for pre-computed MUR25 seasonal cache
+    seasonaldir = sprintf('%s/seasonal25', cache_dir);
     seasonalfile = sprintf('%s/mur_%03d.mat', seasonaldir, doy);
 
     if exist(seasonalfile, 'file')
@@ -754,7 +753,7 @@ function sst = makeSeasonal_container(doy, static_resources_root)
     end
 
     % Read full-resolution and downsample
-    seasonal_full = readSeasonal(doy);
+    seasonal_full = readSeasonal(seasonal_file);
     sst = MURto25(seasonal_full);
 
     % Cache the result

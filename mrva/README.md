@@ -138,18 +138,34 @@ docker build --platform linux/amd64 -t mrva:latest -f Dockerfile ..
 
 ### Container Interface
 
+Named args only — every input is an explicit flag, resolved by the calling
+Python orchestrator (`run_mur_pipeline.py` / `run_mur_maap.py`). See
+`mrva/bin/entrypoint.sh`'s `usage()` for the authoritative flag list; the
+static/dynamic-input flags mirror `documentation/STATIC_DATA.md`.
+
 ```bash
-docker run [OPTIONS] mrva:latest YEAR DOY MODE [SENSORS]
+docker run [OPTIONS] mrva:latest \
+  --year YEAR --doy DOY --mode MODE [--sensors LIST] \
+  --polar-cap-edge-file FILE --seasonal-file FILE \
+  --landice-ice-p011-file FILE --landice-grid-p01-file FILE --landice-icefiles-p011-file FILE \
+  --sensor-inputs-manifest FILE --l4-reference-root DIR \
+  [--mur25-grid-file FILE] [--prior-csp-file FILE] [--debug]
 ```
 
 **Arguments:**
 
 | Argument | Required | Description | Example |
 |----------|----------|-------------|---------|
-| `YEAR` | Yes | 4-digit year | `2025` |
-| `DOY` | Yes | Day of year (1-366) | `220` |
-| `MODE` | Yes | Processing mode: `nrt` or `rea` | `nrt` |
-| `SENSORS` | No | Comma-separated sensor list | `AMSR2R,MODISA` |
+| `--year` | Yes | 4-digit year | `2025` |
+| `--doy` | Yes | Day of year (1-366) | `220` |
+| `--mode` | Yes | Processing mode: `nrt` or `rea` | `nrt` |
+| `--sensors` | No | Comma-separated sensor list (default: all configured) | `AMSR2R,MODISA` |
+| `--sensor-inputs-manifest` | Yes | Path/href to a manifest JSON listing this run's BIC + iQuam files (schema: `docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md` section 3) | |
+| `--mur25-grid-file` | No | Absent → skip MUR25 generation | |
+| `--prior-csp-file` | No | Absent → bootstrap reference field from L4 instead | |
+
+Every `FILE`/`DIR` value may be a local path or an `s3://` href — resolved via
+`common/bin/localize.sh` before MATLAB runs.
 
 **Processing Modes:**
 
@@ -165,49 +181,46 @@ docker run [OPTIONS] mrva:latest YEAR DOY MODE [SENSORS]
 
 ### Volume Mounts
 
-The container expects the following volume mounts:
+Output/working paths are still fixed container-internal bind mounts, unchanged
+from before — only the input side became explicit flags:
 
 | Container Path | Purpose | Example Host Path |
 |----------------|---------|-------------------|
-| `/data/input/bic/` | L2P satellite data (BIC.gz files) | `/local/preprocessing/l2p/` |
-| `/data/input/iquam/` | Buoy data (BII files) | `/local/preprocessing/iquam/` |
-| `/data/input/landice/` | Land/ice masks (GDS files) | `/local/preprocessing/landice/` |
 | `/data/output/csp/` | Coefficient files (CSP format) | `/local/mrva/output/csp/` |
 | `/data/output/netcdf/` | Final NetCDF4 products | `/local/mrva/output/netcdf/` |
 | `/data/cache/` | Temporary working files | `/local/mrva/cache/` |
 | `/data/logs/` | Execution logs | `/local/mrva/logs/` |
 
+Every input flag's value (a local path or an `s3://` href) needs to be
+reachable from inside the container — for local paths, bind-mount the source
+root at the same absolute path (`run_mur_pipeline.py` does this
+automatically); for `s3://` hrefs, no mount is needed at all.
+
 ### Example Usage
 
-**Basic NRT Processing:**
+**In practice, use `run_mur_pipeline.py` (local) or `run_mur_maap.py` (MAAP)**
+— both resolve every flag automatically (static-resource files, per-day
+landice outputs, and the sensor-inputs manifest) and invoke the container
+correctly. The flags below are for manual/debug invocation only:
 
 ```bash
 docker run --rm \
-  --memory=32g \
-  --shm-size=4g \
-  -v /local/preprocessing/l2p:/data/input/bic \
-  -v /local/preprocessing/iquam:/data/input/iquam \
-  -v /local/preprocessing/landice:/data/input/landice \
+  --memory=32g --shm-size=4g \
+  -v /local/static-resources:/local/static-resources:ro \
+  -v /local/preprocessing:/local/preprocessing:ro \
+  -v /local/manifest.json:/local/manifest.json:ro \
   -v /local/mrva/output:/data/output \
   -v /local/mrva/cache:/data/cache \
   -v /local/mrva/logs:/data/logs \
-  mrva:latest 2025 220 nrt
-```
-
-**REA Processing with Specific Sensors:**
-
-```bash
-docker run --rm \
-  --memory=64g \
-  --shm-size=4g \
-  --cpus=16 \
-  -v /data/preprocessing/l2p:/data/input/bic \
-  -v /data/preprocessing/iquam:/data/input/iquam \
-  -v /data/preprocessing/landice:/data/input/landice \
-  -v /data/mrva/output:/data/output \
-  -v /data/mrva/cache:/data/cache \
-  -v /data/logs:/data/logs \
-  mrva:latest 2025 220 rea AMSR2R,MODISA,IQUAM0
+  mrva:latest \
+  --year 2025 --doy 220 --mode nrt \
+  --polar-cap-edge-file /local/static-resources/landice/CylinderP01_edge.bip \
+  --seasonal-file /local/static-resources/seasonal/mur_220.nc \
+  --landice-ice-p011-file /local/preprocessing/landice-p011/2025/Global_ice_2025_220.bip \
+  --landice-grid-p01-file /local/preprocessing/landice-p01/2025/landiceP01_2025_220.gds.gz \
+  --landice-icefiles-p011-file /local/preprocessing/landice-p011/2025/icefiles_2025_220.txt \
+  --sensor-inputs-manifest /local/manifest.json \
+  --l4-reference-root /local/static-resources/L4
 ```
 
 ## Testing

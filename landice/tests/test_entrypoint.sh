@@ -65,6 +65,34 @@ assert_eq "build_command assembles all args in wrapper's parameter order" \
     "/opt/landice/bin/run_LandiceProcessor.sh /opt/matlabruntime/R2024b /in/landmask-p01.gds /in/gridindex-north-p01.mat /in/gridindex-south-p01.mat /in/landmask-p011.gds /in/gridindex-north-p011.mat /in/gridindex-south-p011.mat /output/p011 /output/p01 2026 220" \
     "$out"
 
+# --- localize_all_inputs: all-local-path flags is a no-op (regression check) ---
+out=$(run_case "parse_args $ALL_FLAGS; localize_all_inputs; echo \"\$LANDMASK_P01|\$GRIDINDEX_NORTH_P01|\$GRIDINDEX_SOUTH_P01|\$LANDMASK_P011|\$GRIDINDEX_NORTH_P011|\$GRIDINDEX_SOUTH_P011\"")
+assert_eq "localize_all_inputs is a no-op for all-local-path flags" \
+    "/in/landmask-p01.gds|/in/gridindex-north-p01.mat|/in/gridindex-south-p01.mat|/in/landmask-p011.gds|/in/gridindex-north-p011.mat|/in/gridindex-south-p011.mat" \
+    "$out"
+
+# Stub `aws` -- mirrors `aws s3 cp SRC DEST`'s positional args ($1=s3 $2=cp $3=src $4=dest).
+STUB_AWS_OK='aws() { if [[ "$1" == "s3" && "$2" == "cp" ]]; then mkdir -p "$(dirname "$4")"; echo stub > "$4"; return 0; fi; return 1; }'
+STUB_AWS_FAIL='aws() { return 1; }'
+
+MIXED_FLAGS='--year 2026 --doy 220 \
+    --landmask-p01-file /in/landmask-p01.gds \
+    --gridindex-north-p01-file /in/gridindex-north-p01.mat \
+    --gridindex-south-p01-file /in/gridindex-south-p01.mat \
+    --landmask-p011-file s3://bucket/landmask-p011.gds \
+    --gridindex-north-p011-file /in/gridindex-north-p011.mat \
+    --gridindex-south-p011-file /in/gridindex-south-p011.mat'
+
+# --- localize_all_inputs: mixed local + s3:// fetches only the s3:// flag ---
+out=$(run_case "$STUB_AWS_OK; parse_args $MIXED_FLAGS; localize_all_inputs; echo \"\$LANDMASK_P01|\$LANDMASK_P011\"")
+assert_eq "localize_all_inputs fetches only the s3:// flag, leaves local flags unchanged" \
+    "/in/landmask-p01.gds|/tmp/landice_tmp/localized-inputs/landmask-p011" \
+    "$out"
+
+# --- localize_all_inputs: s3:// fetch failure returns non-zero (before verify_inputs_exist/build_command would run) ---
+assert_fails "localize_all_inputs fails when s3 fetch fails" \
+    "$STUB_AWS_FAIL; parse_args $MIXED_FLAGS; localize_all_inputs"
+
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
     echo "All tests passed."

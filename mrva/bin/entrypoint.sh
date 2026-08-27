@@ -1,0 +1,243 @@
+#!/bin/bash
+# MRVA Container Entrypoint Wrapper
+#
+# Named-args only: every input is an explicit flag, resolved by the calling
+# Python orchestrator (run_mur_pipeline.py / run_mur_maap.py). No directory
+# is scanned or path-constructed inside this container. Each direct-value
+# flag and --sensor-inputs-manifest may be a local path or an s3:// href,
+# localized via common/bin/localize.sh before MATLAB runs. The resolved
+# values are handed to the compiled binary via a single generated JSON
+# config file (see write_config below) rather than many positional MATLAB
+# parameters -- this is purely an internal handoff detail; the container's
+# own CLI here is unaffected by it.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../../common/bin/localize.sh
+source "$SCRIPT_DIR/../../common/bin/localize.sh"
+
+usage() {
+    echo "Usage: docker run ... --year YEAR --doy DOY --mode MODE \\"
+    echo "  --polar-cap-edge-file FILE --seasonal-file FILE \\"
+    echo "  --landice-ice-p011-file FILE --landice-grid-p01-file FILE --landice-icefiles-p011-file FILE \\"
+    echo "  --sensor-inputs-manifest FILE --l4-reference-root DIR \\"
+    echo "  [--sensors LIST] [--mur25-grid-file FILE] [--prior-csp-file FILE] [--debug]"
+    echo "  YEAR:     4-digit year (e.g., 2025)"
+    echo "  DOY:      Day of year (1-366)"
+    echo "  MODE:     nrt (near-real-time) or rea (reanalysis)"
+    echo "  SENSORS:  Optional comma-separated list (e.g., AMSR2R,MODISA); default: all sensors"
+    echo "  Every FILE/DIR value may be a local path or an s3:// href."
+    echo "  --mur25-grid-file and --prior-csp-file are optional (absence is a valid state, not an error)."
+}
+
+parse_args() {
+    YEAR=""
+    DOY=""
+    MODE=""
+    SENSORS=""
+    DEBUG_MODE=0
+    POLAR_CAP_EDGE_FILE=""
+    MUR25_GRID_FILE=""
+    SEASONAL_FILE=""
+    LANDICE_ICE_P011_FILE=""
+    LANDICE_GRID_P01_FILE=""
+    LANDICE_ICEFILES_P011_FILE=""
+    SENSOR_INPUTS_MANIFEST=""
+    PRIOR_CSP_FILE=""
+    L4_REFERENCE_ROOT=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --year)                        YEAR="$2";                        shift 2 ;;
+            --doy)                         DOY="$2";                         shift 2 ;;
+            --mode)                        MODE="$2";                        shift 2 ;;
+            --sensors)                     SENSORS="$2";                     shift 2 ;;
+            --debug)                       DEBUG_MODE=1;                     shift ;;
+            --polar-cap-edge-file)         POLAR_CAP_EDGE_FILE="$2";         shift 2 ;;
+            --mur25-grid-file)             MUR25_GRID_FILE="$2";             shift 2 ;;
+            --seasonal-file)               SEASONAL_FILE="$2";               shift 2 ;;
+            --landice-ice-p011-file)       LANDICE_ICE_P011_FILE="$2";       shift 2 ;;
+            --landice-grid-p01-file)       LANDICE_GRID_P01_FILE="$2";       shift 2 ;;
+            --landice-icefiles-p011-file)  LANDICE_ICEFILES_P011_FILE="$2";  shift 2 ;;
+            --sensor-inputs-manifest)      SENSOR_INPUTS_MANIFEST="$2";      shift 2 ;;
+            --prior-csp-file)              PRIOR_CSP_FILE="$2";              shift 2 ;;
+            --l4-reference-root)           L4_REFERENCE_ROOT="$2";           shift 2 ;;
+            *)
+                echo "ERROR: Unknown argument: $1" >&2
+                usage
+                return 1
+                ;;
+        esac
+    done
+
+    if [[ -z "$YEAR" || -z "$DOY" || -z "$MODE" || -z "$POLAR_CAP_EDGE_FILE" || \
+          -z "$SEASONAL_FILE" || -z "$LANDICE_ICE_P011_FILE" || -z "$LANDICE_GRID_P01_FILE" || \
+          -z "$LANDICE_ICEFILES_P011_FILE" || -z "$SENSOR_INPUTS_MANIFEST" || -z "$L4_REFERENCE_ROOT" ]]; then
+        echo "ERROR: --year, --doy, --mode, --polar-cap-edge-file, --seasonal-file," >&2
+        echo "  --landice-ice-p011-file, --landice-grid-p01-file, --landice-icefiles-p011-file," >&2
+        echo "  --sensor-inputs-manifest, and --l4-reference-root are required" >&2
+        usage
+        return 1
+    fi
+
+    if [[ "$YEAR" -lt 1900 || "$YEAR" -gt 2100 ]]; then
+        echo "ERROR: Invalid year: $YEAR" >&2
+        return 1
+    fi
+
+    if [[ "$DOY" -lt 1 || "$DOY" -gt 366 ]]; then
+        echo "ERROR: Invalid day of year: $DOY" >&2
+        return 1
+    fi
+
+    if [[ "$MODE" != "nrt" && "$MODE" != "rea" ]]; then
+        echo "ERROR: Invalid mode: $MODE (must be 'nrt' or 'rea')" >&2
+        return 1
+    fi
+}
+
+localize_all_inputs() {
+    local scratch="${TMP_DIR:-/tmp/mrva_tmp}/localized-inputs"
+    POLAR_CAP_EDGE_FILE=$(localize_input polar-cap-edge "$POLAR_CAP_EDGE_FILE" "$scratch") || return 1
+    SEASONAL_FILE=$(localize_input seasonal "$SEASONAL_FILE" "$scratch") || return 1
+    LANDICE_ICE_P011_FILE=$(localize_input landice-ice-p011 "$LANDICE_ICE_P011_FILE" "$scratch") || return 1
+    LANDICE_GRID_P01_FILE=$(localize_input landice-grid-p01 "$LANDICE_GRID_P01_FILE" "$scratch") || return 1
+    LANDICE_ICEFILES_P011_FILE=$(localize_input landice-icefiles-p011 "$LANDICE_ICEFILES_P011_FILE" "$scratch") || return 1
+    L4_REFERENCE_ROOT=$(localize_input l4-reference-root "$L4_REFERENCE_ROOT" "$scratch") || return 1
+
+    if [[ -n "$MUR25_GRID_FILE" ]]; then
+        MUR25_GRID_FILE=$(localize_input mur25-grid "$MUR25_GRID_FILE" "$scratch") || return 1
+    fi
+    if [[ -n "$PRIOR_CSP_FILE" ]]; then
+        PRIOR_CSP_FILE=$(localize_input prior-csp "$PRIOR_CSP_FILE" "$scratch") || return 1
+    fi
+
+    SENSOR_INPUTS_ROOT=$(localize_manifest sensor-inputs "$SENSOR_INPUTS_MANIFEST" "$scratch") || return 1
+}
+
+# Writes the JSON config file mrva4com_container.m reads (see its own
+# docstring) from the now-localized bash variables. Uses python3 (already
+# present as the awscli package's own transitive dependency) since bash has
+# no practical JSON support -- same tool already used by localize_manifest.
+write_config() {
+    local config_path="$1"
+    python3 -c "
+import json, sys
+
+def opt(v):
+    return v if v else None
+
+sensors_arg = sys.argv[9]
+sensors = [s.strip() for s in sensors_arg.split(',')] if sensors_arg else None
+
+config = {
+    'polar_cap_edge_file': sys.argv[1],
+    'mur25_grid_file': opt(sys.argv[2]),
+    'seasonal_file': sys.argv[3],
+    'landice_ice_p011_file': sys.argv[4],
+    'landice_grid_p01_file': sys.argv[5],
+    'landice_icefiles_p011_file': sys.argv[6],
+    'sensor_inputs_root': sys.argv[7],
+    'prior_csp_file': opt(sys.argv[8]),
+    'l4_reference_root': sys.argv[10],
+    'sensors': sensors,
+    'debug': sys.argv[11] == '1',
+}
+with open(sys.argv[12], 'w') as f:
+    json.dump(config, f)
+" \
+        "$POLAR_CAP_EDGE_FILE" "$MUR25_GRID_FILE" "$SEASONAL_FILE" \
+        "$LANDICE_ICE_P011_FILE" "$LANDICE_GRID_P01_FILE" "$LANDICE_ICEFILES_P011_FILE" \
+        "$SENSOR_INPUTS_ROOT" "$PRIOR_CSP_FILE" "$SENSORS" \
+        "$L4_REFERENCE_ROOT" "$DEBUG_MODE" "$config_path"
+}
+
+build_command() {
+    CONFIG_PATH="${TMP_DIR:-/tmp/mrva_tmp}/mrva_config.json"
+    write_config "$CONFIG_PATH" || return 1
+    CMD=(/opt/mrva/bin/run_MrvaProcessor.sh "/opt/matlabruntime/R2024b" "$YEAR" "$DOY" "$MODE" "$CONFIG_PATH")
+}
+
+main() {
+    set -e
+    parse_args "$@" || exit 1
+    localize_all_inputs || exit 1
+
+    # Ensure scratch dirs exist and are owned by the runtime UID. These are not
+    # pre-created in the image so the sticky bit on /tmp does not block the
+    # arbitrary runtime UID from managing them on subsequent runs.
+    mkdir -p "${TMP_DIR:-/tmp/mrva_tmp}" "${MATLAB_PREFDIR:-/tmp/.matlab}" "${MCR_CACHE_ROOT:-/tmp}"
+
+    # The Fortran PCG solver uses large local arrays that can exceed default
+    # stack; unlimited stack prevents segfaults during solver iterations.
+    # KMP_STACKSIZE sets thread stack for Intel OpenMP parallel regions.
+    ulimit -s unlimited 2>/dev/null || echo "Warning: Could not set unlimited stack size"
+    export KMP_STACKSIZE=${KMP_STACKSIZE:-128M}
+
+    # Debug mode is enabled if the image was built with DEBUG=1, or via the
+    # runtime --debug flag (parsed above into DEBUG_MODE).
+    if [ "${MRVA_DEBUG_BUILD:-0}" = "1" ]; then
+        DEBUG_MODE=1
+        echo "========================================="
+        echo "DEBUG BUILD DETECTED"
+        echo "========================================="
+        echo "This container was built with DEBUG=1."
+        echo "Enhanced diagnostic output is automatically enabled."
+        echo "========================================="
+        echo ""
+    elif [ "$DEBUG_MODE" -eq 1 ]; then
+        echo "========================================="
+        echo "DEBUG MODE ENABLED (runtime flag)"
+        echo "========================================="
+        echo "Enhanced diagnostic output will be shown."
+        echo "For maximum debugging, rebuild with DEBUG=1:"
+        echo "  docker build --build-arg DEBUG=1 -t mrva:debug ..."
+        echo "========================================="
+        echo ""
+    fi
+    export MRVA_DEBUG=$DEBUG_MODE
+
+    # Log startup
+    echo "========================================="
+    echo "MRVA Container Starting"
+    echo "========================================="
+    echo "Year:     $YEAR"
+    echo "DOY:      $DOY"
+    echo "Mode:     $MODE"
+    echo "Sensors:  ${SENSORS:-all (default)}"
+    if [ "$DEBUG_MODE" -eq 1 ]; then
+        if [ "${MRVA_DEBUG_BUILD:-0}" = "1" ]; then
+            echo "Debug:    ENABLED (debug build)"
+        else
+            echo "Debug:    ENABLED (runtime flag)"
+        fi
+    else
+        echo "Debug:    disabled"
+    fi
+    echo "-----------------------------------------"
+    echo "Stack:    $(ulimit -s) (soft limit)"
+    echo "KMP_STACKSIZE: $KMP_STACKSIZE"
+    echo "========================================="
+    echo ""
+
+    # Ensure Fortran binaries are in PATH
+    export PATH="/opt/mrva/bin:$PATH"
+
+    # Verify Fortran executables are available
+    echo "Verifying Fortran executables..."
+    for exe in mrva samplegdscsp spgrid trimbip3 makehiresgrid cbscxdata cbscxcoeff cbscxcoeffvector; do
+        if [ ! -x "/opt/mrva/bin/$exe" ]; then
+            echo "ERROR: Fortran executable not found: $exe"
+            exit 1
+        fi
+    done
+    echo "  ✓ All Fortran executables found (including spline utilities)"
+    echo ""
+
+    echo "Starting MATLAB runtime..."
+    build_command || exit 1
+    exec "${CMD[@]}"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

@@ -1,9 +1,8 @@
 %% trimbip3a.m
-function refcspfile=trimbip3a(sensors,year,day,bipdir,region,MURcsp)
+function refcspfile=trimbip3a(sensors,year,day,bipdir,region,MURcsp,L4_reference_root)
 
 % Container path configuration
 fortran_bin = '/opt/mrva/bin';
-L4_reference_root = '/data/static-resources/L4';
 
 %% same as trimbip.m (see just below),
 %% except that refcspfile is linked to MURcsp, if "MURcsp" is given.
@@ -16,6 +15,9 @@ L4_reference_root = '/data/static-resources/L4';
 %% input:
 %%   sensors = copy of one used by the mrva script, e.g., mrva1com.m
 %%   year, day, bipdir = also copies from the mrva script.
+%%   L4_reference_root = resolved L4 reference data root (only used when
+%%     MURcsp is empty -- the L4-bootstrap fallback path), passed by the
+%%     caller rather than hardcoded here.
 
 if ~exist('MURcsp','var'), MURcsp=''; end;
 

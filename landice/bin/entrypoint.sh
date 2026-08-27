@@ -4,7 +4,13 @@
 # Named-args only: every input is an explicit flag, resolved by the calling
 # Python orchestrator (run_mur_pipeline.py / run_mur_maap.py). No directory
 # is scanned or path-constructed inside this container — each of the six
-# static input files is passed as its own flag value.
+# static input files is passed as its own flag value, and each value may be
+# either a local path (local docker run) or an s3:// href (MAAP) -- see
+# localize_all_inputs() / common/bin/localize.sh.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../../common/bin/localize.sh
+source "$SCRIPT_DIR/../../common/bin/localize.sh"
 
 usage() {
     echo "Usage: docker run ... --year YEAR --doy DOY \\"
@@ -78,6 +84,16 @@ parse_args() {
     fi
 }
 
+localize_all_inputs() {
+    local scratch="${TMP_DIR:-/tmp/landice_tmp}/localized-inputs"
+    LANDMASK_P01=$(localize_input landmask-p01 "$LANDMASK_P01" "$scratch") || return 1
+    GRIDINDEX_NORTH_P01=$(localize_input gridindex-north-p01 "$GRIDINDEX_NORTH_P01" "$scratch") || return 1
+    GRIDINDEX_SOUTH_P01=$(localize_input gridindex-south-p01 "$GRIDINDEX_SOUTH_P01" "$scratch") || return 1
+    LANDMASK_P011=$(localize_input landmask-p011 "$LANDMASK_P011" "$scratch") || return 1
+    GRIDINDEX_NORTH_P011=$(localize_input gridindex-north-p011 "$GRIDINDEX_NORTH_P011" "$scratch") || return 1
+    GRIDINDEX_SOUTH_P011=$(localize_input gridindex-south-p011 "$GRIDINDEX_SOUTH_P011" "$scratch") || return 1
+}
+
 verify_inputs_exist() {
     local flag_name value
     for flag_name in LANDMASK_P01 GRIDINDEX_NORTH_P01 GRIDINDEX_SOUTH_P01 \
@@ -102,6 +118,7 @@ build_command() {
 main() {
     set -e
     parse_args "$@" || exit 1
+    localize_all_inputs || exit 1
     verify_inputs_exist || exit 1
 
     # Ensure scratch dirs exist and are owned by the runtime UID.

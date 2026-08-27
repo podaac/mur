@@ -74,8 +74,12 @@ test_basic() {
     echo ""
 
     # Test 5: Check directory structure
+    # Inputs are no longer pre-created directories (explicit-args contract --
+    # every input is now a named flag, localized/materialized at runtime by
+    # entrypoint.sh; see documentation/STATIC_DATA.md). Only output/working
+    # paths are still pre-created in the image.
     echo "Test 5: Checking directory structure..."
-    DIR_CHECK=$(docker run --rm --entrypoint /bin/bash mrva:latest -c "ls -d /data/input/bic /data/input/iquam /data/input/landice /data/output /data/cache /data/logs 2>&1")
+    DIR_CHECK=$(docker run --rm --entrypoint /bin/bash mrva:latest -c "ls -d /data/output /data/cache /data/logs 2>&1")
     if echo "$DIR_CHECK" | grep -q "No such file"; then
         echo "  ✗ Some required directories missing"
         echo "$DIR_CHECK"
@@ -98,6 +102,22 @@ test_basic() {
 
 # Function to run full processing test
 test_full() {
+    echo "========================================="
+    echo "test_full is out of date"
+    echo "========================================="
+    echo "MRVA now takes every input as an explicit named flag (static-resource"
+    echo "files, per-day landice outputs, and a --sensor-inputs-manifest covering"
+    echo "BIC/iQuam fan-in) instead of the old bind-mounted /data/input/{bic,iquam,landice}"
+    echo "directories + positional YEAR DOY MODE args this script still builds below."
+    echo "See mrva/README.md and mrva/bin/entrypoint.sh's usage() for the current"
+    echo "interface, or just use run_mur_pipeline.py, which builds all of this"
+    echo "automatically (--execute mrva)."
+    echo ""
+    echo "This function hasn't been rewritten for the new interface yet -- exiting"
+    echo "rather than running a command guaranteed to fail against the current"
+    echo "entrypoint.sh (which no longer accepts positional args at all)."
+    exit 1
+
     echo "Running full processing test with sample data..."
     echo ""
 

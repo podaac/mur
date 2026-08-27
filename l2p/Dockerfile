@@ -44,6 +44,10 @@ FROM debian:bookworm-slim
 
 # Install runtime dependencies
 # libxt6, libxmu6: Required by MATLAB Runtime for X11 components even in headless mode
+# awscli: used by common/bin/localize.sh (sourced by entrypoint.sh below) to
+# fetch s3:// input hrefs (direct-value flags and manifest entries) to local
+# disk before MATLAB runs -- see
+# docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md section 4.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libc6 \
@@ -56,6 +60,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     libxt6 \
     libxmu6 \
+    awscli \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
 
@@ -102,36 +107,19 @@ RUN mkdir -p /data/input \
 # Set working directory
 WORKDIR /data
 
-# Create entrypoint wrapper script
-# This wrapper uses fixed container paths (/data/input, /data/output)
-# Arguments: sensor region year day rewrite (5 args instead of 7)
-RUN echo '#!/bin/bash' > /opt/l2p/bin/entrypoint.sh && \
-    echo '# L2P Container Entrypoint Wrapper' >> /opt/l2p/bin/entrypoint.sh && \
-    echo 'set -e' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '' >> /opt/l2p/bin/entrypoint.sh && \
-    echo 'if [ "$#" -ne 5 ]; then' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '    echo "ERROR: Expected 5 arguments, got $#"' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '    echo "Usage: docker run ... SENSOR REGION YEAR DAY REWRITE"' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '    echo "  SENSOR:  AMSR2R, AVMTBG, MODISA, MODIST"' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '    echo "  REGION:  Global"' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '    echo "  YEAR:    4-digit year (e.g., 2025)"' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '    echo "  DAY:     Day of year (1-366)"' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '    echo "  REWRITE: 0=skip existing, 1=overwrite"' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '    exit 1' >> /opt/l2p/bin/entrypoint.sh && \
-    echo 'fi' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '# Fixed paths managed by Docker volume mounts' >> /opt/l2p/bin/entrypoint.sh && \
-    echo 'INDIR="/data/input"' >> /opt/l2p/bin/entrypoint.sh && \
-    echo 'OUTDIR="/data/output"' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '# Ensure scratch dirs exist and are owned by the runtime UID.' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '# These are not pre-created in the image so the sticky bit on /tmp' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '# does not block the arbitrary runtime UID from managing them.' >> /opt/l2p/bin/entrypoint.sh && \
-    echo 'mkdir -p "${TMP_DIR:-/tmp/l2p_tmp}" "${MATLAB_PREFDIR:-/tmp/.matlab}" "${MCR_CACHE_ROOT:-/tmp}"' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '' >> /opt/l2p/bin/entrypoint.sh && \
-    echo '# Call MATLAB executable with fixed paths inserted' >> /opt/l2p/bin/entrypoint.sh && \
-    echo 'exec /opt/l2p/bin/run_L2pProcessor.sh "/opt/matlabruntime/R2024b" "$1" "$2" "$INDIR" "$OUTDIR" "$3" "$4" "$5"' >> /opt/l2p/bin/entrypoint.sh && \
-    chmod +x /opt/l2p/bin/entrypoint.sh
+# Shared input-localization helper (source: common/bin/localize.sh), sourced
+# by entrypoint.sh below. Copied into the runtime stage directly -- unlike
+# common/julian.m / common/fortwrite.m above, this is bash, not MATLAB source
+# to be compiled away, so it has to persist into this final image.
+COPY common/bin/localize.sh /opt/common/bin/localize.sh
+RUN chmod +x /opt/common/bin/localize.sh
+
+# Entrypoint wrapper script (source: l2p/bin/entrypoint.sh).
+# Named-args only (--sensor --region --year --doy --rewrite --granules-manifest);
+# --granules-manifest accepts either a local path or an s3:// href, resolved
+# via localize.sh.
+COPY l2p/bin/entrypoint.sh /opt/l2p/bin/entrypoint.sh
+RUN chmod +x /opt/l2p/bin/entrypoint.sh
 
 # Rootless / arbitrary-UID support (OpenShift pattern):
 # Assign group 0 (root group) and grant group perms equal to owner perms on all
@@ -154,7 +142,7 @@ LABEL version="3.2"
 LABEL maintainer="MUR Team"
 LABEL build-pattern="Multi-stage: MATLAB compilation → Base runtime image"
 LABEL base-image="mur-matlab-base:r2024b"
-LABEL interface="Simplified 5-arg interface: sensor region year day rewrite"
+LABEL interface="Named args only: --sensor --region --year --doy --rewrite --granules-manifest"
 LABEL downloads="Handled separately by cron jobs (not in container)"
 
 # Usage notes:
@@ -162,35 +150,28 @@ LABEL downloads="Handled separately by cron jobs (not in container)"
 #   cd /path/to/mur/l2p
 #   docker build --platform linux/amd64 -t mur-l2p:latest -f Dockerfile ..
 #
-# Run with simplified container interface (5 arguments):
+# Run — every input is an explicit named flag; --granules-manifest lists
+# exactly which granule files this run needs (a JSON manifest, path or
+# s3:// href -- see docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md
+# section 3), localized to local disk by common/bin/localize.sh before
+# MATLAB runs, so the manifest's entries may themselves be local paths
+# (bind-mounted) or s3:// hrefs (MAAP):
 #   docker run --rm \
 #     --shm-size=512M \
-#     -v /path/to/input:/data/input \
+#     -v /path/to/manifest.json:/data/manifest.json:ro \
+#     -v /path/to/granules:/path/to/granules:ro \
 #     -v /path/to/output:/data/output \
 #     mur-l2p:latest \
-#     AMSR2R Global 2025 220 0
+#     --sensor AMSR2R --region Global --year 2025 --doy 220 --rewrite 0 \
+#     --granules-manifest /data/manifest.json
 #
-# Arguments (simplified for container - paths managed by volume mounts):
-#   sensor:  AMSR2R, AVMTBG, MODISA, or MODIST
-#   region:  'Global' (typically always Global)
-#   year:    4-digit year (e.g., 2025)
-#   day:     Day of year (1-366)
-#   rewrite: 0=skip existing files, 1=overwrite existing files
-#
-# The entrypoint wrapper automatically uses:
-#   indir:   /data/input  (mount your L2P files here)
-#   bicdir:  /data/output (BIC files written here)
-#
-# Example with custom local paths:
-#   docker run --rm \
-#     --shm-size=512M \
-#     -v /local/l2p_files:/data/input \
-#     -v /local/bic_output:/data/output \
-#     mur-l2p:latest \
-#     MODISA Global 2025 220 0
+# Output directory stays a fixed container-internal path (/data/output),
+# bind-mounted as before -- outputs are produced, not discovered, so this
+# doesn't need to be a flag.
 #
 # IMPORTANT: Downloads are handled separately (like production cron jobs)
-#   - Container expects L2P files already present in mounted input directory
+#   - The calling orchestrator (run_mur_pipeline.py / run_mur_maap.py) builds
+#     the granules manifest from files it already tracked downloading
 #   - Use podaac-data-subscriber or other tools to download files before processing
 #   - Production uses hourly cron jobs for downloads
 #

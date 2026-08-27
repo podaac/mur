@@ -151,6 +151,10 @@ ENV MRVA_DEBUG_BUILD=${DEBUG}
 
 # Install runtime dependencies
 # libxt6, libxmu6: Required by MATLAB Runtime for X11 components even in headless mode
+# awscli: used by common/bin/localize.sh (sourced by entrypoint.sh below) to
+# fetch s3:// input hrefs (direct-value flags and --sensor-inputs-manifest
+# entries) to local disk before MATLAB runs -- see
+# docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md section 4.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libc6 \
@@ -160,6 +164,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     libxt6 \
     libxmu6 \
+    awscli \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
 
@@ -230,14 +235,13 @@ ENV HOME=/tmp
 # Use KMP_STACKSIZE (Intel OpenMP runtime uses this; OMP_STACKSIZE would be ignored)
 ENV KMP_STACKSIZE=128M
 
-# Create data directories. Scratch dirs under /tmp (/tmp/mrva_tmp, /tmp/.matlab,
-# MCR cache) are NOT pre-created: the sticky bit on /tmp would otherwise block
-# the runtime UID from rmdir'ing a root-owned dir. Letting the app create them
-# at runtime means they're owned by the runtime UID.
-RUN mkdir -p /data/input/bic \
-             /data/input/iquam \
-             /data/input/landice \
-             /data/output/csp \
+# Create data directories. Inputs are no longer bind-mounted whole
+# directories (see entrypoint.sh) -- only output/working paths are
+# pre-created here. Scratch dirs under /tmp (/tmp/mrva_tmp, /tmp/.matlab,
+# MCR cache) are NOT pre-created: the sticky bit on /tmp would otherwise
+# block the runtime UID from rmdir'ing a root-owned dir. Letting the app
+# create them at runtime means they're owned by the runtime UID.
+RUN mkdir -p /data/output/csp \
              /data/output/netcdf \
              /data/cache \
              /data/logs
@@ -245,163 +249,19 @@ RUN mkdir -p /data/input/bic \
 # Set working directory
 WORKDIR /data
 
-# Create entrypoint wrapper script
-# This wrapper validates arguments and calls MATLAB with Fortran binaries available
-# Arguments: [--debug] year doy mode [sensors]
-RUN cat > /opt/mrva/bin/entrypoint.sh <<'EOF' && chmod +x /opt/mrva/bin/entrypoint.sh
-#!/bin/bash
-# MRVA Container Entrypoint Wrapper
-set -e
+# Shared input-localization helper (source: common/bin/localize.sh), sourced
+# by entrypoint.sh below. Copied into the runtime stage directly -- unlike
+# common/*.m above, this is bash, not MATLAB source to be compiled away, so
+# it has to persist into this final image.
+COPY common/bin/localize.sh /opt/common/bin/localize.sh
+RUN chmod +x /opt/common/bin/localize.sh
 
-# ========================================================================
-# Scratch Directories
-# ========================================================================
-# Ensure scratch dirs exist and are owned by the runtime UID. These are not
-# pre-created in the image so the sticky bit on /tmp does not block the
-# arbitrary runtime UID from managing them on subsequent runs.
-mkdir -p "${TMP_DIR:-/tmp/mrva_tmp}" "${MATLAB_PREFDIR:-/tmp/.matlab}" "${MCR_CACHE_ROOT:-/tmp}"
-
-# ========================================================================
-# Stack Size Configuration
-# ========================================================================
-# The Fortran PCG solver uses large local arrays that can exceed default stack
-# Setting unlimited stack prevents segmentation faults during solver iterations
-# KMP_STACKSIZE sets thread stack for Intel OpenMP parallel regions
-ulimit -s unlimited 2>/dev/null || echo "Warning: Could not set unlimited stack size"
-
-# Ensure OpenMP stack is set (may have been set in Dockerfile ENV but ensure here)
-export KMP_STACKSIZE=${KMP_STACKSIZE:-128M}
-
-# ========================================================================
-# Debug Mode Detection
-# ========================================================================
-# Debug mode is enabled if:
-#   1. Container was built with DEBUG=1 (MRVA_DEBUG_BUILD env var)
-#   2. Runtime --debug flag is passed
-#   3. MRVA_DEBUG=1 environment variable is set
-DEBUG_MODE=0
-
-# Check if this is a debug build (set at build time via ARG DEBUG=1)
-if [ "${MRVA_DEBUG_BUILD:-0}" = "1" ]; then
-    DEBUG_MODE=1
-    echo "========================================="
-    echo "DEBUG BUILD DETECTED"
-    echo "========================================="
-    echo "This container was built with DEBUG=1."
-    echo "Enhanced diagnostic output is automatically enabled."
-    echo "========================================="
-    echo ""
-fi
-
-# Runtime --debug flag overrides (or enables if not a debug build)
-if [ "$1" = "--debug" ]; then
-    DEBUG_MODE=1
-    shift  # Remove --debug from arguments
-    if [ "${MRVA_DEBUG_BUILD:-0}" != "1" ]; then
-        echo "========================================="
-        echo "DEBUG MODE ENABLED (runtime flag)"
-        echo "========================================="
-        echo "Enhanced diagnostic output will be shown."
-        echo "For maximum debugging, rebuild with DEBUG=1:"
-        echo "  docker build --build-arg DEBUG=1 -t mrva:debug ..."
-        echo "========================================="
-        echo ""
-    fi
-fi
-
-export MRVA_DEBUG=$DEBUG_MODE
-
-# Argument validation
-if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
-    echo "ERROR: Expected 3-4 arguments, got $#"
-    echo "Usage: docker run ... [--debug] YEAR DOY MODE [SENSORS]"
-    echo "  --debug: Optional flag to enable enhanced diagnostic output"
-    echo "  YEAR:    4-digit year (e.g., 2025)"
-    echo "  DOY:     Day of year (1-366)"
-    echo "  MODE:    nrt (near-real-time) or rea (reanalysis)"
-    echo "  SENSORS: Optional comma-separated list (e.g., AMSR2R,MODISA)"
-    echo ""
-    echo "Example:"
-    echo "  docker run --rm \\"
-    echo "    -v /local/l2p:/data/input/bic \\"
-    echo "    -v /local/iquam:/data/input/iquam \\"
-    echo "    -v /local/landice:/data/input/landice \\"
-    echo "    -v /local/output:/data/output \\"
-    echo "    mrva:latest 2025 220 nrt"
-    echo ""
-    echo "Debug example:"
-    echo "  docker run --rm ... mrva:latest --debug 2025 220 nrt"
-    exit 1
-fi
-
-YEAR=$1
-DOY=$2
-MODE=$3
-SENSORS=${4:-""}
-
-# Validate year
-if [ "$YEAR" -lt 1900 ] || [ "$YEAR" -gt 2100 ]; then
-    echo "ERROR: Invalid year: $YEAR"
-    exit 1
-fi
-
-# Validate DOY
-if [ "$DOY" -lt 1 ] || [ "$DOY" -gt 366 ]; then
-    echo "ERROR: Invalid day of year: $DOY"
-    exit 1
-fi
-
-# Validate mode
-if [ "$MODE" != "nrt" ] && [ "$MODE" != "rea" ]; then
-    echo "ERROR: Invalid mode: $MODE (must be 'nrt' or 'rea')"
-    exit 1
-fi
-
-# Log startup
-echo "========================================="
-echo "MRVA Container Starting"
-echo "========================================="
-echo "Year:     $YEAR"
-echo "DOY:      $DOY"
-echo "Mode:     $MODE"
-echo "Sensors:  ${SENSORS:-all (default)}"
-if [ $DEBUG_MODE -eq 1 ]; then
-    if [ "${MRVA_DEBUG_BUILD:-0}" = "1" ]; then
-        echo "Debug:    ENABLED (debug build)"
-    else
-        echo "Debug:    ENABLED (runtime flag)"
-    fi
-else
-    echo "Debug:    disabled"
-fi
-echo "-----------------------------------------"
-echo "Stack:    $(ulimit -s) (soft limit)"
-echo "KMP_STACKSIZE: $KMP_STACKSIZE"
-echo "========================================="
-echo ""
-
-# Ensure Fortran binaries are in PATH
-export PATH="/opt/mrva/bin:$PATH"
-
-# Verify Fortran executables are available
-echo "Verifying Fortran executables..."
-for exe in mrva samplegdscsp spgrid trimbip3 makehiresgrid cbscxdata cbscxcoeff cbscxcoeffvector; do
-    if [ ! -x "/opt/mrva/bin/$exe" ]; then
-        echo "ERROR: Fortran executable not found: $exe"
-        exit 1
-    fi
-done
-echo "  ✓ All Fortran executables found (including spline utilities)"
-echo ""
-
-# Call MATLAB executable with arguments
-echo "Starting MATLAB runtime..."
-if [ -z "$SENSORS" ]; then
-    exec /opt/mrva/bin/run_MrvaProcessor.sh "/opt/matlabruntime/R2024b" "$YEAR" "$DOY" "$MODE"
-else
-    exec /opt/mrva/bin/run_MrvaProcessor.sh "/opt/matlabruntime/R2024b" "$YEAR" "$DOY" "$MODE" "$SENSORS"
-fi
-EOF
+# Entrypoint wrapper script (source: mrva/bin/entrypoint.sh).
+# Named-args only (--year --doy --mode plus the explicit static/dynamic
+# input flags and --sensor-inputs-manifest); every FILE/DIR flag accepts
+# either a local path or an s3:// href, resolved via localize.sh.
+COPY mrva/bin/entrypoint.sh /opt/mrva/bin/entrypoint.sh
+RUN chmod +x /opt/mrva/bin/entrypoint.sh
 
 # Rootless / arbitrary-UID support (OpenShift pattern):
 # Assign group 0 (root group) and grant group perms equal to owner perms on all
@@ -428,7 +288,7 @@ LABEL compiler="Intel Fortran Compiler (ifort) from oneAPI HPC Toolkit 2024.0.1"
 LABEL compiler-flags-production="-80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost"
 LABEL compiler-flags-debug="-80 -qopenmp -g -traceback -check bounds -check uninit -fpe0 -warn all -O0"
 LABEL build-arg-debug="Set DEBUG=1 for debug build with symbols and bounds checking"
-LABEL interface="4-arg interface: year doy mode [sensors]"
+LABEL interface="Named args only: --year --doy --mode plus explicit static/dynamic input flags and --sensor-inputs-manifest"
 LABEL fortran-executables="mrva, samplegdscsp, spgrid, trimbip3, makehiresgrid, cbscxdata, cbscxcoeff, cbscxcoeffvector"
 
 # Usage notes:
@@ -436,32 +296,40 @@ LABEL fortran-executables="mrva, samplegdscsp, spgrid, trimbip3, makehiresgrid, 
 #   cd /path/to/mur/mrva
 #   docker build --platform linux/amd64 -t mrva:latest -f Dockerfile ..
 #
-# Run with container interface (3-4 arguments):
+# Run — every input is an explicit named flag; --sensor-inputs-manifest lists
+# exactly which BIC/iQuam files this run needs (a JSON manifest, path or
+# s3:// href, entries tagged with `sensor` and `relative_path` -- see
+# docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md
+# section 3), localized to local disk by common/bin/localize.sh before
+# MATLAB runs:
 #   docker run --rm \
 #     --memory=64g \
 #     --shm-size=4g \
-#     -v /path/to/l2p:/data/input/bic \
-#     -v /path/to/iquam:/data/input/iquam \
-#     -v /path/to/landice:/data/input/landice \
+#     -v /path/to/manifest.json:/data/manifest.json:ro \
+#     -v /path/to/sensor_data:/path/to/sensor_data:ro \
+#     -v /path/to/static-resources:/path/to/static-resources:ro \
+#     -v /path/to/landice-output:/path/to/landice-output:ro \
 #     -v /path/to/output:/data/output \
 #     -v /path/to/cache:/data/cache \
 #     mrva:latest \
-#     2025 220 nrt
+#     --year 2025 --doy 220 --mode nrt \
+#     --polar-cap-edge-file /path/to/static-resources/landice/CylinderP01_edge.bip \
+#     --seasonal-file /path/to/static-resources/seasonal/mur_220.nc \
+#     --landice-ice-p011-file /path/to/landice-output/Global_ice_2025_220.bip \
+#     --landice-grid-p01-file /path/to/landice-output/landiceP01_2025_220.gds.gz \
+#     --landice-icefiles-p011-file /path/to/landice-output/icefiles_2025_220.txt \
+#     --sensor-inputs-manifest /data/manifest.json \
+#     --l4-reference-root /path/to/static-resources/L4
 #
-# Arguments:
-#   year:    4-digit year (e.g., 2025)
-#   doy:     Day of year (1-366)
-#   mode:    'nrt' for near-real-time (L0=6) or 'rea' for reanalysis (L0=2)
-#   sensors: Optional comma-separated sensor list (default: all configured)
+# Optional flags: --sensors (comma-separated, default: all configured),
+# --mur25-grid-file (absent -> skip MUR25 generation), --prior-csp-file
+# (absent -> bootstrap reference field from L4 instead), --debug.
 #
-# The container automatically uses:
-#   /data/input/bic/     - L2P satellite data (BIC.gz files by sensor)
-#   /data/input/iquam/   - Buoy data (BII files)
-#   /data/input/landice/ - Land/ice masks (GDS files)
-#   /data/output/csp/    - Coefficient files output (CSP format)
-#   /data/output/netcdf/ - Final NetCDF4 products (GHRSST L4)
-#   /data/cache/         - Temporary working files (BIQ, intermediate)
-#   /data/logs/          - Execution logs
+# Output directories stay fixed container-internal bind mounts
+# (/data/output, /data/cache), unchanged from before -- only the input side
+# became explicit. run_mur_pipeline.py / run_mur_maap.py build the manifest
+# and resolve every flag value automatically; you don't need to hand-write
+# these for normal pipeline runs.
 #
 # Example with custom local paths:
 #   docker run --rm \

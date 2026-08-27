@@ -12,7 +12,8 @@ The application:
 - Uses OSI SAF FTP endpoints for sea ice data access
 - Compiled as a standalone MATLAB executable for containerized deployment
 - No MATLAB license required to run the compiled version
-- Uses fixed container paths for simplified deployment (`/input` and `/output`)
+- Takes every static input file as an explicit named flag — no directory is bind-mounted whole and scanned; the calling orchestrator (`run_mur_pipeline.py` locally, `run_mur_maap.py` on MAAP) resolves and passes each of the six static files individually
+- Each `--*-file` flag value may be either a local filesystem path (local `docker run`, bind-mounted) or an `s3://` href (MAAP, or any environment with S3 access) — the container fetches `s3://` values to local scratch space itself before MATLAB runs, so the same image works unchanged in either environment (see [Container Features](#container-features) below)
 - Optimized with shared memory configuration for MATLAB Runtime performance
 
 ---
@@ -30,28 +31,42 @@ The application:
 cd mur/landice
 
 # Build the container (AMD64 for production compatibility)
-docker build --platform linux/amd64 -f Dockerfile.multistage -t landice:latest ..
+docker build --platform linux/amd64 -f Dockerfile -t mur-landice:latest ..
 
 # For macOS with Apple container tools:
-# container build --arch amd64 -f Dockerfile.multistage -t landice:latest ..
+# container build --arch amd64 -f Dockerfile -t mur-landice:latest ..
 
-# Run with simplified arguments
+# Run — every static input is an explicit flag, bind-mounted individually
 docker run --rm --shm-size=512M \
   -e OSISAF_FTP_REPROCESSED="ftp://osisaf.met.no/reprocessed" \
   -e OSISAF_FTP_ARCHIVE="ftp://osisaf.met.no/archive" \
   -e OSISAF_FTP_PROD="ftp://osisaf.met.no/prod" \
-  -v /path/to/input:/input:ro \
-  -v /path/to/output:/output \
-  landice:latest \
-  2024 100
+  -v /path/to/static-resources/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro \
+  -v /path/to/static-resources/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro \
+  -v /path/to/static-resources/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro \
+  -v /path/to/static-resources/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro \
+  -v /path/to/static-resources/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro \
+  -v /path/to/static-resources/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro \
+  -v /path/to/output/p011:/output/p011 \
+  -v /path/to/output/p01:/output/p01 \
+  mur-landice:latest \
+  --year 2024 --doy 100 \
+  --landmask-p01-file /input/landmask-p01.gds \
+  --gridindex-north-p01-file /input/gridindex-north-p01.mat \
+  --gridindex-south-p01-file /input/gridindex-south-p01.mat \
+  --landmask-p011-file /input/landmask-p011.gds \
+  --gridindex-north-p011-file /input/gridindex-north-p011.mat \
+  --gridindex-south-p011-file /input/gridindex-south-p011.mat
 ```
+
+See [documentation/STATIC_DATA.md](../documentation/STATIC_DATA.md) for where the six static files (`grids/maskGLOBp01deg.gds`, `mat/p01/saf2north.mat`, etc.) come from and their full-tree layout.
 
 ### Container Features
 
-- **Fixed paths**: Input data at `/input`, output at `/output` - just bind mount your directories
-- **Simplified arguments**: Only `year` and `doy` required as positional parameters
+- **Explicit named inputs**: every static file (landmask + grid-index files, both resolutions) is its own `--flag`; there is no directory mount to scan
+- **Named args only**: `--year`/`--doy` plus the six file flags — no positional-argument form is accepted
+- **Local-path or S3-href inputs, uniformly**: `entrypoint.sh` sources the shared `common/bin/localize.sh` helper and resolves each of the six file flags before MATLAB runs — a value starting with `s3://` is fetched to local scratch space (via `aws s3 cp`) and the local path substituted; any other value is assumed to already be a local path (e.g. a bind mount) and passed through unchanged. AWS credentials come from the standard AWS credential chain — environment variables (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`) for local dev, an IAM role automatically when running on AWS/MAAP compute — no extra flags or config needed either way.
 - **Automatic processing**: Processes both P01 and P011 grids in a single run
-- **Flexible MATLAB code**: The underlying MATLAB script can still accept any input/output paths for development
 - **Optimized performance**: Requires `--shm-size=512M` for MATLAB Runtime (mandatory)
 - **No license required**: Self-contained with MATLAB Runtime R2024b
 - **Memory optimization**: Supports configurable memory limits and Java heap settings
@@ -62,13 +77,11 @@ docker run --rm --shm-size=512M \
 
 ### For Containerized Deployment
 - Docker
-- Input data directory 
-- Output data directory
+- The six static input files (see [documentation/STATIC_DATA.md](../documentation/STATIC_DATA.md))
+- Output directories (one per resolution: `p011`, `p01`)
 
 ### For Development
-- MATLAB R2024b with required toolboxes:
-  - MATLAB Compiler
-  - Control System Toolbox
+- MATLAB R2024b with MATLAB Compiler
 - Access to MATLAB license server
 
 ---
@@ -79,10 +92,22 @@ docker run --rm --shm-size=512M \
 ```bash
 # Process day 150 of 2024
 docker run --rm --shm-size=512M \
-  -v /data/input:/input:ro \
-  -v /data/output:/output \
-  landice:latest \
-  2024 150
+  -v /data/static-resources/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro \
+  -v /data/static-resources/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro \
+  -v /data/static-resources/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro \
+  -v /data/static-resources/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro \
+  -v /data/static-resources/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro \
+  -v /data/static-resources/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro \
+  -v /data/output/p011:/output/p011 \
+  -v /data/output/p01:/output/p01 \
+  mur-landice:latest \
+  --year 2024 --doy 150 \
+  --landmask-p01-file /input/landmask-p01.gds \
+  --gridindex-north-p01-file /input/gridindex-north-p01.mat \
+  --gridindex-south-p01-file /input/gridindex-south-p01.mat \
+  --landmask-p011-file /input/landmask-p011.gds \
+  --gridindex-north-p011-file /input/gridindex-north-p011.mat \
+  --gridindex-south-p011-file /input/gridindex-south-p011.mat
 ```
 
 ### With Custom OSI SAF Endpoints
@@ -91,10 +116,22 @@ docker run --rm --shm-size=512M \
   -e OSISAF_FTP_REPROCESSED="ftp://your-server/reprocessed" \
   -e OSISAF_FTP_ARCHIVE="ftp://your-server/archive" \
   -e OSISAF_FTP_PROD="ftp://your-server/prod" \
-  -v /data/input:/input:ro \
-  -v /data/output:/output \
-  landice:latest \
-  2024 150
+  -v /data/static-resources/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro \
+  -v /data/static-resources/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro \
+  -v /data/static-resources/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro \
+  -v /data/static-resources/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro \
+  -v /data/static-resources/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro \
+  -v /data/static-resources/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro \
+  -v /data/output/p011:/output/p011 \
+  -v /data/output/p01:/output/p01 \
+  mur-landice:latest \
+  --year 2024 --doy 150 \
+  --landmask-p01-file /input/landmask-p01.gds \
+  --gridindex-north-p01-file /input/gridindex-north-p01.mat \
+  --gridindex-south-p01-file /input/gridindex-south-p01.mat \
+  --landmask-p011-file /input/landmask-p011.gds \
+  --gridindex-north-p011-file /input/gridindex-north-p011.mat \
+  --gridindex-south-p011-file /input/gridindex-south-p011.mat
 ```
 
 ### With Performance Optimization
@@ -111,10 +148,22 @@ docker run --rm \
   -e OSISAF_FTP_REPROCESSED="ftp://osisaf.met.no/reprocessed" \
   -e OSISAF_FTP_ARCHIVE="ftp://osisaf.met.no/archive" \
   -e OSISAF_FTP_PROD="ftp://osisaf.met.no/prod" \
-  -v /data/input:/input:ro \
-  -v /data/output:/output \
-  landice:latest \
-  2024 150
+  -v /data/static-resources/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro \
+  -v /data/static-resources/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro \
+  -v /data/static-resources/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro \
+  -v /data/static-resources/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro \
+  -v /data/static-resources/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro \
+  -v /data/static-resources/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro \
+  -v /data/output/p011:/output/p011 \
+  -v /data/output/p01:/output/p01 \
+  mur-landice:latest \
+  --year 2024 --doy 150 \
+  --landmask-p01-file /input/landmask-p01.gds \
+  --gridindex-north-p01-file /input/gridindex-north-p01.mat \
+  --gridindex-south-p01-file /input/gridindex-south-p01.mat \
+  --landmask-p011-file /input/landmask-p011.gds \
+  --gridindex-north-p011-file /input/gridindex-north-p011.mat \
+  --gridindex-south-p011-file /input/gridindex-south-p011.mat
 ```
 
 ## Batch Processing
@@ -126,24 +175,39 @@ For processing multiple days, create a simple bash script:
 YEAR=2024
 START_DOY=1
 END_DOY=365
+STATIC=/data/static-resources
 
 for DOY in $(seq $START_DOY $END_DOY); do
     echo "Processing Year: $YEAR, DOY: $DOY"
-    
+
     docker run --rm --shm-size=512M \
         -e OSISAF_FTP_REPROCESSED="ftp://osisaf.met.no/reprocessed" \
         -e OSISAF_FTP_ARCHIVE="ftp://osisaf.met.no/archive" \
         -e OSISAF_FTP_PROD="ftp://osisaf.met.no/prod" \
-        -v /data/input:/input:ro \
-        -v /data/output:/output \
-        landice:latest \
-        $YEAR $DOY
-        
+        -v "$STATIC/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro" \
+        -v "$STATIC/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro" \
+        -v "$STATIC/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro" \
+        -v "$STATIC/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro" \
+        -v "$STATIC/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro" \
+        -v "$STATIC/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro" \
+        -v /data/output/p011:/output/p011 \
+        -v /data/output/p01:/output/p01 \
+        mur-landice:latest \
+        --year "$YEAR" --doy "$DOY" \
+        --landmask-p01-file /input/landmask-p01.gds \
+        --gridindex-north-p01-file /input/gridindex-north-p01.mat \
+        --gridindex-south-p01-file /input/gridindex-south-p01.mat \
+        --landmask-p011-file /input/landmask-p011.gds \
+        --gridindex-north-p011-file /input/gridindex-north-p011.mat \
+        --gridindex-south-p011-file /input/gridindex-south-p011.mat
+
     if [ $? -ne 0 ]; then
         echo "Error processing Year: $YEAR, DOY: $DOY"
     fi
 done
 ```
+
+In practice, `run_mur_pipeline.py` already does this per-day looping and flag construction for you — see the main [README.md](../README.md#production-style-pipeline-orchestrator).
 
 ---
 
@@ -162,27 +226,25 @@ The application uses these environment variables for OSI SAF FTP access:
 ```
 landice/
 ├── src/
-│   ├── landice_wrapper.m      # Main entry point (wrapper for CLI arguments)
+│   ├── landice_wrapper.m      # Compiled entry point — accepts the six explicit static file paths
 │   ├── makeicefiles.m         # Ice file generation (core logic)
 │   ├── readosisafice.m        # OSI SAF data reader and downloader
-│   ├── setup_environment.m    # Environment setup
-│   ├── julian.m               # Date conversion utilities
-│   └── ...                    # Other utility MATLAB files
-├── data_creation/
-│   ├── p01/                   # P01 grid resolution files (0.01°)
-│   │   ├── saf2north.m        # North region mapping
-│   │   └── saf2south.m        # South region mapping
-│   └── p011/                  # P011 grid resolution files (0.011°)
-│       ├── saf2north.m        # North region mapping
-│       └── saf2south.m        # South region mapping
+│   └── setup_environment.m    # Environment setup
+├── bin/
+│   └── entrypoint.sh          # Named-args-only container entrypoint; localizes s3:// inputs before invoking MATLAB
 ├── tests/
-│   ├── in/                    # Test input data
-│   └── out/                   # Test output data
-├── Dockerfile.multistage      # Multi-stage build (recommended)
-├── Dockerfile.matlab          # Development container
-├── Dockerfile.runtime         # Runtime-only container
+│   ├── test_entrypoint.sh     # Entrypoint argument-parsing + localization unit tests
+│   ├── in/, out/               # Test fixtures
+│   └── compare_outputs.py, validate_containerized.sh, test_execute_landice.py
+├── Dockerfile                 # Multi-stage build (MATLAB compiler → runtime-only image, includes AWS CLI)
 ├── BUILD_INSTRUCTIONS.md      # Detailed build instructions
-└── DEPLOYMENT.md              # Production deployment guide
+├── DEPLOYMENT.md              # Production deployment guide
+└── REPROCESSING_DATES_README.md
+
+../common/
+├── bin/
+│   └── localize.sh            # Shared s3://-or-local-path resolver, sourced by entrypoint.sh (also used by other containers as they're converted)
+└── *.m                        # Shared MATLAB utilities (compiled into the MATLAB build stage)
 ```
 
 ---
@@ -191,6 +253,7 @@ landice/
 
 - **[BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md)** - Complete build instructions for development
 - **[DEPLOYMENT.md](DEPLOYMENT.md)** - Production deployment guide with Docker Compose and Kubernetes examples
+- **[../documentation/STATIC_DATA.md](../documentation/STATIC_DATA.md)** - Where the six static input files live and how they're laid out
 
 ---
 
@@ -204,15 +267,37 @@ version: '3.8'
 
 services:
   landice:
-    image: landice:latest
+    image: mur-landice:latest
     environment:
       - OSISAF_FTP_REPROCESSED=${OSISAF_FTP_REPROCESSED}
       - OSISAF_FTP_ARCHIVE=${OSISAF_FTP_ARCHIVE}
       - OSISAF_FTP_PROD=${OSISAF_FTP_PROD}
     volumes:
-      - ${INPUT_DIR}:/input:ro
-      - ${OUTPUT_DIR}:/output
-    command: ["${YEAR}", "${DOY}"]
+      - ${STATIC_RESOURCES_DIR}/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro
+      - ${STATIC_RESOURCES_DIR}/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro
+      - ${STATIC_RESOURCES_DIR}/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro
+      - ${STATIC_RESOURCES_DIR}/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro
+      - ${STATIC_RESOURCES_DIR}/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro
+      - ${STATIC_RESOURCES_DIR}/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro
+      - ${OUTPUT_DIR_P011}:/output/p011
+      - ${OUTPUT_DIR_P01}:/output/p01
+    command:
+      - "--year"
+      - "${YEAR}"
+      - "--doy"
+      - "${DOY}"
+      - "--landmask-p01-file"
+      - "/input/landmask-p01.gds"
+      - "--gridindex-north-p01-file"
+      - "/input/gridindex-north-p01.mat"
+      - "--gridindex-south-p01-file"
+      - "/input/gridindex-south-p01.mat"
+      - "--landmask-p011-file"
+      - "/input/landmask-p011.gds"
+      - "--gridindex-north-p011-file"
+      - "/input/gridindex-north-p011.mat"
+      - "--gridindex-south-p011-file"
+      - "/input/gridindex-south-p011.mat"
     shm_size: '512m'
 ```
 
@@ -229,17 +314,35 @@ spec:
     spec:
       containers:
       - name: landice
-        image: landice:latest
-        args: ["2024", "100"]
+        image: mur-landice:latest
+        args:
+          - "--year"
+          - "2024"
+          - "--doy"
+          - "100"
+          - "--landmask-p01-file"
+          - "/input/landmask-p01.gds"
+          - "--gridindex-north-p01-file"
+          - "/input/gridindex-north-p01.mat"
+          - "--gridindex-south-p01-file"
+          - "/input/gridindex-south-p01.mat"
+          - "--landmask-p011-file"
+          - "/input/landmask-p011.gds"
+          - "--gridindex-north-p011-file"
+          - "/input/gridindex-north-p011.mat"
+          - "--gridindex-south-p011-file"
+          - "/input/gridindex-south-p011.mat"
         env:
         - name: OSISAF_FTP_REPROCESSED
           value: "ftp://osisaf.met.no/reprocessed"
         volumeMounts:
-        - name: input-data
+        - name: static-resources
           mountPath: /input
           readOnly: true
-        - name: output-data
-          mountPath: /output
+        - name: output-p011
+          mountPath: /output/p011
+        - name: output-p01
+          mountPath: /output/p01
         resources:
           requests:
             memory: "2Gi"
@@ -249,6 +352,8 @@ spec:
             cpu: "2"
       restartPolicy: OnFailure
 ```
+
+(The example mounts a directory at `/input` for brevity here — in practice each `--*-file` flag should point at an individually-mounted file, matching the `docker run` examples above, so nothing inside the container ever scans a directory to find its inputs.)
 
 ---
 
@@ -265,12 +370,20 @@ spec:
 
 **Memory errors:**
 ```bash
-# Increase memory allocation
+# Increase memory allocation (append to any of the examples above)
 docker run --rm \
   --shm-size=512M \
   --memory="8g" \
   --memory-swap="16g" \
-  landice:latest 2024 100
+  ... \
+  mur-landice:latest \
+  --year 2024 --doy 100 \
+  --landmask-p01-file /input/landmask-p01.gds \
+  --gridindex-north-p01-file /input/gridindex-north-p01.mat \
+  --gridindex-south-p01-file /input/gridindex-south-p01.mat \
+  --landmask-p011-file /input/landmask-p011.gds \
+  --gridindex-north-p011-file /input/gridindex-north-p011.mat \
+  --gridindex-south-p011-file /input/gridindex-south-p011.mat
 ```
 
 **Permission issues:**
@@ -279,9 +392,18 @@ docker run --rm \
 docker run --rm \
   --shm-size=512M \
   --user $(id -u):$(id -g) \
-  -v /path/to/output:/output \
-  landice:latest 2024 100
+  ... \
+  mur-landice:latest \
+  --year 2024 --doy 100 \
+  --landmask-p01-file /input/landmask-p01.gds \
+  --gridindex-north-p01-file /input/gridindex-north-p01.mat \
+  --gridindex-south-p01-file /input/gridindex-south-p01.mat \
+  --landmask-p011-file /input/landmask-p011.gds \
+  --gridindex-north-p011-file /input/gridindex-north-p011.mat \
+  --gridindex-south-p011-file /input/gridindex-south-p011.mat
 ```
+
+**Missing/unknown-flag errors:** all nine flags (`--year`, `--doy`, and the six `--*-file` flags) are required — positional arguments are no longer accepted. Run `docker run --rm mur-landice:latest` with no arguments to see the usage message.
 
 ---
 
@@ -305,5 +427,5 @@ In the original production system, both resolutions were written to the same fla
 - Execution time is logged for monitoring purposes
 - Container uses MATLAB Runtime R2024b - no MATLAB license required for execution
 - Shared memory (`--shm-size=512M`) is mandatory for MATLAB Runtime
-- Input directory should contain the required MUR SST data files
-- Output directory will contain the processed land ice files
+- Every static input is passed as its own bind-mounted file and named flag — nothing is discovered by scanning a directory
+- Each of the two output directories (`p011`, `p01`) will contain the processed land ice files for that resolution

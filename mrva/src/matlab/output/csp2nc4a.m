@@ -17,8 +17,10 @@ function status = csp2nc4a(config)
 %     Optional:
 %       .hiresgridfile  - High-res distance grid path (default: none)
 %       .fortran_bin    - Fortran bin directory (default: /opt/mrva/bin)
-%       .landice_p011_root - Landice p011 (1km) data directory (default: /data/input/landice-p011)
-%       .landice_p01_root  - Landice p01 (0.01°) data directory (default: /data/input/landice-p01)
+%       .landice_grid_p01_file      - Already-resolved landiceP01_YYYY_DDD.gds.gz for this day (live v04/v04.1 path)
+%       .landice_icefiles_p011_file - Already-resolved icefiles_YYYY_DDD.txt for this day (live v04/v04.1 path)
+%       .landice_p011_root - Landice p011 (1km) data directory -- only used by the confirmed-dead v03/otherwise branches (default: /data/input/landice-p011)
+%       .landice_p01_root  - Landice p01 (0.01°) data directory -- only used by the confirmed-dead v03/otherwise branches (default: /data/input/landice-p01)
 %       .grids_root     - Static grids directory (default: /data/static-resources/grids)
 %       .tmp_root       - Temp directory (default: /tmp)
 %       .version        - Product version (default: '04.1')
@@ -87,6 +89,21 @@ if isfield(config, 'grids_root')
     grids_root = config.grids_root;
 else
     grids_root = '/data/static-resources/grids';
+end
+
+% Already-resolved landice files for the live v04/v04.1 path (see the
+% version switch below) -- unlike landice_p011_root/landice_p01_root above
+% (kept only for the confirmed-dead v03/otherwise branches), these are
+% direct file paths, not roots this function builds a path from.
+if isfield(config, 'landice_grid_p01_file')
+    landice_grid_p01_file = config.landice_grid_p01_file;
+else
+    landice_grid_p01_file = '';
+end
+if isfield(config, 'landice_icefiles_p011_file')
+    landice_icefiles_p011_file = config.landice_icefiles_p011_file;
+else
+    landice_icefiles_p011_file = '';
 end
 
 if isfield(config, 'tmp_root')
@@ -198,25 +215,19 @@ switch version,
     else,
       gridfile=[grids_root, '/maskGlob1km.gds'];
     end;
-  case '04',
+  case {'04', '04.1'},
+    % The only version actually reached in the container's current call
+    % path -- mrva4com_container.m never sets config.version, so
+    % csp2nc4a's own default ('04.1') always applies. gridfile/icefiles are
+    % already-resolved files here (not root+template), unlike the v03/
+    % otherwise branches above/below.
     ncsubdir=[ncsubdir,'/v4'];  % destination directory (will be created).
     resolution='0.01 degrees';  % for metadata.
     resfloat=single(0.01);
     if iceIncluded,
-      gridfile=[landice_p01_root, '/%04d/landiceP01_%04d_%03d.gds.gz'];
+      gridfile=landice_grid_p01_file;
       tmpgridfile=[tmp_root, '/landice_%04d_%03d.gds'];
-      icefiles=[landice_p011_root, '/%04d/icefiles_%04d_%03d.txt'];
-    else,
-      gridfile=[grids_root, '/maskGLOBp01deg.gds'];
-    end;
-  case '04.1',
-    ncsubdir=[ncsubdir,'/v4'];  % destination directory (will be created).
-    resolution='0.01 degrees';  % for metadata.
-    resfloat=single(0.01);
-    if iceIncluded,
-      gridfile=[landice_p01_root, '/%04d/landiceP01_%04d_%03d.gds.gz'];
-      tmpgridfile=[tmp_root, '/landice_%04d_%03d.gds'];
-      icefiles=[landice_p011_root, '/%04d/icefiles_%04d_%03d.txt'];
+      icefiles=landice_icefiles_p011_file;
     else,
       gridfile=[grids_root, '/maskGLOBp01deg.gds'];
     end;

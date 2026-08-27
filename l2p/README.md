@@ -108,61 +108,33 @@ docker build --platform linux/amd64 -t mur-l2p:latest -f Dockerfile ..
 
 ### Run the Container
 
-**Production-matching interface** (7 arguments matching `l2p2bic` signature):
+**Named-args interface** — every input is an explicit flag; `--granules-manifest` replaces the old bind-mounted `indir` with a JSON manifest listing exactly which granule files this run needs (schema per `docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md` section 3: `{"files": [{"path": "..."}]}`). Each entry's `path` may be a local filesystem path or an `s3://` href — `common/bin/localize.sh` (sourced by `entrypoint.sh`) materializes them into a scratch directory before MATLAB runs, so `l2p2bic.m`'s own file-selection logic (which of the sensor's file-pattern candidates to use) runs completely unchanged against that directory:
 
 ```bash
 docker run --rm \
   --shm-size=512M \
-  -v /path/to/l2p_files:/data/input \
+  -v /path/to/manifest.json:/data/manifest.json:ro \
+  -v /path/to/l2p_files:/path/to/l2p_files:ro \
   -v /path/to/bic_output:/data/output \
   mur-l2p:latest \
-  AMSR2R Global /data/input /data/output 2025 220 0
+  --sensor AMSR2R --region Global --year 2025 --doy 220 --rewrite 0 \
+  --granules-manifest /data/manifest.json
 ```
 
-**Arguments (all required, positional):**
+The manifest's `path` entries must point at files reachable from *inside* the container — bind-mount the same host directory tree the manifest references, or (on MAAP) use `s3://` hrefs directly, no mount needed. `run_mur_pipeline.py`/`run_mur_maap.py` build this manifest automatically from whatever they've already tracked downloading; you don't need to hand-write one for normal pipeline runs.
+
+**Arguments (all required, named flags):**
 
 ```
-Position 1: sensor   - Sensor name (AMSR2R, AVMTBG, MODISA, MODIST, or AVMTAG)
-Position 2: region   - Region name ('Global' - typically always Global)
-Position 3: indir    - Input directory containing L2P NetCDF files (e.g., /data/input)
-Position 4: bicdir   - Output directory for BIC files (e.g., /data/output)
-Position 5: year     - 4-digit year (e.g., 2025)
-Position 6: day      - Day of year (1-366)
-Position 7: rewrite  - Rewrite flag: 0=skip existing files, 1=overwrite existing files
+--sensor            Sensor name (AMSR2R, AVMTBG, MODISA, MODIST, or AVMTAG)
+--region             Region name ('Global' - typically always Global)
+--year               4-digit year (e.g., 2025)
+--doy                Day of year (1-366)
+--rewrite            0=skip existing files, 1=overwrite existing files
+--granules-manifest  Path or s3:// href to the granules manifest JSON
 ```
 
-**Example with custom paths:**
-
-```bash
-docker run --rm \
-  -v /local/l2p_downloads:/input \
-  -v /local/bic_files:/output \
-  mur-l2p:latest \
-  MODISA Global /input /output 2025 220 1
-```
-
-**Note:** Container expects L2P files already present in `indir`. Downloads are handled separately in production (cron jobs), not by this container.
-
-### Expected Input Directory Structure
-
-The module expects L2P NetCDF files in the specified `indir`:
-
-```
-{indir}/
-├── *.nc       (L2P NetCDF files)
-├── *.nc.bz2   (compressed L2P files)
-└── *.nc.gz    (gzip-compressed L2P files)
-```
-
-Example with `/data/input` as indir:
-```
-/data/input/
-├── 20250808000000-REMSS-L2P_GHRSST-SSTsubskin-AMSR2-L2B_rt_r39715-v02.0-fv01.0.nc
-├── 20250808001430-REMSS-L2P_GHRSST-SSTsubskin-AMSR2-L2B_rt_r39716-v02.0-fv01.0.nc
-└── 20250808005500-JPL-L2P_GHRSST-SSTskin-MODIS_A-D-v02.0-fv01.0.nc
-```
-
-**Note:** The container looks for files directly in `indir` (not in subdirectories).
+**Note:** Output directory (`bicdir`) stays a fixed container-internal bind mount (`/data/output`), unchanged from before — only the input side became explicit.
 
 ### Expected Output Directory Structure
 
@@ -207,12 +179,15 @@ podaac-data-subscriber \
   -sd 2025-08-08T00:00:00Z \
   -ed 2025-08-08T23:59:59Z
 
-# Then process with container
+# Then build a manifest listing the downloaded files and process with container
+# (run_mur_pipeline.py does this automatically; shown here for manual/debug use)
 docker run --rm \
-  -v /path/to/l2p_files:/data/input \
+  -v /path/to/manifest.json:/data/manifest.json:ro \
+  -v /path/to/l2p_files:/path/to/l2p_files:ro \
   -v /path/to/bic_output:/data/output \
   mur-l2p:latest \
-  AMSR2R Global /data/input /data/output 2025 220 0
+  --sensor AMSR2R --region Global --year 2025 --doy 220 --rewrite 0 \
+  --granules-manifest /data/manifest.json
 ```
 
 ### PO.DAAC Collections by Sensor
@@ -247,7 +222,7 @@ EOF
 
 ### Rewrite Flag
 
-The `rewrite` argument (position 7) controls whether existing output files are overwritten:
+The `--rewrite` flag controls whether existing output files are overwritten:
 
 - **rewrite=0**: Skip processing if output BIC file already exists (default for stable data)
 - **rewrite=1**: Always process, overwrite existing BIC file (use for NRT reprocessing)
@@ -271,7 +246,7 @@ In the MUR processing pipeline (see [PROCESSING_FLOW_REPORT.md](../../mur-intern
 
 | Mount Point | Type | Purpose | Size Estimate |
 |-------------|------|---------|---------------|
-| `/data/input` | Read-write | L2P NetCDF downloads | 1-5 GB/day |
+| (granules-manifest paths) | Read-only | L2P NetCDF downloads, referenced by the manifest | 1-5 GB/day |
 | `/data/output` | Read-write | BIC output files | 50-500 MB/sensor/day |
 | `/data/logs` | Read-write | Processing logs | < 10 MB |
 | `/tmp/l2p_tmp` | Ephemeral | Decompression workspace | < 1 GB |
