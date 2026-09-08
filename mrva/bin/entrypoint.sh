@@ -114,6 +114,37 @@ localize_all_inputs() {
     SENSOR_INPUTS_ROOT=$(localize_manifest sensor-inputs "$SENSOR_INPUTS_MANIFEST" "$scratch") || return 1
 }
 
+# localize_input only guarantees a *local path string* -- for a value that
+# was never s3://, it passes the input through unchanged even if nothing
+# exists there (existence checking is explicitly the caller's job, per its
+# own docstring). Check that here, matching landice/bin/entrypoint.sh's
+# verify_inputs_exist(), so a missing/misconfigured static file fails loudly
+# before MATLAB starts rather than surfacing as an opaque read error deep in
+# the run. Optional flags (MUR25_GRID_FILE, PRIOR_CSP_FILE) are only checked
+# when actually supplied -- their absence is a valid state.
+verify_inputs_exist() {
+    local flag_name value
+    for flag_name in POLAR_CAP_EDGE_FILE SEASONAL_FILE \
+                     LANDICE_ICE_P011_FILE LANDICE_GRID_P01_FILE LANDICE_ICEFILES_P011_FILE; do
+        value="${!flag_name}"
+        if [[ ! -f "$value" ]]; then
+            echo "ERROR: $flag_name points at a file that does not exist: $value" >&2
+            return 1
+        fi
+    done
+    if [[ ! -d "$L4_REFERENCE_ROOT" ]]; then
+        echo "ERROR: L4_REFERENCE_ROOT points at a directory that does not exist: $L4_REFERENCE_ROOT" >&2
+        return 1
+    fi
+    for flag_name in MUR25_GRID_FILE PRIOR_CSP_FILE; do
+        value="${!flag_name}"
+        if [[ -n "$value" && ! -f "$value" ]]; then
+            echo "ERROR: $flag_name points at a file that does not exist: $value" >&2
+            return 1
+        fi
+    done
+}
+
 # Writes the JSON config file mrva4com_container.m reads (see its own
 # docstring) from the now-localized bash variables. Uses python3 (already
 # present as the awscli package's own transitive dependency) since bash has
@@ -161,6 +192,7 @@ main() {
     set -e
     parse_args "$@" || exit 1
     localize_all_inputs || exit 1
+    verify_inputs_exist || exit 1
 
     # Ensure scratch dirs exist and are owned by the runtime UID. These are not
     # pre-created in the image so the sticky bit on /tmp does not block the

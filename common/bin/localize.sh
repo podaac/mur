@@ -89,5 +89,29 @@ for entry in manifest.get("files", []):
         os.symlink(os.path.abspath(src), dest)
 PYEOF
 
+    # Verify every materialized entry is genuinely readable (this dereferences
+    # symlinks, so it catches a dangling symlink or a truncated/failed fetch
+    # here, with the exact file named) instead of surfacing as an opaque read
+    # error deep inside MATLAB's own processing loop. Logs one line per file
+    # (size in bytes) to stderr so a hung/killed run's log shows exactly what
+    # was actually handed to MATLAB, not just that localize_manifest ran.
+    local total=0 bad=0 entry size
+    while IFS= read -r -d '' entry; do
+        total=$((total + 1))
+        if [[ -r "$entry" ]]; then
+            size=$(wc -c < "$entry" 2>/dev/null | tr -d ' ')
+            echo "localize_manifest: $name: ok $entry (${size:-?} bytes)" >&2
+        else
+            echo "localize_manifest: $name: MISSING/UNREADABLE $entry" >&2
+            bad=$((bad + 1))
+        fi
+    done < <(find "$dest_root" \( -type f -o -type l \) -print0 | sort -z)
+    echo "localize_manifest: $name: $total entries materialized under $dest_root ($bad unreadable)" >&2
+
+    if [[ "$bad" -gt 0 ]]; then
+        echo "ERROR: localize_manifest: $bad of $total entries in '$name' are missing or unreadable -- not handing this off to MATLAB" >&2
+        return 1
+    fi
+
     echo "$dest_root"
 }

@@ -168,6 +168,40 @@ else
 fi
 rm -rf "$scratch" "$stub_dir"
 
+# --- localize_manifest: a manifest entry pointing at a nonexistent local
+# source materializes as a dangling symlink -- verification must catch this
+# and fail loudly instead of silently handing MATLAB a broken path. ---
+scratch=$(mktemp -d)
+manifest="$scratch/manifest.json"
+cat > "$manifest" <<EOF
+{"files": [{"path": "/nonexistent/does-not-exist.nc"}]}
+EOF
+if run_case "localize_manifest granules '$manifest' '$scratch'" >/dev/null 2>&1; then
+    echo "FAIL: dangling symlink (missing source file) returns non-zero — expected non-zero exit, got 0"
+    FAILURES=$((FAILURES + 1))
+else
+    echo "PASS: dangling symlink (missing source file) returns non-zero"
+fi
+rm -rf "$scratch"
+
+# --- localize_manifest: verification logs one "ok ... bytes" line per
+# materialized file to stderr ---
+scratch=$(mktemp -d)
+src_dir=$(mktemp -d)
+echo "hello" > "$src_dir/file1.nc"
+manifest="$scratch/manifest.json"
+cat > "$manifest" <<EOF
+{"files": [{"path": "$src_dir/file1.nc"}]}
+EOF
+err=$(run_case "localize_manifest granules '$manifest' '$scratch'" 2>&1 1>/dev/null)
+if [[ "$err" == *"ok "*"file1.nc"*"bytes"* ]]; then
+    echo "PASS: localize_manifest logs a per-file ok/size line to stderr"
+else
+    echo "FAIL: localize_manifest logs a per-file ok/size line to stderr — got: $err"
+    FAILURES=$((FAILURES + 1))
+fi
+rm -rf "$scratch" "$src_dir"
+
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
     echo "All tests passed."

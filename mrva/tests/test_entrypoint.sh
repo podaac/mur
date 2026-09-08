@@ -180,6 +180,87 @@ assert_fails "localize_all_inputs fails when s3 fetch fails" \
     localize_all_inputs"
 rm -rf "$scratch" "$stub_dir" "$src_dir"
 
+# --- verify_inputs_exist: passes when every direct-value flag resolves to a real file/dir ---
+scratch=$(mktemp -d)
+src_dir=$(mktemp -d)
+touch "$src_dir/edge.bip" "$src_dir/seasonal.nc" "$src_dir/ice.bip" "$src_dir/grid.gds.gz" "$src_dir/icefiles.txt"
+mkdir -p "$src_dir/L4"
+echo '{"files": []}' > "$src_dir/manifest.json"
+run_case "parse_args --year 2026 --doy 220 --mode nrt \
+    --polar-cap-edge-file '$src_dir/edge.bip' \
+    --seasonal-file '$src_dir/seasonal.nc' \
+    --landice-ice-p011-file '$src_dir/ice.bip' \
+    --landice-grid-p01-file '$src_dir/grid.gds.gz' \
+    --landice-icefiles-p011-file '$src_dir/icefiles.txt' \
+    --sensor-inputs-manifest '$src_dir/manifest.json' \
+    --l4-reference-root '$src_dir/L4'; \
+    localize_all_inputs; verify_inputs_exist" >/dev/null 2>&1
+if [[ "$?" -eq 0 ]]; then
+    echo "PASS: verify_inputs_exist passes when all direct-value flags point at real files/dirs"
+else
+    echo "FAIL: verify_inputs_exist passes when all direct-value flags point at real files/dirs"
+    FAILURES=$((FAILURES + 1))
+fi
+rm -rf "$scratch" "$src_dir"
+
+# --- verify_inputs_exist: fails when a required direct-value flag points at a missing file ---
+# (this is exactly the AVMTBG-style crash class: localize_input passes a local
+# path through unchanged with no existence check of its own -- catching it
+# here means a bad config.json path fails loudly before MATLAB ever starts,
+# instead of surfacing as an opaque read error deep inside the run.)
+scratch=$(mktemp -d)
+src_dir=$(mktemp -d)
+touch "$src_dir/edge.bip" "$src_dir/ice.bip" "$src_dir/grid.gds.gz" "$src_dir/icefiles.txt"
+mkdir -p "$src_dir/L4"
+echo '{"files": []}' > "$src_dir/manifest.json"
+assert_fails "verify_inputs_exist fails when seasonal-file does not exist" \
+    "parse_args --year 2026 --doy 220 --mode nrt \
+    --polar-cap-edge-file '$src_dir/edge.bip' \
+    --seasonal-file '$src_dir/does-not-exist.nc' \
+    --landice-ice-p011-file '$src_dir/ice.bip' \
+    --landice-grid-p01-file '$src_dir/grid.gds.gz' \
+    --landice-icefiles-p011-file '$src_dir/icefiles.txt' \
+    --sensor-inputs-manifest '$src_dir/manifest.json' \
+    --l4-reference-root '$src_dir/L4'; \
+    localize_all_inputs; verify_inputs_exist"
+rm -rf "$scratch" "$src_dir"
+
+# --- verify_inputs_exist: fails when l4-reference-root does not exist ---
+scratch=$(mktemp -d)
+src_dir=$(mktemp -d)
+touch "$src_dir/edge.bip" "$src_dir/seasonal.nc" "$src_dir/ice.bip" "$src_dir/grid.gds.gz" "$src_dir/icefiles.txt"
+echo '{"files": []}' > "$src_dir/manifest.json"
+assert_fails "verify_inputs_exist fails when l4-reference-root does not exist" \
+    "parse_args --year 2026 --doy 220 --mode nrt \
+    --polar-cap-edge-file '$src_dir/edge.bip' \
+    --seasonal-file '$src_dir/seasonal.nc' \
+    --landice-ice-p011-file '$src_dir/ice.bip' \
+    --landice-grid-p01-file '$src_dir/grid.gds.gz' \
+    --landice-icefiles-p011-file '$src_dir/icefiles.txt' \
+    --sensor-inputs-manifest '$src_dir/manifest.json' \
+    --l4-reference-root '$src_dir/does-not-exist-L4'; \
+    localize_all_inputs; verify_inputs_exist"
+rm -rf "$scratch" "$src_dir"
+
+# --- verify_inputs_exist: optional --prior-csp-file, when supplied, must also exist ---
+scratch=$(mktemp -d)
+src_dir=$(mktemp -d)
+touch "$src_dir/edge.bip" "$src_dir/seasonal.nc" "$src_dir/ice.bip" "$src_dir/grid.gds.gz" "$src_dir/icefiles.txt"
+mkdir -p "$src_dir/L4"
+echo '{"files": []}' > "$src_dir/manifest.json"
+assert_fails "verify_inputs_exist fails when a supplied prior-csp-file does not exist" \
+    "parse_args --year 2026 --doy 220 --mode nrt \
+    --polar-cap-edge-file '$src_dir/edge.bip' \
+    --seasonal-file '$src_dir/seasonal.nc' \
+    --landice-ice-p011-file '$src_dir/ice.bip' \
+    --landice-grid-p01-file '$src_dir/grid.gds.gz' \
+    --landice-icefiles-p011-file '$src_dir/icefiles.txt' \
+    --sensor-inputs-manifest '$src_dir/manifest.json' \
+    --l4-reference-root '$src_dir/L4' \
+    --prior-csp-file '$src_dir/does-not-exist.c06'; \
+    localize_all_inputs; verify_inputs_exist"
+rm -rf "$scratch" "$src_dir"
+
 # --- build_command: writes config JSON with correct fields and assembles CMD ---
 scratch=$(mktemp -d)
 src_dir=$(mktemp -d)
