@@ -164,17 +164,22 @@ def build_mrva_sensor_manifest(
             y = data_day.year
             doy = data_day.timetuple().tm_yday
             if sensor == "IQUAM0":
-                fname = f"Global_IQUAM0_{y}_{doy:03d}.bii"
-                src = iquam_dir / str(y) / fname
+                candidates = [iquam_dir / str(y) / f"Global_IQUAM0_{y}_{doy:03d}.bii"]
             else:
-                fname = f"Global_{sensor}_{y}_{doy:03d}.bic.gz"
-                src = bic_dir / sensor / str(y) / fname
-            if not src.exists():
+                # l2p/src/writebic.m writes an uncompressed .bic; production
+                # archives are gzipped. makebiq.m accepts either (zcat for
+                # .gz, plain symlink otherwise), so look for both and prefer
+                # the compressed one when a directory happens to hold both.
+                stem = f"Global_{sensor}_{y}_{doy:03d}.bic"
+                sensor_dir = bic_dir / sensor / str(y)
+                candidates = [sensor_dir / f"{stem}.gz", sensor_dir / stem]
+            src = next((c for c in candidates if c.exists()), None)
+            if src is None:
                 continue
             files.append({
                 "path": str(src),
                 "sensor": sensor,
-                "relative_path": f"{sensor}/{y}/{fname}",
+                "relative_path": f"{sensor}/{y}/{src.name}",
             })
     return {"files": files}
 

@@ -113,6 +113,41 @@ def test_build_mrva_sensor_manifest_across_day_range(tmp_path):
     assert sensors_seen == {"AMSR2R", "IQUAM0"}
 
 
+def test_build_mrva_sensor_manifest_accepts_uncompressed_bic(tmp_path):
+    """l2p/src/writebic.m writes plain .bic (gzip was removed); makebiq.m
+    reads either form, so the manifest must not require .bic.gz."""
+    bic_dir = tmp_path / "bic"
+    iquam_dir = tmp_path / "iquam"
+    (bic_dir / "AVMTBG" / "2026").mkdir(parents=True)
+    (bic_dir / "AVMTBG" / "2026" / "Global_AVMTBG_2026_252.bic").touch()
+
+    manifest = build_mrva_sensor_manifest(
+        bic_dir, iquam_dir, datetime.date(2026, 9, 9),
+        {"AVMTBG": {"day_range": 0}}, ["AVMTBG"],
+    )
+
+    assert [e["relative_path"] for e in manifest["files"]] == [
+        "AVMTBG/2026/Global_AVMTBG_2026_252.bic"
+    ]
+
+
+def test_build_mrva_sensor_manifest_prefers_gzipped_bic(tmp_path):
+    bic_dir = tmp_path / "bic"
+    iquam_dir = tmp_path / "iquam"
+    (bic_dir / "AVMTBG" / "2026").mkdir(parents=True)
+    (bic_dir / "AVMTBG" / "2026" / "Global_AVMTBG_2026_252.bic").touch()
+    (bic_dir / "AVMTBG" / "2026" / "Global_AVMTBG_2026_252.bic.gz").touch()
+
+    manifest = build_mrva_sensor_manifest(
+        bic_dir, iquam_dir, datetime.date(2026, 9, 9),
+        {"AVMTBG": {"day_range": 0}}, ["AVMTBG"],
+    )
+
+    assert [e["relative_path"] for e in manifest["files"]] == [
+        "AVMTBG/2026/Global_AVMTBG_2026_252.bic.gz"
+    ]
+
+
 def test_build_mrva_sensor_manifest_skips_missing_files(tmp_path):
     bic_dir = tmp_path / "bic"
     iquam_dir = tmp_path / "iquam"
