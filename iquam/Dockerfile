@@ -92,11 +92,11 @@ RUN mkdir -p /data/output/iquam /data/cache/iquam /data/logs
 # Set working directory
 WORKDIR /data
 
-# Create entrypoint wrapper script
-RUN echo '#!/bin/bash' > /opt/iquam/bin/entrypoint.sh && \
-    echo '# IQUAM Container Entrypoint' >> /opt/iquam/bin/entrypoint.sh && \
-    echo 'exec /opt/iquam/bin/run_IquamProcessor.sh "/opt/matlabruntime/R2024b" "$@"' >> /opt/iquam/bin/entrypoint.sh && \
-    chmod +x /opt/iquam/bin/entrypoint.sh
+# Entrypoint wrapper script (source: iquam/bin/entrypoint.sh).
+# Dual-mode: accepts named args (--work-dir --log-dir --output-dir, for
+# MAAP/OGC) or positional passthrough (for local docker run).
+COPY iquam/bin/entrypoint.sh /opt/iquam/bin/entrypoint.sh
+RUN chmod +x /opt/iquam/bin/entrypoint.sh
 
 # Rootless / arbitrary-UID support (OpenShift pattern):
 # Assign group 0 (root group) and grant group perms equal to owner perms on all
