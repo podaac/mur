@@ -937,11 +937,12 @@ class MUROrchestrator:
         )
         # L4 is a directory tree (static-resources/L4/GLOB/NCDC/AVHRR_OI/{year}/{doy}/*.bz2),
         # not a single file -- bind-mounted whole and passed as a directory
-        # flag value. Only relevant when no prior CSP exists (bootstrap
-        # fallback); real S3-recursive localization for this specific
-        # directory-shaped input is not implemented in common/bin/localize.sh
-        # (out of scope for this phase -- localize_input's `aws s3 cp`
-        # without --recursive won't sync a whole tree).
+        # flag value, and only when it exists (see the mount block below:
+        # it's a bootstrap fallback, optional on both sides of the CLI).
+        # Real S3-recursive localization for this specific directory-shaped
+        # input is not implemented in common/bin/localize.sh (out of scope
+        # for this phase -- localize_input's `aws s3 cp` without --recursive
+        # won't sync a whole tree).
         l4_reference_root = static_resources_dir / "L4"
 
         # Set up output paths
@@ -1048,7 +1049,38 @@ class MUROrchestrator:
         # paths -- are valid unchanged from inside the container too; no
         # separate container-path convention to track for six different roots.
         source_roots = {bic_dir, iquam_dir, landice_p011_dir, landice_p01_dir,
-                         static_resources_dir, l4_reference_root}
+                        static_resources_dir}
+
+        # L4 is a bootstrap-only fallback: trimbip3a reads it solely when it
+        # gets no MUR reference coefficient, which never happens here because
+        # makeref always produces one. So mount and pass it only when it is
+        # actually staged -- a host without the L4 archive still runs. (Passing
+        # --l4-reference-root while silently skipping its mount is what
+        # produced "L4_REFERENCE_ROOT points at a directory that does not
+        # exist" from the container's own verify_inputs_exist().)
+        have_l4 = l4_reference_root.exists()
+        if have_l4:
+            source_roots.add(l4_reference_root)
+        else:
+            logger.info(
+                f"    → No L4 reference archive at {l4_reference_root}; "
+                "running without the L4 bootstrap fallback"
+            )
+
+        # Every remaining root backs a flag passed below, so a missing one
+        # can't just be dropped from the mount list -- the container would
+        # then fail on an unreadable path with no indication which host
+        # directory (or config key) is actually wrong.
+        missing_roots = sorted(str(r) for r in source_roots if not r.exists())
+        if missing_roots:
+            logger.error("    ✗ MRVA input root(s) missing on this host:")
+            for root in missing_roots:
+                logger.error(f"        {root}")
+            logger.error("    → Check the mrva section of the config file")
+            manifest_path.unlink(missing_ok=True)
+            self.stats["mrva"]["failed"] += 1
+            return False
+
         cmd.extend([
             "-v", f"{csp_dir.resolve()}:/data/output/csp",
             "-v", f"{netcdf_dir.resolve()}:/data/output/netcdf",
@@ -1056,9 +1088,8 @@ class MUROrchestrator:
             "-v", f"{logs_dir.resolve()}:/data/logs",
         ])
         for root in source_roots:
-            if root.exists():
-                resolved_root = str(root.resolve())
-                cmd.extend(["-v", f"{resolved_root}:{resolved_root}:ro"])
+            resolved_root = str(root.resolve())
+            cmd.extend(["-v", f"{resolved_root}:{resolved_root}:ro"])
 
         cmd.extend([
             "-v", f"{manifest_path.resolve()}:{manifest_path.resolve()}:ro",
@@ -1072,8 +1103,9 @@ class MUROrchestrator:
             "--landice-grid-p01-file", str(landice_files["landice_grid_p01"].resolve()),
             "--landice-icefiles-p011-file", str(landice_files["landice_icefiles_p011"].resolve()),
             "--sensor-inputs-manifest", str(manifest_path.resolve()),
-            "--l4-reference-root", str(l4_reference_root.resolve()),
         ])
+        if have_l4:
+            cmd.extend(["--l4-reference-root", str(l4_reference_root.resolve())])
         if active_sensors:
             cmd.extend(["--sensors", ",".join(active_sensors)])
         if static_files["mur25_grid"].exists():

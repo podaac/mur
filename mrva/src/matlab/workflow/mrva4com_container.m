@@ -13,7 +13,8 @@ function mrva4com_container(year, day, realtime, config_file)
 %                (optional), seasonal_file, landice_ice_p011_file,
 %                landice_grid_p01_file, landice_icefiles_p011_file,
 %                sensor_inputs_root (materialized from --sensor-inputs-manifest),
-%                prior_csp_file (optional), l4_reference_root, sensors
+%                prior_csp_file (optional), l4_reference_root (optional),
+%                sensors
 %                (optional JSON array), debug (optional). This is purely an
 %                internal handoff detail from entrypoint.sh -- the
 %                container's own CLI is still all named flags; see
@@ -365,7 +366,14 @@ function mrva4com_container(year, day, realtime, config_file)
 
     if trimbipFlag
         % Outlier removal using reference field
-        trimbip3a(sensors, year, day, bipdir, region, reffile, config.l4_reference_root);
+        % l4_reference_root is optional (entrypoint.sh): trimbip3a only reads
+        % it on its no-MUR-reference bootstrap branch, which this call never
+        % takes because reffile above is always a real coefficient file.
+        l4_reference_root = '';
+        if isfield(config, 'l4_reference_root') && ~isempty(config.l4_reference_root)
+            l4_reference_root = config.l4_reference_root;
+        end
+        trimbip3a(sensors, year, day, bipdir, region, reffile, l4_reference_root);
         fprintf('  ✓ Outliers removed\n');
 
         if biasbipFlag

@@ -19,14 +19,16 @@ usage() {
     echo "Usage: docker run ... --year YEAR --doy DOY --mode MODE \\"
     echo "  --polar-cap-edge-file FILE --seasonal-file FILE \\"
     echo "  --landice-ice-p011-file FILE --landice-grid-p01-file FILE --landice-icefiles-p011-file FILE \\"
-    echo "  --sensor-inputs-manifest FILE --l4-reference-root DIR \\"
-    echo "  [--sensors LIST] [--mur25-grid-file FILE] [--prior-csp-file FILE] [--debug]"
+    echo "  --sensor-inputs-manifest FILE \\"
+    echo "  [--sensors LIST] [--mur25-grid-file FILE] [--prior-csp-file FILE] \\"
+    echo "  [--l4-reference-root DIR] [--debug]"
     echo "  YEAR:     4-digit year (e.g., 2025)"
     echo "  DOY:      Day of year (1-366)"
     echo "  MODE:     nrt (near-real-time) or rea (reanalysis)"
     echo "  SENSORS:  Optional comma-separated list (e.g., AMSR2R,MODISA); default: all sensors"
     echo "  Every FILE/DIR value may be a local path or an s3:// href."
-    echo "  --mur25-grid-file and --prior-csp-file are optional (absence is a valid state, not an error)."
+    echo "  --mur25-grid-file, --prior-csp-file and --l4-reference-root are optional"
+    echo "  (absence is a valid state, not an error)."
 }
 
 parse_args() {
@@ -71,10 +73,10 @@ parse_args() {
 
     if [[ -z "$YEAR" || -z "$DOY" || -z "$MODE" || -z "$POLAR_CAP_EDGE_FILE" || \
           -z "$SEASONAL_FILE" || -z "$LANDICE_ICE_P011_FILE" || -z "$LANDICE_GRID_P01_FILE" || \
-          -z "$LANDICE_ICEFILES_P011_FILE" || -z "$SENSOR_INPUTS_MANIFEST" || -z "$L4_REFERENCE_ROOT" ]]; then
+          -z "$LANDICE_ICEFILES_P011_FILE" || -z "$SENSOR_INPUTS_MANIFEST" ]]; then
         echo "ERROR: --year, --doy, --mode, --polar-cap-edge-file, --seasonal-file," >&2
         echo "  --landice-ice-p011-file, --landice-grid-p01-file, --landice-icefiles-p011-file," >&2
-        echo "  --sensor-inputs-manifest, and --l4-reference-root are required" >&2
+        echo "  and --sensor-inputs-manifest are required" >&2
         usage
         return 1
     fi
@@ -102,8 +104,9 @@ localize_all_inputs() {
     LANDICE_ICE_P011_FILE=$(localize_input landice-ice-p011 "$LANDICE_ICE_P011_FILE" "$scratch") || return 1
     LANDICE_GRID_P01_FILE=$(localize_input landice-grid-p01 "$LANDICE_GRID_P01_FILE" "$scratch") || return 1
     LANDICE_ICEFILES_P011_FILE=$(localize_input landice-icefiles-p011 "$LANDICE_ICEFILES_P011_FILE" "$scratch") || return 1
-    L4_REFERENCE_ROOT=$(localize_input l4-reference-root "$L4_REFERENCE_ROOT" "$scratch") || return 1
-
+    if [[ -n "$L4_REFERENCE_ROOT" ]]; then
+        L4_REFERENCE_ROOT=$(localize_input l4-reference-root "$L4_REFERENCE_ROOT" "$scratch") || return 1
+    fi
     if [[ -n "$MUR25_GRID_FILE" ]]; then
         MUR25_GRID_FILE=$(localize_input mur25-grid "$MUR25_GRID_FILE" "$scratch") || return 1
     fi
@@ -120,8 +123,8 @@ localize_all_inputs() {
 # own docstring). Check that here, matching landice/bin/entrypoint.sh's
 # verify_inputs_exist(), so a missing/misconfigured static file fails loudly
 # before MATLAB starts rather than surfacing as an opaque read error deep in
-# the run. Optional flags (MUR25_GRID_FILE, PRIOR_CSP_FILE) are only checked
-# when actually supplied -- their absence is a valid state.
+# the run. Optional flags (MUR25_GRID_FILE, PRIOR_CSP_FILE, L4_REFERENCE_ROOT)
+# are only checked when actually supplied -- their absence is a valid state.
 verify_inputs_exist() {
     local flag_name value
     for flag_name in POLAR_CAP_EDGE_FILE SEASONAL_FILE \
@@ -132,7 +135,7 @@ verify_inputs_exist() {
             return 1
         fi
     done
-    if [[ ! -d "$L4_REFERENCE_ROOT" ]]; then
+    if [[ -n "$L4_REFERENCE_ROOT" && ! -d "$L4_REFERENCE_ROOT" ]]; then
         echo "ERROR: L4_REFERENCE_ROOT points at a directory that does not exist: $L4_REFERENCE_ROOT" >&2
         return 1
     fi
@@ -169,7 +172,7 @@ config = {
     'landice_icefiles_p011_file': sys.argv[6],
     'sensor_inputs_root': sys.argv[7],
     'prior_csp_file': opt(sys.argv[8]),
-    'l4_reference_root': sys.argv[10],
+    'l4_reference_root': opt(sys.argv[10]),
     'sensors': sensors,
     'debug': sys.argv[11] == '1',
 }

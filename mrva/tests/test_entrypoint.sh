@@ -71,16 +71,20 @@ REQUIRED_FLAGS='--year 2026 --doy 220 --mode nrt \
     --landice-ice-p011-file /in/ice.bip \
     --landice-grid-p01-file /in/grid.gds.gz \
     --landice-icefiles-p011-file /in/icefiles.txt \
-    --sensor-inputs-manifest /in/manifest.json \
-    --l4-reference-root /in/L4'
+    --sensor-inputs-manifest /in/manifest.json'
 
 out=$(run_case "parse_args $REQUIRED_FLAGS; echo \"\$YEAR|\$DOY|\$MODE|\$SENSORS|\$DEBUG_MODE|\$POLAR_CAP_EDGE_FILE|\$SEASONAL_FILE|\$SENSOR_INPUTS_MANIFEST|\$L4_REFERENCE_ROOT\"")
 assert_eq "named args set required fields, no debug/sensors/optional by default" \
-    "2026|220|nrt||0|/in/edge.bip|/in/seasonal.nc|/in/manifest.json|/in/L4" \
+    "2026|220|nrt||0|/in/edge.bip|/in/seasonal.nc|/in/manifest.json|" \
     "$out"
 
-out=$(run_case "parse_args $REQUIRED_FLAGS --sensors AMSR2R,MODISA --debug --mur25-grid-file /in/mur25.gds --prior-csp-file /in/prior.c06; echo \"\$SENSORS|\$DEBUG_MODE|\$MUR25_GRID_FILE|\$PRIOR_CSP_FILE\"")
-assert_eq "named args accept all optional fields" "AMSR2R,MODISA|1|/in/mur25.gds|/in/prior.c06" "$out"
+out=$(run_case "parse_args $REQUIRED_FLAGS --sensors AMSR2R,MODISA --debug --mur25-grid-file /in/mur25.gds --prior-csp-file /in/prior.c06 --l4-reference-root /in/L4; echo \"\$SENSORS|\$DEBUG_MODE|\$MUR25_GRID_FILE|\$PRIOR_CSP_FILE|\$L4_REFERENCE_ROOT\"")
+assert_eq "named args accept all optional fields" "AMSR2R,MODISA|1|/in/mur25.gds|/in/prior.c06|/in/L4" "$out"
+
+# --l4-reference-root is a bootstrap-only fallback (trimbip3a) -- a host with
+# no L4 archive must still be able to run, so its absence is not an error.
+out=$(run_case "parse_args $REQUIRED_FLAGS && echo accepted")
+assert_eq "accepts a run with no --l4-reference-root" "accepted" "$out"
 
 assert_fails "rejects positional args (dropped entirely)" 'parse_args 2026 220 nrt'
 assert_fails "rejects missing --mode" "parse_args --year 2026 --doy 220 --polar-cap-edge-file /in/e --seasonal-file /in/s --landice-ice-p011-file /in/i --landice-grid-p01-file /in/g --landice-icefiles-p011-file /in/f --sensor-inputs-manifest /in/m --l4-reference-root /in/l"
@@ -240,6 +244,29 @@ assert_fails "verify_inputs_exist fails when l4-reference-root does not exist" \
     --sensor-inputs-manifest '$src_dir/manifest.json' \
     --l4-reference-root '$src_dir/does-not-exist-L4'; \
     localize_all_inputs; verify_inputs_exist"
+rm -rf "$scratch" "$src_dir"
+
+# --- verify_inputs_exist: passes when l4-reference-root is omitted entirely ---
+# (it is the bootstrap-only fallback trimbip3a reads when there is no MUR
+# reference coefficient -- a host with no L4 archive must still run.)
+scratch=$(mktemp -d)
+src_dir=$(mktemp -d)
+touch "$src_dir/edge.bip" "$src_dir/seasonal.nc" "$src_dir/ice.bip" "$src_dir/grid.gds.gz" "$src_dir/icefiles.txt"
+echo '{"files": []}' > "$src_dir/manifest.json"
+run_case "parse_args --year 2026 --doy 220 --mode nrt \
+    --polar-cap-edge-file '$src_dir/edge.bip' \
+    --seasonal-file '$src_dir/seasonal.nc' \
+    --landice-ice-p011-file '$src_dir/ice.bip' \
+    --landice-grid-p01-file '$src_dir/grid.gds.gz' \
+    --landice-icefiles-p011-file '$src_dir/icefiles.txt' \
+    --sensor-inputs-manifest '$src_dir/manifest.json'; \
+    localize_all_inputs; verify_inputs_exist" >/dev/null 2>&1
+if [[ "$?" -eq 0 ]]; then
+    echo "PASS: verify_inputs_exist passes when l4-reference-root is omitted"
+else
+    echo "FAIL: verify_inputs_exist passes when l4-reference-root is omitted"
+    FAILURES=$((FAILURES + 1))
+fi
 rm -rf "$scratch" "$src_dir"
 
 # --- verify_inputs_exist: optional --prior-csp-file, when supplied, must also exist ---

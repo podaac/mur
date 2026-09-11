@@ -17,7 +17,8 @@ fortran_bin = '/opt/mrva/bin';
 %%   year, day, bipdir = also copies from the mrva script.
 %%   L4_reference_root = resolved L4 reference data root (only used when
 %%     MURcsp is empty -- the L4-bootstrap fallback path), passed by the
-%%     caller rather than hardcoded here.
+%%     caller rather than hardcoded here. May be '' when the caller has no
+%%     L4 archive; that only aborts if the fallback path is actually taken.
 
 if ~exist('MURcsp','var'), MURcsp=''; end;
 
@@ -97,6 +98,19 @@ if length(MURcsp),  %% use MUR reference:
 
   %%%%%%%%%%%%%%%%%%%%%%%%%%%%
 else,  %% use L4 reference:
+
+  % L4_reference_root is an optional container input (entrypoint.sh) -- it is
+  % only needed on this branch, which is the bootstrap fallback taken when no
+  % MUR reference coefficient is available at all. Say so explicitly rather
+  % than building a '/GLOB/NCDC/...' path off an empty root and reporting a
+  % confusing "not found" for it.
+  if isempty(L4dir),
+    fprintf(1,'trimbip error: no MUR reference coefficient and no L4 reference root\n');
+    fprintf(1,'  (pass --l4-reference-root to fall back to the L4 background field)\n');
+    fprintf(1,'aborting trimbip.m\n');
+    refcspfile='';
+    return;
+  end;
 
   n=1;
   refcspfile=sprintf('%s.csp',L4list{n,1});
