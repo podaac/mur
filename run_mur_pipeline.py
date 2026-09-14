@@ -450,13 +450,21 @@ class MUROrchestrator:
             "--cpus=2.0",
             # Java/memory settings
             "-e", "_JAVA_OPTIONS=-Xmx2048m -Xms512m -XX:+UseG1GC",
-            # OSISAF FTP endpoints for ice concentration data.
-            # Production uses the AMSR2-only product (OSI-408) — filenames are
-            # ice_conc_*_polstere-100_amsr2_*.nc — which lives in the amsr2_conc
-            # subtree. The conc/ subtree holds the multi-sensor product (OSI-401-d)
-            # which is what the icenew/ reference version was wired to; using it
-            # gives different marginal-ice-zone classifications than prod.
-            "-e", "OSISAF_FTP_REPROCESSED=ftp://osisaf.met.no/reprocessed/ice/conc/v1p2",
+            # OSISAF endpoints for ice concentration data. HTTPS throughout:
+            # OSI-SAF's anonymous FTP host is dead (connections time out).
+            # Production uses the single-sensor product (OSI-408) in the
+            # amsr2_conc subtree — filenames are ice_conc_*_polstere-100_
+            # amsr2|amsr3_*.nc, the sensor token switching at 2026-08-31 (see
+            # landice/src/readosisafice.m). The conc/ subtree holds the
+            # multi-sensor product (OSI-401-d) which is what the icenew/
+            # reference version was wired to; using it gives different
+            # marginal-ice-zone classifications than prod.
+            #
+            # OSISAF_FTP_REPROCESSED (pre-2009 dates) is deliberately not set:
+            # its old FTP path died with the rest of that host and the
+            # polstere-100 "reproc" product has no verified HTTPS equivalent.
+            # This pipeline only ever runs post-2009 days, so that branch is
+            # unreachable here; historical reprocessing must supply it.
             "-e", "OSISAF_FTP_ARCHIVE=https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc",
             "-e", "OSISAF_FTP_PROD=https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc",
             # Bind-mount each static file individually — one arg, one file,

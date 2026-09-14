@@ -62,6 +62,16 @@ function [ice,lon,lat] = readosisafice( hem, year, doy, ...
 
   end
 
+  % An unset endpoint used to mean "build ftp:///path and let each of the 11
+  % download attempts time out". OSI-SAF's FTP is gone, so name the missing
+  % variable once and stop.
+  if isempty(ftpdir)
+    lon=[]; lat=[]; ice=[];
+    fprintf(1, ['readOSISAF: no OSI-SAF endpoint configured for %s (%s). ' ...
+                'Set the matching OSISAF_FTP_* variable.\n'], date, hem);
+    return
+  end
+
   % Attempt to retrieve the file
   pathname = sprintf('%s%s/%s',ftpdir,subdir,filename);
   original_pathname = pathname;
@@ -97,7 +107,19 @@ function [ice,lon,lat] = readosisafice( hem, year, doy, ...
 
   % Determine file existence
   if exist(filename,'file'),
-    
+
+    % The walk-back above silently substitutes an older day's ice when the
+    % requested day is unavailable, and the stage still reports success. That
+    % is how MUR analysed 2026-08-30 ice for 2026-09-09 right through the
+    % AMSR2/AMSR3 changeover without a single error. Say so loudly whenever
+    % the file actually used is not the day that was asked for.
+    days_stale = double(current_mjd - julian(day,month,year,3));
+    if days_stale > 0
+      fprintf(1, ['readOSISAF: WARNING: no %s ice available for the ' ...
+                  'requested day; falling back to %s (%d day(s) stale).\n'], ...
+              hem, filename, days_stale);
+    end
+
     % Write out txt file to indicate the data file that will be used in processing
     write_file(out_dir, original_year, original_doy, filename);
 
