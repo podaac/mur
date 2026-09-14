@@ -91,7 +91,27 @@ Common dependencies (copied during build):
 
 ### Build the Image
 
-From the **l2p directory** with parent context:
+Use `build_module.sh` from the `mur/` directory:
+
+```bash
+cd /path/to/mur
+./build_module.sh l2p
+```
+
+It builds the `mur-matlab-base:r2024b` image first if missing, checks that `network.lic`
+exists, builds `--platform linux/amd64` with the parent `mur/` directory as context, and
+tags the image `mur-l2p:latest` — the name the pipeline config expects.
+
+**Build Process:**
+1. **Stage 1 (builder):** Starts from `mur-matlab-base:r2024b` (MATLAB R2024b + Compiler), compiles wrapper and dependencies
+2. **Stage 2 (runtime):** Copies compiled executable to minimal MATLAB Runtime container
+
+**Build time:** ~10-20 minutes (first build), ~2-3 minutes (cached); add ~15-20 minutes the first time the base image is built.
+
+#### Manual Build (Advanced)
+
+Only when `build_module.sh` doesn't fit — custom tags, external CI, or debugging the
+Dockerfile. Build from the **l2p directory** with parent context:
 
 ```bash
 cd /path/to/mur/l2p
@@ -100,15 +120,12 @@ docker build --platform linux/amd64 -t mur-l2p:latest -f Dockerfile ..
 
 **Why parent context?** The `..` allows access to `common/` utilities (julian.m, fortwrite.m) while the local `.dockerignore` file controls exactly what gets included from the parent directory.
 
-**Build Process:**
-1. **Stage 1 (builder):** Installs MATLAB R2024b + Compiler, compiles wrapper and dependencies
-2. **Stage 2 (runtime):** Copies compiled executable to minimal MATLAB Runtime container
-
-**Build time:** ~15-20 minutes (first build), ~2-3 minutes (cached)
+The base image must already exist; build it with `./build_matlab_base.sh` from `mur/`
+first. See [Manual Builds (Advanced)](../documentation/PIPELINE_CONFIGURATION.md#manual-builds-advanced).
 
 ### Run the Container
 
-**Named-args interface** — every input is an explicit flag; `--granules-manifest` replaces the old bind-mounted `indir` with a JSON manifest listing exactly which granule files this run needs (schema per `docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md` section 3: `{"files": [{"path": "..."}]}`). Each entry's `path` may be a local filesystem path or an `s3://` href — `common/bin/localize.sh` (sourced by `entrypoint.sh`) materializes them into a scratch directory before MATLAB runs, so `l2p2bic.m`'s own file-selection logic (which of the sensor's file-pattern candidates to use) runs completely unchanged against that directory:
+**Named-args interface** — every input is an explicit flag; `--granules-manifest` replaces the old bind-mounted `indir` with a JSON manifest listing exactly which granule files this run needs (schema per `documentation/INPUT_CONTRACT.md` section 3: `{"files": [{"path": "..."}]}`). Each entry's `path` may be a local filesystem path or an `s3://` href — `common/bin/localize.sh` (sourced by `entrypoint.sh`) materializes them into a scratch directory before MATLAB runs, so `l2p2bic.m`'s own file-selection logic (which of the sensor's file-pattern candidates to use) runs completely unchanged against that directory:
 
 ```bash
 docker run --rm \

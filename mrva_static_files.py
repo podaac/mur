@@ -13,7 +13,7 @@ next to the fixed-path table for that reason.
 Scope note: this only covers MRVA's static (non-per-sensor-fan-in) inputs.
 It does not include the BIC/iQuam/landice per-day fan-in inputs (those need
 the separate manifest mechanism -- see
-docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md) and it
+documentation/INPUT_CONTRACT.md) and it
 is not yet wired into mrva4com_container.m or entrypoint.sh, since MRVA's
 own explicit-args conversion (accepting named static-file flags at all)
 hasn't happened yet (documentation/MAAP_EXECUTION.md section 4: MRVA is

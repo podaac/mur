@@ -2,30 +2,41 @@
 
 ## Quick Start (Recommended)
 
-The simplest way to build and run is using the multi-stage Docker build:
-
-**IMPORTANT:** The Dockerfile references shared utilities from the `../common` folder, so the build context must include the parent `mur` directory. Build from within the landice directory and set the context to the parent (`..`).
+Build with `build_module.sh` from the `mur/` directory. It builds the
+`mur-matlab-base:r2024b` image if missing, checks `network.lic`, sets
+`--platform linux/amd64`, uses the parent `mur/` directory as build context (so the
+Dockerfile can reach `common/`), and tags the image `mur-landice:latest`:
 
 ```bash
-# Navigate to the landice directory
-cd mur/landice
-
-# Build the container
-docker build --platform linux/amd64 -f Dockerfile.multistage -t landice:latest ..
-
-# Run with simplified arguments (no need to specify input/output paths)
-docker run --rm --shm-size=512M \
-  -v $(pwd)/tests/in:/input:ro \
-  -v $(pwd)/tests/out:/output \
-  landice:latest \
-  2024 100
+cd mur
+./build_module.sh landice
 ```
 
-**Note:** The `..` at the end sets the build context to the parent `mur` directory, which allows the Dockerfile to access both `landice/` and `common/` folders.
+Run it (see [README.md](README.md) for the full named-flag invocation):
 
-## Manual Build Process
+```bash
+docker run --rm --shm-size=512M \
+  -v /path/to/static-resources:/input:ro \
+  -v /path/to/output:/output \
+  mur-landice:latest \
+  --year 2024 --doy 100 ...
+```
 
-For development or debugging, you can build manually:
+For a raw `docker build` — custom tags, external CI, Dockerfile debugging — see
+[Manual Builds (Advanced)](../documentation/PIPELINE_CONFIGURATION.md#manual-builds-advanced):
+
+```bash
+cd mur/landice
+docker build --platform linux/amd64 -f Dockerfile -t mur-landice:latest ..
+```
+
+## Manual Compilation Process (Advanced)
+
+The rest of this document covers compiling the MATLAB application **by hand inside a
+development container** — useful when debugging `mcc` dependency problems or toolbox
+requirements, not part of the normal build path. The single `landice/Dockerfile` does all
+of this automatically; the `Dockerfile.matlab` / `Dockerfile.runtime` split described below
+is historical, so adapt the commands to the current Dockerfile's builder stage.
 
 ## Prerequisites
 - Docker installed on your system
@@ -50,17 +61,21 @@ end
 
 ### 1. Build the Docker Image
 
-**IMPORTANT:** Like Dockerfile.multistage, this Dockerfile references shared utilities from the `../common` folder, so the build context must include the parent `mur` directory.
+**Note:** `Dockerfile.matlab` no longer exists. The equivalent today is the builder stage of
+`landice/Dockerfile`, or the shared base image `mur-matlab-base:r2024b` built by
+`./build_matlab_base.sh`. Either gives you MATLAB R2024b + Compiler with `common/` available:
 
 ```bash
-# Navigate to the landice directory
-cd mur/landice
+# Build the shared MATLAB base image (from mur/)
+cd mur
+./build_matlab_base.sh
 
-# Build the container with parent context
-docker build --platform linux/amd64 -f Dockerfile.matlab -t matlab-landice:r2024b ..
+# Or stop the landice build at its builder stage
+cd mur/landice
+docker build --platform linux/amd64 --target builder -t matlab-landice:r2024b -f Dockerfile ..
 ```
 
-**Note:** The `..` at the end sets the build context to the parent `mur` directory, which allows the Dockerfile to access both `landice/` and `common/` folders.
+Both build with the parent `mur` directory as context, which is what lets the Dockerfile reach `landice/` and `common/`. Substitute whichever image you built for `matlab-landice:r2024b` in the commands below.
 
 ### 2. Run Interactive Terminal Session
 
@@ -167,7 +182,9 @@ export LD_LIBRARY_PATH=$MCR_ROOT/runtime/glnxa64:$MCR_ROOT/bin/glnxa64:$MCR_ROOT
 
 ### 1. Create Runtime Dockerfile
 
-Create `Dockerfile.runtime`:
+**Historical:** the current `landice/Dockerfile` already produces the runtime image as its
+final stage, so this step is not needed for a normal build. Kept as a reference for
+standalone runtime images. Create `Dockerfile.runtime`:
 ```dockerfile
 FROM containers.mathworks.com/matlab-runtime:r2024b
 

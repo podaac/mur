@@ -104,7 +104,7 @@ def resolve_mrva_static_files(static_resources_dir: pathlib.Path, doy: int) -> D
 
 
 def build_l2p_granules_manifest(granule_files: List[pathlib.Path], container_input_dir: str) -> Dict:
-    """Build the granules manifest (docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md
+    """Build the granules manifest (documentation/INPUT_CONTRACT.md
     section 3) for L2P, using container-side paths into container_input_dir
     (wherever the caller bind-mounts the granule files' host directory).
     Scoped to one invocation only, per the design doc's "manifests are
@@ -677,7 +677,7 @@ class MUROrchestrator:
         logger.info(f"    → Processing {sensor} {data_day} → BIC")
 
         # Build the granules manifest -- container-side paths into the
-        # bind-mounted input_dir below, per docs/superpowers/specs/
+        # bind-mounted input_dir below, per documentation/
         # 2026-07-27-explicit-input-contract-design.md section 3. Scoped to
         # this one invocation only (not cumulative), written to a temp file.
         container_input_dir = "/data/l2p-input"
@@ -1010,7 +1010,7 @@ class MUROrchestrator:
         sensors_config = config.get("sensors", {})
         active_sensors = config.get("active_sensors", list(sensors_config.keys()))
 
-        # Resolve every input as an explicit value (docs/superpowers/specs/
+        # Resolve every input as an explicit value (documentation/
         # 2026-07-27-explicit-input-contract-design.md) instead of mounting
         # whole directories for the container to scan.
         static_files = resolve_mrva_static_files(static_resources_dir, doy)

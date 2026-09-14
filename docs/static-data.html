@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Static input data · MUR SST</title>
+<meta name="description" content="The static reference files MUR needs on disk, how they reach the containers, and how sea ice is fetched.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav><div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <div class="nav-group">Operating it</div>
+    <a href="static-data.html" aria-current="page">Static input data</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a></nav>
+  <div class="nav-group">Reference</div>
+  <nav>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">Configuration reference</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">Input contract</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/LANDICE_ENCODING.md">Land/ice encoding</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/mrva/docs/OVERVIEW.md">MRVA internals</a>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>Static input data</h1>
+    <p class="lede">The reference files the pipeline needs on disk before it can run, and where they come from.</p>
+
+    <h2>What counts as static</h2>
+    <p>Alongside the observations it downloads each day, the pipeline needs a
+    set of reference files that change rarely or never: land masks, grid
+    transformation matrices, and a day-of-year climatology. These are not
+    fetched automatically &mdash; they must be staged before the first run.</p>
+
+    <h2>Layout</h2>
+<pre><code>static-resources/
+&#9500;&#9472;&#9472; grids/                    # land/sea masks
+&#9474;   &#9500;&#9472;&#9472; maskGLOBp01deg.gds    # 0.01&deg; (36000 x 17999)
+&#9474;   &#9500;&#9472;&#9472; maskGlob1km.gds       # 0.011&deg; (~1 km)
+&#9474;   &#9492;&#9472;&#9472; MUR25grid.gds         # 0.25&deg;, for the MUR25 product
+&#9500;&#9472;&#9472; mat/                      # OSI-SAF -> analysis grid mappings
+&#9474;   &#9500;&#9472;&#9472; p01/{saf2north,saf2south}.mat
+&#9474;   &#9492;&#9472;&#9472; p011/{saf2north,saf2south}.mat
+&#9500;&#9472;&#9472; seasonal/                 # day-of-year climatology
+&#9474;   &#9492;&#9472;&#9472; mur_001.nc ... mur_365.nc
+&#9500;&#9472;&#9472; landice/
+&#9474;   &#9492;&#9472;&#9472; CylinderP01_edge.bip  # polar cap edge
+&#9492;&#9472;&#9472; L4/                       # optional bootstrap reference
+    &#9492;&#9472;&#9472; GLOB/NCDC/AVHRR_OI/&lt;year&gt;/&lt;doy&gt;/</code></pre>
+
+    <p>The four <code>saf2*.mat</code> matrices are the bulk of it &mdash;
+    roughly 500&nbsp;MB between them. They are <em>derived</em> data,
+    reproducible from the land masks plus some small OSI-SAF index files, so
+    they need not be archived if the generators are available.</p>
+
+    <div class="note">
+      <p><code>L4/</code> is optional. It provides a background field only in
+      the bootstrap case where no prior coefficient exists at all; in normal
+      operation the analysis builds its own reference and never reads it. A
+      host without the L4 archive runs fine.</p>
+    </div>
+
+    <h2>How these reach the containers</h2>
+    <p>Each file is passed as its own named flag &mdash;
+    <code>--landmask-p01-file</code>, <code>--seasonal-file</code>,
+    <code>--polar-cap-edge-file</code> and so on &mdash; resolved by the
+    orchestrator and bind-mounted individually. No container is handed the
+    <code>static-resources/</code> root and left to find its own way around,
+    which is why moving or renaming a file surfaces immediately as a named
+    error rather than a mysterious read failure.</p>
+
+    <h2>Sea ice concentration</h2>
+    <p>Sea ice is the one input fetched at run time rather than staged. It
+    comes from OSI-SAF over HTTPS, selected by three environment variables:</p>
+
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Variable</th><th>Covers</th><th>Default</th></tr></thead>
+      <tbody>
+        <tr><td><code>OSISAF_FTP_PROD</code></td><td>Current day</td><td>OSI-SAF THREDDS <code>amsr2_conc</code> tree</td></tr>
+        <tr><td><code>OSISAF_FTP_ARCHIVE</code></td><td>Recent days</td><td>Same tree</td></tr>
+        <tr><td><code>OSISAF_FTP_REPROCESSED</code></td><td>Pre-2009 dates</td><td><em>None</em> &mdash; must be supplied explicitly</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="warn">
+      <p>The variables keep their <code>_FTP_</code> names for interface
+      compatibility, but OSI-SAF's anonymous FTP host no longer answers
+      &mdash; connections to it hang until they time out. The defaults are
+      HTTPS endpoints; an <code>ftp://</code> value still works if you supply
+      one, since the reader dispatches on the URL scheme.</p>
+    </div>
+
+    <h3>AMSR2 and AMSR3</h3>
+    <p>OSI-SAF replaced the AMSR2 instrument with AMSR3 inside the same
+    <code>amsr2_conc</code> tree: files are named
+    <code>ice_conc_&lt;hem&gt;_polstere-100_amsr2_&hellip;</code> through
+    2026-08-30 and <code>&hellip;_amsr3_&hellip;</code> from 2026-08-31, with no
+    overlap. The products are otherwise identical &mdash; same grid, same
+    variables, same scaling &mdash; so only the filename changes.</p>
+
+    <p>The reader selects the token by date, because reprocessing an older
+    day still needs the AMSR2 name. The cutover can be moved with
+    <code>OSISAF_AMSR3_START=YYYYMMDD</code> if the upstream naming shifts
+    again, which avoids a rebuild.</p>
+
+    <div class="note">
+      <p>File-by-file detail, sizes, formats and provenance are in
+      <a href="https://github.com/podaac/mur/blob/HEAD/documentation/STATIC_DATA.md">STATIC_DATA.md</a>; the mask
+      bit layout is in
+      <a href="https://github.com/podaac/mur/blob/HEAD/documentation/LANDICE_ENCODING.md">LANDICE_ENCODING.md</a>.</p>
+    </div>
+
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. Deeper
+      reference material stays as Markdown in the repository and is linked
+      from each page.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

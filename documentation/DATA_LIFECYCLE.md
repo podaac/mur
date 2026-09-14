@@ -50,7 +50,7 @@ flowchart TB
     end
 
     subgraph analysis["Analysis & Output"]
-        MRVA["MRVA Algorithm<br/>[PENDING]"]
+        MRVA["MRVA Algorithm"]
         OUTPUT["MUR SST Product<br/>NetCDF Output"]
     end
 
@@ -343,7 +343,7 @@ Maximum fallback: 10 days
 docker run --rm \
   -v /nas2/source/podaac/MODISA:/input:ro \
   -v /nas2/bic/MODISA:/output \
-  ghcr.io/nasa-jpl/mur-l2p:latest \
+  ghcr.io/podaac/mur-l2p:latest \
   2025 042 MODISA G10 nrt 2
 ```
 
@@ -441,7 +441,7 @@ subset = filter_by_date(iquam_data, analysis_day, dayrange=3);
 docker run --rm \
   -v /nas2/source/osi-saf:/input \
   -v /nas2/gds:/output \
-  ghcr.io/nasa-jpl/mur-landice:latest \
+  ghcr.io/podaac/mur-landice:latest \
   2025 042 G10 p01
 
 # If failed, try day - 1, day - 2, ... (up to 10 days back)
@@ -518,7 +518,7 @@ gantt
   - L2P day 040: Use cache (age=2 >= stability=2)
   - iQUAM: Use cached .bii files (<1 min)
   - Background: Load day 041 coefficients (L=6)
-- **10:30** - MRVA: Run analysis [PENDING] (~1 hour)
+- **10:30** - MRVA: Run analysis (~30-90 min NRT, longer for REA)
 - **12:00** - MUR product available (~3 hours total latency)
 
 **Cache Hit Rate Estimates (Day 042):**
@@ -809,7 +809,7 @@ The REA product replaces/supersedes the NRT product for the same date.
 | .gds/.bip (ice) | ~100 MB | Indefinite | ~37 GB |
 | **Total Preprocessed** | **~650-950 MB/day** | | **~350 GB/year** |
 
-### Final Products [PENDING MRVA COMPLETION]
+### Final Products
 
 **Daily Output (estimated):**
 

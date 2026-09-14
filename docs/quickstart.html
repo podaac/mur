@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quick start · MUR SST</title>
+<meta name="description" content="Build the MUR container images, configure the pipeline, and process a day of data.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav><div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html" aria-current="page">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <div class="nav-group">Operating it</div>
+    <a href="static-data.html">Static input data</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a></nav>
+  <div class="nav-group">Reference</div>
+  <nav>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">Configuration reference</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">Input contract</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/LANDICE_ENCODING.md">Land/ice encoding</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/mrva/docs/OVERVIEW.md">MRVA internals</a>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>Quick start</h1>
+    <p class="lede">Build the images, point the pipeline at a configuration, and process a day.</p>
+
+    <h2>Prerequisites</h2>
+    <ul>
+      <li><strong>Docker</strong>, with enough memory allocated. MRVA is the
+          constraint: it is launched with a 72&nbsp;GB limit and has been
+          observed peaking around 65&nbsp;GB.</li>
+      <li><strong>A MATLAB licence reachable from the build host</strong>,
+          including the MATLAB Compiler. This is needed only to
+          <em>build</em> the images &mdash; not to run them.</li>
+      <li><strong>Python 3.11+ with <code>uv</code></strong> for the
+          orchestrator.</li>
+      <li><strong>NASA Earthdata credentials</strong> in a <code>.netrc</code>
+          for the L2P download stage.</li>
+    </ul>
+
+    <div class="note">
+      <p>The MATLAB build stage resolves its licence inside the container. If
+      your site uses a network licence server, provide a
+      <code>network.lic</code> naming that server before building &mdash; it
+      is deliberately not checked into the repository, so the images can be
+      built anywhere.</p>
+    </div>
+
+    <h2>1. Build the images</h2>
+    <p>The shared MATLAB base is built first; the module images inherit from
+    it and will fail to build if it is missing.</p>
+<pre><code>./build_module.sh all        # base image, then all four modules
+
+./build_module.sh mrva       # or one module at a time
+./build_module.sh mrva --debug --no-cache</code></pre>
+
+    <div class="warn">
+      <p>Only a few MATLAB Compiler licences usually exist at a site. If a
+      module build fails with a licence error while the base image succeeded,
+      the compiler licence is most likely in use elsewhere &mdash; the base
+      image needs only a basic MATLAB licence, the module images need the
+      compiler.</p>
+    </div>
+
+    <h2>2. Configure</h2>
+    <p>Copy <code>config.example.json</code> and set the input, output and
+    static-resource paths for your host. Each stage has its own block, and
+    the sensor table lives under the <code>mrva</code> and <code>l2p</code>
+    sections. The full key-by-key reference is in
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">PIPELINE_CONFIGURATION.md</a>;
+    the static inputs you must stage yourself are covered in
+    <a href="static-data.html">Static input data</a>.</p>
+
+    <h2>3. Run</h2>
+<pre><code>uv run run_mur_pipeline.py --config config.json</code></pre>
+
+    <p>Useful flags:</p>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>--date YYYY-MM-DD</code></td><td>Treat this as the run day, for reprocessing a past date</td></tr>
+        <tr><td><code>--process-days</code></td><td>Analysis day(s) as offsets from the run day</td></tr>
+        <tr><td><code>--all-stages</code></td><td>Full nine-day window (reanalysis plus near-real-time)</td></tr>
+        <tr><td><code>--preprocess-only</code></td><td>Land/ice, iQUAM and L2P only; skip the MRVA analysis</td></tr>
+        <tr><td><code>--execute STAGE</code></td><td>Run only named stages; repeatable</td></tr>
+        <tr><td><code>--sensors A,B</code></td><td>Restrict to specific sensors</td></tr>
+        <tr><td><code>--force-nrt</code></td><td>Force near-real-time mode for every date</td></tr>
+        <tr><td><code>--keep-containers</code></td><td>Leave containers in place for debugging</td></tr>
+        <tr><td><code>--debug</code></td><td>Verbose logging</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>4. Long runs</h2>
+    <p>A full day can take well over an hour, so detach it and write to a log
+    file:</p>
+<pre><code>nohup uv run run_mur_pipeline.py --config config.json \
+  &gt; log_$(date +%F_%H%M).txt 2&gt;&amp;1 &lt; /dev/null &amp;</code></pre>
+
+    <div class="warn">
+      <p>Redirect to a file rather than piping through <code>tee</code>. If
+      the session drops, <code>tee</code>'s write to the dead terminal fails
+      and takes the pipeline down with it. Use <code>tail -f</code> on the
+      log instead.</p>
+    </div>
+
+    <h2>Reading the log</h2>
+    <p>Each stage reports a tick or a cross in the per-day summary. Two
+    things are worth scanning for even on an apparently clean run:</p>
+    <ul>
+      <li><code>WARNING: no &lt;hem&gt; ice available for the requested day</code>
+          &mdash; the land/ice stage substituted an older day's sea ice. It
+          still succeeds; the analysis is just using staler ice than you
+          might assume.</li>
+      <li><code>No L2P input files for &lt;SENSOR&gt;</code> &mdash; that
+          sensor contributed nothing to the day.</li>
+    </ul>
+
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. Deeper
+      reference material stays as Markdown in the repository and is linked
+      from each page.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

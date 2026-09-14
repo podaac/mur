@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUR SST</title>
+<meta name="description" content="MUR SST: a global gap-free ~1 km sea surface temperature analysis and its containerized processing pipeline.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav><div class="nav-group">Start here</div>
+    <a href="index.html" aria-current="page">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <div class="nav-group">Operating it</div>
+    <a href="static-data.html">Static input data</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a></nav>
+  <div class="nav-group">Reference</div>
+  <nav>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">Configuration reference</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">Input contract</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/LANDICE_ENCODING.md">Land/ice encoding</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/mrva/docs/OVERVIEW.md">MRVA internals</a>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>MUR SST</h1>
+    <p class="lede">A global, gap-free, gridded sea surface temperature analysis at roughly 1&nbsp;km resolution &mdash; and the containerized pipeline that produces it.</p>
+
+    <p>The Multi-scale Ultra-high Resolution (MUR) SST analysis blends
+    infrared and microwave satellite retrievals with in-situ buoy
+    observations into a single daily global field with no gaps. This site
+    describes how the pipeline is put together, how to run it, and how the
+    underlying analysis works.</p>
+
+    <div class="stats">
+      <div class="stat"><b>~1 km</b><span>Output resolution</span></div>
+      <div class="stat"><b>Daily</b><span>Global, gap-free</span></div>
+      <div class="stat"><b>4</b><span>Processing containers</span></div>
+      <div class="stat"><b>L=2&rarr;11</b><span>Analysis scales</span></div>
+    </div>
+
+    <h2>The pipeline at a glance</h2>
+    <p>Three preprocessing stages convert external data into compact binary
+    observation files. The MRVA analysis stage then fits a multi-scale field
+    to all of them at once and writes the NetCDF product.</p>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TD
+    subgraph sources[&quot;Data Sources&quot;]
+        OSI[&quot;OSI-SAF&lt;br/&gt;Ice Concentration&quot;]
+        PODAAC[&quot;PO.DAAC&lt;br/&gt;L2P Satellite Files&quot;]
+        IQUAM[&quot;NOAA iQUAM&lt;br/&gt;Buoy Data&quot;]
+    end
+
+    subgraph containers[&quot;Preprocessing Containers&quot;]
+        LANDICE[&quot;Land/Ice Container&lt;br/&gt;makeicefiles.m&quot;]
+        L2P[&quot;L2P Container&lt;br/&gt;l2p2bic.m&quot;]
+        BUOY[&quot;iQUAM Container&lt;br/&gt;makedailyiquam.m&quot;]
+    end
+
+    subgraph outputs[&quot;Preprocessed Data&quot;]
+        GDS[&quot;.gds files&lt;br/&gt;Land/ice masks&quot;]
+        BIP[&quot;.bip files&lt;br/&gt;Ice SST points&quot;]
+        BIC[&quot;.bic files&lt;br/&gt;Satellite observations&quot;]
+        BII[&quot;.bii files&lt;br/&gt;Buoy observations&quot;]
+    end
+
+    subgraph analysis[&quot;Analysis&quot;]
+        MRVA[&quot;MRVA Algorithm&lt;br/&gt;Multi-scale variational analysis&quot;]
+        NETCDF[&quot;MUR SST Product&lt;br/&gt;NetCDF L4 output&quot;]
+    end
+
+    OSI --&gt; LANDICE
+    PODAAC --&gt; L2P
+    IQUAM --&gt; BUOY
+
+    LANDICE --&gt; GDS
+    LANDICE --&gt; BIP
+    L2P --&gt; BIC
+    BUOY --&gt; BII
+
+    GDS --&gt; MRVA
+    BIP --&gt; MRVA
+    BIC --&gt; MRVA
+    BII --&gt; MRVA
+
+    MRVA --&gt; NETCDF
+
+    style MRVA fill:#e1f5ff,stroke:#0288d1,stroke-width:2px
+    style NETCDF fill:#e1f5ff,stroke:#0288d1,stroke-width:2px
+</pre>
+<figcaption>External sources feed three preprocessing containers; their binary outputs converge on the MRVA analysis, which emits the NetCDF L4 product.</figcaption>
+</figure>
+    <h2>Where to go next</h2>
+    <div class="cards">
+      <div class="card">
+        <h3><a href="quickstart.html">Quick start</a></h3>
+        <p>Build the container images and run a day through the pipeline.</p>
+      </div>
+      <div class="card">
+        <h3><a href="architecture.html">Architecture</a></h3>
+        <p>The four containers, the shared MATLAB base image, and the
+        explicit-input contract they all follow.</p>
+      </div>
+      <div class="card">
+        <h3><a href="algorithm.html">The MRVA algorithm</a></h3>
+        <p>Multi-scale variational analysis on a B-spline basis &mdash; what
+        the scales mean and how observations enter.</p>
+      </div>
+      <div class="card">
+        <h3><a href="lifecycle.html">Data lifecycle</a></h3>
+        <p>Where inputs come from, the temporal windows, caching and
+        stability rules, and storage footprint.</p>
+      </div>
+      <div class="card">
+        <h3><a href="sequence.html">Daily execution</a></h3>
+        <p>What a scheduled run actually does, and how NRT and reanalysis
+        modes differ.</p>
+      </div>
+      <div class="card">
+        <h3><a href="sensors.html">Adding a sensor</a></h3>
+        <p>What a new L2P instrument needs in order to join the analysis.</p>
+      </div>
+    </div>
+
+    <h2>Reference material</h2>
+    <p>Low-level detail deliberately stays as Markdown next to the code it
+    describes, so it moves when the code moves:</p>
+    <ul>
+      <li><a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">Configuration reference</a>
+          &mdash; every key in <code>config.json</code>, stage by stage</li>
+      <li><a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">Explicit input contract</a>
+          &mdash; the named-flag and manifest schema all four containers implement</li>
+      <li><a href="https://github.com/podaac/mur/blob/HEAD/documentation/LANDICE_ENCODING.md">Land/ice encoding</a>
+          &mdash; bit-level layout of the mask files</li>
+      <li><a href="https://github.com/podaac/mur/blob/HEAD/mrva/docs/OVERVIEW.md">MRVA internals</a>
+          &mdash; the MATLAB and Fortran implementation in depth</li>
+      <li>Per-container command-line reference:
+          <a href="https://github.com/podaac/mur/blob/HEAD/landice/README.md">landice</a>,
+          <a href="https://github.com/podaac/mur/blob/HEAD/l2p/README.md">l2p</a>,
+          <a href="https://github.com/podaac/mur/blob/HEAD/iquam/README.md">iquam</a>,
+          <a href="https://github.com/podaac/mur/blob/HEAD/mrva/README.md">mrva</a></li>
+    </ul>
+
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. Deeper
+      reference material stays as Markdown in the repository and is linked
+      from each page.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

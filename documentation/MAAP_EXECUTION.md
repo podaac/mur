@@ -42,7 +42,7 @@ This matters directly for the design below: it's why fan-in has to be a manifest
 
 ## 4. The explicit-args contract, container by container
 
-Per `docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md` (the common design) and `docs/superpowers/specs/2026-07-27-pipeline-input-inventory.md` (the original per-container audit):
+Per [INPUT_CONTRACT.md](INPUT_CONTRACT.md), the common design:
 
 | Container | Status | Static/date inputs | Fan-in inputs |
 |---|---|---|---|
@@ -103,7 +103,6 @@ This runs `MAAPOrchestrator.run()`/`run_day()` against `FakeMAAPClient` (a fake 
 ## Related documentation
 
 - [MAAP_DEPLOYMENT_PLAN.html](MAAP_DEPLOYMENT_PLAN.html) — the original migration plan; accurate on architecture and phasing, but its OGC/CWL framing describes where MAAP is headed, not what's deployable today (§3 above)
-- [`docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md`](../docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md) — the common explicit-args/manifest/STAC design referenced throughout this document
-- [`docs/superpowers/specs/2026-07-27-pipeline-input-inventory.md`](../docs/superpowers/specs/2026-07-27-pipeline-input-inventory.md) — the original per-container audit that motivated the design
+- [INPUT_CONTRACT.md](INPUT_CONTRACT.md) — the common explicit-args/manifest/STAC design referenced throughout this document
 - [STATIC_DATA.md](STATIC_DATA.md) — where landice's six static files come from
 - [landice/README.md](../landice/README.md), [iquam/README.md](../iquam/README.md) — the two containers already converted to the explicit-args contract

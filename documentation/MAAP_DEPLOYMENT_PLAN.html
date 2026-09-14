@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MUR on MAAP — Deployment Plan for the 4 Pipeline Containers</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2933;
+    --muted: #52606d;
+    --accent: #1d6fb8;
+    --accent-dark: #134e7f;
+    --rule: #d9e2ec;
+    --code-bg: #f5f7fa;
+    --warn-bg: #fff8e6;
+    --warn-border: #e0b400;
+    --ok-bg: #ecf7ef;
+    --ok-border: #3fa45b;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+    color: var(--fg);
+    background: var(--bg);
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 2.5rem 1.5rem 5rem; }
+  header.title {
+    border-bottom: 3px solid var(--accent);
+    padding-bottom: 1.2rem;
+    margin-bottom: 1.5rem;
+  }
+  header.title h1 { font-size: 1.9rem; margin: 0 0 .3rem; color: var(--accent-dark); }
+  header.title .sub { color: var(--muted); font-size: 1.02rem; }
+  header.title .meta { color: var(--muted); font-size: .85rem; margin-top: .6rem; }
+  h2 {
+    font-size: 1.3rem; color: var(--accent-dark);
+    margin-top: 2.8rem; padding-bottom: .3rem; border-bottom: 1px solid var(--rule);
+  }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: var(--fg); }
+  h4 { font-size: .95rem; margin-top: 1.2rem; color: var(--accent-dark); }
+  p { margin: .7rem 0; }
+  code {
+    font-family: var(--mono); font-size: .88em;
+    background: var(--code-bg); padding: .1rem .35rem; border-radius: 4px;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--rule); border-radius: 6px;
+    padding: 1rem; overflow-x: auto; font-family: var(--mono); font-size: .82rem; line-height: 1.45;
+  }
+  pre code { background: none; padding: 0; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: .35rem 0; }
+  .callout {
+    border-left: 4px solid var(--accent); background: #f0f6fb;
+    padding: .8rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0;
+  }
+  .callout.warn { border-left-color: var(--warn-border); background: var(--warn-bg); }
+  .callout.ok { border-left-color: var(--ok-border); background: var(--ok-bg); }
+  .callout strong { color: var(--accent-dark); }
+  .callout.warn strong { color: #8a6d00; }
+  .callout.ok strong { color: #2c7a44; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .9rem; }
+  th, td { border: 1px solid var(--rule); padding: .55rem .7rem; text-align: left; vertical-align: top; }
+  th { background: #eef3f8; color: var(--accent-dark); }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .tag {
+    display: inline-block; font-size: .72rem; font-weight: 600; letter-spacing: .03em;
+    padding: .12rem .5rem; border-radius: 999px; text-transform: uppercase;
+  }
+  .tag.decision { background: #e3f0fb; color: var(--accent-dark); }
+  .tag.new { background: #e3fbe8; color: #1a6b2f; }
+  .tag.gone { background: #fbe3e3; color: #8b1a1a; }
+  .decisions { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap: .8rem; margin: 1.2rem 0; }
+  .decision-card { border: 1px solid var(--rule); border-radius: 8px; padding: .8rem 1rem; background: #fbfdff; }
+  .decision-card .q { font-size: .8rem; color: var(--muted); margin-bottom: .3rem; }
+  .decision-card .a { font-weight: 600; color: var(--accent-dark); }
+  .arch { background: #11212f; color: #d7e3ee; border: none; }
+  ol.steps > li { margin: 1.1rem 0; }
+  ol.steps > li > strong { color: var(--accent-dark); }
+  .delta-table td:first-child { white-space: nowrap; font-weight: 600; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: .85rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="title">
+  <h1>Deploying the 4 MUR Containers to MAAP (DPS)</h1>
+  <div class="sub">Migration plan for running the MUR SST pipeline (landice, l2p, iquam, mrva) on NASA's MAAP platform via OGC Application Packages.</div>
+  <div class="meta">Source: <code>mur/run_mur_pipeline.py</code> &middot; MAAP docs:
+    <a href="https://docs.maap-project.org/en/ogc/technical_tutorials/ogc/build_application_packages.html">OGC App Packages</a>,
+    <a href="https://docs.maap-project.org/en/ogc/technical_tutorials/ogc/transition_to_ogc.html">Transition to OGC</a>,
+    <a href="https://docs.maap-project.org/en/latest/technical_tutorials/search/searching_the_stac_catalog.html">STAC Search</a>,
+    <a href="https://docs.maap-project.org/en/latest/system_reference_guide/jobs_maappy.html">Job Management</a>
+    &middot; Updated July 2026</div>
+</header>
+
+<!-- ================================================================== -->
+<h2>1. Context &amp; core insight</h2>
+
+<p>The MUR SST pipeline currently runs as a host-side orchestrator (<code>run_mur_pipeline.py</code>) that
+   shells out to <code>docker&nbsp;run</code> per stage, mounting local dirs and passing positional args.
+   On MAAP each job <em>is</em> a container; there is no nested Docker. But the real shift is simpler than
+   "rewrite everything":</p>
+
+<div class="callout ok">
+  <strong>The key insight:</strong> the containers themselves barely change. They already take arguments and
+  read/write fixed paths. The work is:<br>
+  (1) switch from positional to <strong>named arguments</strong> (OGC requirement, easy);<br>
+  (2) make the containers <strong>dual-mode</strong> (local Docker <em>or</em> MAAP) via an env flag;<br>
+  (3) move all the <strong>"magic" into the orchestration</strong> layer &mdash; discovery (STAC), staging (S3/CWL),
+      caching (S3 existence check), and chaining (job outputs &rarr; next job's inputs).
+</div>
+
+<p>This plan replaces the earlier HySDS/algorithm_config.yaml approach with the
+   <strong>OGC Application Package</strong> model (CWL + Docker), which is MAAP's preferred path for
+   custom "bring your own container" deployments.</p>
+
+<h3>Decisions captured</h3>
+<div class="decisions">
+  <div class="decision-card">
+    <div class="q"><span class="tag decision">Registration</span></div>
+    <div class="a">OGC Application Packages</div>
+    <div class="q">CWL + custom Docker images.</div>
+  </div>
+  <div class="decision-card">
+    <div class="q"><span class="tag decision">Discovery</span></div>
+    <div class="a">maap-py / pystac STAC search</div>
+    <div class="q">Replaces all cron downloads.</div>
+  </div>
+  <div class="decision-card">
+    <div class="q"><span class="tag decision">Orchestration</span></div>
+    <div class="a">External maap-py driver</div>
+    <div class="q">Same logic, different executor.</div>
+  </div>
+  <div class="decision-card">
+    <div class="q"><span class="tag decision">MRVA queue</span></div>
+    <div class="a">Large queue (~64 GB)</div>
+    <div class="q">Confirmed available.</div>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2>2. What goes away</h2>
+
+<ul>
+  <li><span class="tag gone">Deleted</span> <strong>Cron-based L2P downloads</strong> &mdash;
+      <code>podaac-data-subscriber</code>, <code>.netrc</code> credentials, the stateful <code>.update</code>
+      watermark, the entire <code>mur-l2p-dl</code> stage. L2P granules already live in-region on S3; we
+      reference them directly via STAC.</li>
+  <li><span class="tag gone">Deleted</span> <strong>Local filesystem assumptions</strong> &mdash;
+      <code>Path.exists()</code> for cached BICs, the NAS mount paths, year/DOY directory globs. Replaced by
+      S3 lookups in the driver.</li>
+  <li><span class="tag gone">Deleted</span> <strong>Positional argument convention</strong> &mdash;
+      all containers switch to named args (<code>--year</code>, <code>--doy</code>, etc.).</li>
+</ul>
+
+<!-- ================================================================== -->
+<h2>3. Target architecture</h2>
+
+<pre class="arch"><code>maap-py driver (ADE notebook / scheduled cron)
+   |
+   |  STAC/CMR queries (pystac-client) resolve:
+   |    - L2P granule S3 hrefs per sensor/day (no download needed)
+   |    - Existing BIC/iquam/landice/CSP outputs in S3 (skip-if-exists)
+   |
+   |  For each analysis day in the processing window (sequential):
+   |
+   |- OGC execute: mur-landice  --year Y --doy D                          &rarr; S3: landice/{p011,p01}
+   |- OGC execute: mur-iquam    --year Y --doy D                          &rarr; S3: iquam/.bii
+   |- OGC execute: mur-l2p      --sensor S --year Y --doy D --rewrite 0   &rarr; S3: bic/{sensor}/{year}/{doy}.bic.gz
+   |      (input: L2P .nc hrefs from STAC &mdash; DPS stages into input/)
+   |
+   '- OGC execute: mur-mrva     --year Y --doy D --mode nrt               &rarr; S3: netcdf/ + csp/
+          (inputs: BIC + iquam + landice + prior-day CSP &mdash; all staged into input/)
+          (output CSP feeds into next day's MRVA job)
+   |
+   [next day: repeat, chaining prior CSP &rarr; ...]</code></pre>
+
+<p>The driver handles all STAC queries, caching checks, NRT/REA logic, and stage ordering.
+   Containers remain science-focused: read <code>input/</code>, write <code>output/</code>,
+   accept named arguments.</p>
+
+<!-- ================================================================== -->
+<h2>4. Container changes &mdash; the dual-mode approach</h2>
+
+<h3>4.1 &nbsp;Named arguments (OGC requirement)</h3>
+
+<p>The OGC Application Package model requires named arguments:
+   <code>run.sh --year 2026 --doy 15 --mode nrt</code> instead of <code>run.sh 2026 15 nrt</code>.
+   This is the <strong>one universal change</strong> to all four containers.</p>
+
+<p>Implementation: a thin wrapper in each <code>entrypoint.sh</code> that detects whether args are named
+   (<code>--year</code> present) or positional (first arg is a bare number). This lets the same image work
+   both locally (<code>docker run mur-landice 2026 15</code>) and on MAAP
+   (<code>--year 2026 --doy 15</code>).</p>
+
+<pre><code># Dual-mode argument parsing (sketch for all 4 containers)
+if [[ "$1" == --* ]]; then
+    # Named mode (MAAP / OGC)
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --year)   YEAR="$2";   shift 2 ;;
+            --doy)    DOY="$2";    shift 2 ;;
+            --mode)   MODE="$2";   shift 2 ;;
+            --sensor) SENSOR="$2"; shift 2 ;;
+            # ... per container
+            *) shift ;;
+        esac
+    done
+else
+    # Positional mode (local docker run, backwards compatible)
+    YEAR="$1"; DOY="$2"; MODE="$3"  # etc.
+fi</code></pre>
+
+<h3>4.2 &nbsp;Input/output path abstraction</h3>
+
+<p>Each container already reads from fixed internal paths (<code>/input</code>, <code>/data/input</code>,
+   <code>/data/output</code>). For MAAP, the entrypoint checks an env var
+   (<code>MAAP_MODE=1</code> or simply detects <code>./input/</code> exists) and remaps:</p>
+
+<table>
+  <thead><tr><th>Mode</th><th>Input</th><th>Output</th></tr></thead>
+  <tbody>
+    <tr><td>Local Docker</td><td>Bind-mounted host dir at <code>/input</code> or <code>/data/input</code></td><td>Bind-mounted host dir at <code>/output</code> or <code>/data/output</code></td></tr>
+    <tr><td>MAAP / OGC</td><td><code>$PWD/input/</code> (DPS-staged files)</td><td><code>$PWD/output/</code> (auto-uploaded to S3)</td></tr>
+  </tbody>
+</table>
+
+<p>This is a symlink or variable assignment at the top of <code>entrypoint.sh</code> &mdash; no MATLAB code changes.</p>
+
+<h3>4.3 &nbsp;Static resources (coefficients, grids, masks)</h3>
+
+<p>MRVA needs ~5&nbsp;GB of static resources (analysis grids, land masks, prior-day coefficients) that don't
+   change run-to-run. Staging them fresh every job is wasteful. Two options:</p>
+<ul>
+  <li><strong>Bake into the image</strong> (recommended if &lt;2&nbsp;GB after compression). These are already in
+      <code>testing/static-resources</code> and rarely change. Simplest, no per-job I/O cost.</li>
+  <li><strong>S3 Mountpoint FUSE</strong> if they're large or independently versioned &mdash; the container
+      mounts an S3 prefix as a local path. Verify DPS workers permit FUSE. Alternatively, the driver
+      passes them as CWL <code>Directory</code> inputs staged once per job.</li>
+</ul>
+<p>Either way MRVA reads local paths &mdash; it never calls S3 APIs directly.</p>
+
+<!-- ================================================================== -->
+<h2>5. Per-container delta analysis</h2>
+
+<p>Here is what actually changes in each container, beyond the universal named-args wrapper.</p>
+
+<table class="delta-table">
+  <thead><tr><th>Container</th><th>Today (local Docker)</th><th>On MAAP</th><th>What changes</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>landice</code></td>
+      <td>Downloads OSISAF ice from <code>thredds.met.no</code> at runtime; outputs to mounted <code>/output/{p011,p01}</code></td>
+      <td>Same runtime download; outputs to <code>$PWD/output/{p011,p01}</code></td>
+      <td><strong>Minimal.</strong> Named args + output path remap. Confirm worker egress to <code>thredds.met.no</code>.</td>
+    </tr>
+    <tr>
+      <td><code>iquam</code></td>
+      <td>Downloads from NOAA <code>star.nesdis.noaa.gov</code> at runtime; caches monthly NetCDF to <code>/data/cache</code></td>
+      <td>Same runtime download. Cache is ephemeral (re-downloads each run) unless we persist to S3.</td>
+      <td><strong>Small.</strong> Named args + output path. <em>Optional:</em> persist <code>/data/cache</code> to S3 between runs for speed; not required for correctness.</td>
+    </tr>
+    <tr>
+      <td><code>l2p</code></td>
+      <td>Reads raw L2P <code>.nc</code> files from local <code>input_dir/sensor/YYYY/DOY/</code> via glob</td>
+      <td>Reads raw L2P <code>.nc</code> files from <code>$PWD/input/</code> (DPS-staged from STAC-discovered S3 hrefs)</td>
+      <td><strong>Discovery moves to STAC (in the driver, not in the container).</strong> The container itself barely changes &mdash;
+          it still reads local <code>.nc</code> files from a directory; DPS just put them there instead of a cron job.
+          Named args. BIC output cached to a deterministic S3 prefix.</td>
+    </tr>
+    <tr>
+      <td><code>mrva</code></td>
+      <td>Reads BIC/iquam/landice from mounted dirs; reads static-resources from mounted dir; writes NetCDF + CSP to mounted output dir</td>
+      <td>Reads staged inputs from <code>$PWD/input/{bic,iquam,landice}</code>; static resources baked in or staged; writes to <code>$PWD/output/</code></td>
+      <td><strong>Input fan-in managed by the driver</strong> (enumerates BIC/iquam/landice S3 hrefs for the dayrange window and passes as CWL File inputs).
+          Named args. Static resources strategy. The "skip if REA output exists" check moves into the driver (S3/STAC lookup before submitting the job).
+          <em>New:</em> output registration &mdash; publish final MUR L4 NetCDF to MAAP STAC (see section 6).</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>The pattern:</strong> containers stay "dumb" &mdash; read local files, write local files, accept named args.
+  All cloud-native intelligence (STAC discovery, S3 caching, stage chaining, output registration) lives in the orchestration driver.
+</div>
+
+<!-- ================================================================== -->
+<h2>6. Output registration (STAC)</h2>
+
+<h3>6.1 &nbsp;Which outputs need registration?</h3>
+
+<table>
+  <thead><tr><th>Output</th><th>Needs STAC?</th><th>Reason</th></tr></thead>
+  <tbody>
+    <tr><td>landice grids (p011/p01)</td><td>No</td><td>Intermediate; consumed only by MRVA via S3 href</td></tr>
+    <tr><td>iquam .bii files</td><td>No</td><td>Intermediate; consumed only by MRVA</td></tr>
+    <tr><td>L2P BIC files</td><td>No</td><td>Intermediate cache; consumed by MRVA. Deterministic S3 prefix is sufficient for lookup.</td></tr>
+    <tr><td><strong>MRVA NetCDF (MUR L4 SST)</strong></td><td><strong>Yes</strong></td><td>The deliverable product. Must be discoverable, searchable, and accessible.</td></tr>
+  </tbody>
+</table>
+
+<h3>6.2 &nbsp;STAC publish flow for MRVA output</h3>
+
+<p>After a successful MRVA job the <strong>driver</strong> (not the container) registers the output:</p>
+<ol>
+  <li>Reads the MRVA job's S3 output path via <code>getJobResult()</code>.</li>
+  <li>Constructs a <strong>STAC Item</strong> with metadata extracted from the NetCDF (or from the job params):
+      <ul>
+        <li><code>datetime</code>: analysis date</li>
+        <li><code>bbox</code>: [&minus;180, &minus;90, 180, 90] (global)</li>
+        <li><code>geometry</code>: global polygon</li>
+        <li><code>collection</code>: a pre-defined MUR L4 SST collection in MAAP STAC</li>
+        <li><code>assets.data.href</code>: the S3 path</li>
+        <li>Properties: version, mode (nrt/rea), processing date, etc.</li>
+      </ul>
+  </li>
+  <li>Publishes the STAC Item to <strong>MAAP STAC</strong> (the user-produced-data catalog at
+      <code>stac.maap-project.org</code>). This may require coordination with the MAAP data team to create
+      the collection initially, after which per-granule item ingest can be automated.</li>
+</ol>
+
+<div class="callout warn">
+  <strong>Confirm with MAAP ops:</strong> whether self-service STAC item ingest is available via API, or whether
+  collection creation + initial ingest requires the data team. Per-granule ingest after collection setup
+  should be automatable via <code>maap-py</code> or direct STAC Transaction API.
+</div>
+
+<!-- ================================================================== -->
+<h2>7. Data flow: STAC replaces downloads</h2>
+
+<h3>7.1 &nbsp;L2P granule discovery (the big win)</h3>
+
+<p>Today: cron runs <code>podaac-data-subscriber</code> hourly with Earthdata creds and a <code>.update</code>
+   watermark, downloading <code>.nc</code> files to disk. The L2P container then globs that disk directory.</p>
+
+<p>On MAAP: <strong>the granules are already in S3</strong> (PODAAC distributes through NASA's cloud archive).
+   No download. No credentials. No watermark state. The driver does a STAC query:</p>
+
+<pre><code>from pystac_client import Client
+
+cat = Client.open("https://stac.maap-project.org/")  # or CMR STAC
+items = cat.search(
+    collections=["AMSR2-REMSS-L2P-v8.2"],
+    datetime="2026-07-01/2026-07-02",
+    bbox=[-180, -90, 180, 90]
+).items()
+
+# These are already in-region S3 — pass directly as CWL File inputs
+granule_hrefs = [item.assets["data"].href for item in items]
+# e.g. s3://podaac-ops-cumulus-protected/AMSR2-REMSS-L2P-v8.2/...</code></pre>
+
+<p>The driver passes these hrefs to the L2P job as CWL <code>File</code> inputs. DPS stages them into
+   <code>input/</code>. The container reads local files exactly as today. <strong>Zero container code change
+   for discovery.</strong></p>
+
+<h3>7.2 &nbsp;BIC caching (same logic, S3 backend)</h3>
+
+<p>The BIC reuse pattern (one BIC per sensor-per-day consumed by ~5 overlapping analysis dates) is
+   preserved unchanged. Only the storage medium and existence-check move:</p>
+
+<table>
+  <thead><tr><th>Concern</th><th>Today (local)</th><th>On MAAP</th></tr></thead>
+  <tbody>
+    <tr><td>Write BIC</td><td>Container writes to mounted dir</td><td>Container writes to <code>output/</code>; DPS uploads to a deterministic S3 prefix<br><code>s3://&lt;bucket&gt;/mur/bic/{sensor}/{year}/{doy}.bic.gz</code></td></tr>
+    <tr><td>Check "already exists?"</td><td><code>bic_file.exists()</code> in the orchestrator</td><td>S3 <code>HEAD</code> / list in the driver before submitting the job</td></tr>
+    <tr><td>Stablat rewrite</td><td><code>days_old &lt; stablat</code> &rarr; rewrite=1</td><td>Same logic in driver; passes <code>--rewrite 1</code> and job overwrites the S3 object</td></tr>
+    <tr><td>MRVA consumption</td><td>MRVA reads from mounted bic dir</td><td>Driver lists BIC S3 hrefs for the dayrange window; passes as CWL File inputs to MRVA; DPS stages into <code>input/bic/</code></td></tr>
+  </tbody>
+</table>
+
+<div class="callout ok">
+  <strong>The caching works as-is.</strong> All you need is a deterministic S3 naming convention (mirror the
+  existing <code>{sensor}/{year}/{doy}.bic.gz</code> layout) so the driver can find previously-built BICs
+  without a catalog.
+</div>
+
+<!-- ================================================================== -->
+<h2>8. OGC Application Package registration</h2>
+
+<h3>8.1 &nbsp;Why OGC (not classic HySDS algorithm_config.yaml)</h3>
+<ul>
+  <li>MAAP's OGC path is purpose-built for "bring your own container" &mdash; you point at an arbitrary
+      image in a registry; no need for <code>maap_base</code> or conda.</li>
+  <li>Inputs/outputs are declared in CWL (typed: <code>File</code>, <code>Directory</code>, <code>string</code>,
+      <code>int</code>) with explicit stage-in/stage-out semantics.</li>
+  <li>The container is invoked via CWL's <code>DockerRequirement.dockerPull</code> with a
+      <code>baseCommand</code> + <code>arguments</code>. Named args are mandatory.</li>
+</ul>
+
+<h3>8.2 &nbsp;Per-algorithm CWL sketch</h3>
+
+<p>Each container gets a CWL <code>CommandLineTool</code> + wrapping <code>Workflow</code>.
+   Example for <code>mur-l2p</code>:</p>
+
+<pre><code>class: CommandLineTool
+baseCommand: ["/opt/l2p/bin/entrypoint.sh"]
+requirements:
+  DockerRequirement:
+    dockerPull: mas.maap-project.org/&lt;org&gt;/mur-l2p:latest
+
+inputs:
+  sensor:
+    type: string
+    inputBinding: { prefix: "--sensor" }
+  year:
+    type: int
+    inputBinding: { prefix: "--year" }
+  doy:
+    type: int
+    inputBinding: { prefix: "--doy" }
+  rewrite:
+    type: int
+    inputBinding: { prefix: "--rewrite" }
+  granules:
+    type: File[]
+    inputBinding: { prefix: "--input-dir" }  # or staged to input/
+
+outputs:
+  bic_file:
+    type: File
+    outputBinding: { glob: "output/*.bic.gz" }</code></pre>
+
+<div class="callout warn">
+  <strong>Confirm:</strong> exact CWL schema against the MAAP OGC
+  <a href="https://docs.maap-project.org/en/ogc/technical_tutorials/ogc/build_application_packages.html">registration tutorial</a>
+  and <a href="https://docs.maap-project.org/en/ogc/technical_tutorials/ogc/transition_to_ogc.html">transition guide</a>
+  during implementation. The sketch above shows the pattern; field names and input-binding semantics
+  may differ.
+</div>
+
+<h3>8.3 &nbsp;Image registry</h3>
+<ul>
+  <li>Build locally (where the MATLAB license server is reachable), tag, push to
+      <code>mas.maap-project.org/&lt;org&gt;/mur-{landice,l2p,iquam,mrva}:&lt;version&gt;</code>.</li>
+  <li><code>network.lic</code> is compile-time only; <strong>no license in the deployed image</strong>.</li>
+  <li>The OpenShift arbitrary-UID pattern already in the Dockerfiles (<code>chgrp -R 0</code>,
+      <code>HOME=/tmp</code>, <code>MCR_CACHE_ROOT=/tmp</code>) is exactly what DPS workers expect.</li>
+</ul>
+
+<!-- ================================================================== -->
+<h2>9. The orchestration driver (where the "magic" lives)</h2>
+
+<p>New <code>mur/run_mur_maap.py</code> alongside the existing <code>run_mur_pipeline.py</code> (which continues
+   to work for local Docker). Same decision logic, different executor.</p>
+
+<h3>What the driver does (all cloud-native concerns live here):</h3>
+<ol>
+  <li><strong>Date/mode calculation</strong> &mdash; unchanged: <code>mur_date</code>, <code>calculate_processing_window</code>,
+      <code>is_nrt_mode</code>, stablat, dayrange.</li>
+  <li><strong>STAC discovery</strong> &mdash; queries CMR/MAAP STAC for L2P granule S3 hrefs per sensor/day.</li>
+  <li><strong>Cache check</strong> &mdash; S3 HEAD on the deterministic BIC/iquam/landice prefixes; skips jobs
+      whose outputs already exist (same semantics as <code>Path.exists()</code> today).</li>
+  <li><strong>Job submission</strong> &mdash; OGC API Processes execute per container, passing named args +
+      File/Directory inputs.</li>
+  <li><strong>Polling + chaining</strong> &mdash; waits for upstream stages, collects S3 output hrefs, feeds
+      them to downstream stages (L2P outputs &rarr; MRVA inputs).</li>
+  <li><strong>STAC publish</strong> &mdash; after MRVA success, constructs and publishes STAC Item for the
+      MUR L4 SST granule.</li>
+</ol>
+
+<pre><code># Pseudo-flow in the driver
+for process_date in date_window:
+    is_nrt = is_nrt_mode(process_date, day1)
+
+    # Preprocessing (parallel where possible)
+    landice_job = submit("mur-landice", year=Y, doy=D)
+    iquam_job   = submit("mur-iquam",   year=Y, doy=D)
+
+    # L2P per sensor (STAC query + BIC cache check)
+    for sensor in active_sensors:
+        for data_day in dayrange_window(process_date):
+            if bic_exists_in_s3(sensor, data_day) and not needs_rewrite(data_day):
+                continue
+            granules = stac_search(sensor, data_day)  # S3 hrefs, no download
+            submit("mur-l2p", sensor=sensor, year=Y, doy=D, rewrite=R, inputs=granules)
+
+    # Wait for all preprocessing
+    wait_all([landice_job, iquam_job, *l2p_jobs])
+
+    # MRVA (fan-in all preprocessed outputs)
+    bic_hrefs     = list_s3("mur/bic/", sensor_days)
+    iquam_hrefs   = list_s3("mur/iquam/", ...)
+    landice_hrefs = list_s3("mur/landice/", ...)
+    mrva_job = submit("mur-mrva", year=Y, doy=D, mode=mode,
+                      inputs=[bic_hrefs, iquam_hrefs, landice_hrefs])
+
+    # STAC publish
+    wait(mrva_job)
+    publish_stac_item(mrva_job.output_href, process_date, mode)</code></pre>
+
+<!-- ================================================================== -->
+<h2>10. MRVA decomposition: one job per analysis day</h2>
+
+<h3>10.1 &nbsp;Why break up the multi-day loop</h3>
+
+<p>Today <code>run_mur_pipeline.py</code> loops over the processing window (up to 9 days) and calls MRVA
+   once per day sequentially. On MAAP the same pattern applies — but as <strong>one DPS job per analysis day</strong>
+   rather than one giant multi-day job.</p>
+
+<div class="callout ok">
+  <strong>Benefits of per-day MRVA jobs:</strong>
+  <ul style="margin:.3rem 0">
+    <li><strong>Smaller blast radius</strong> — a failure on day 5 doesn't lose days 1–4</li>
+    <li><strong>Better resource accounting</strong> — each job runs 30–90 min, well within queue timeouts</li>
+    <li><strong>Restartable</strong> — retry a single failed day without re-running the entire window</li>
+    <li><strong>Observable</strong> — per-day job status, logs, memory usage tracked independently</li>
+    <li><strong>Fits cloud billing</strong> — precise per-day cost attribution</li>
+  </ul>
+</div>
+
+<h3>10.2 &nbsp;The day-to-day dependency: prior CSP coefficients</h3>
+
+<p>MRVA is <em>not</em> embarrassingly parallel across days. Each analysis day uses the <strong>prior day's CSP
+   (coefficient) output</strong> as its starting first-guess. This is why production processes days in order.
+   The dependency chain:</p>
+
+<pre class="arch"><code>Day N-1 MRVA  ──CSP output──&gt;  Day N MRVA (--prior-csp &lt;S3 href&gt;)  ──CSP output──&gt;  Day N+1 MRVA ...
+</code></pre>
+
+<p>The driver submits MRVA jobs <strong>sequentially</strong>, passing the prior day's CSP S3 href as a
+   CWL File input to the next:</p>
+
+<pre><code># Driver pseudo-code for the MRVA date loop
+prior_csp_href = get_latest_csp_from_s3(day_before_window)  # cold-start / last operational run
+
+for process_date in date_window:   # e.g. T-9 through T-1
+    mode = "rea" if process_date <= day1 else "nrt"
+    mrva_job = submit("mur-mrva",
+                      year=Y, doy=D, mode=mode,
+                      prior_csp=prior_csp_href,
+                      bic_inputs=bic_hrefs[process_date],
+                      iquam_input=iquam_hrefs[process_date],
+                      landice_input=landice_hrefs[process_date])
+    wait(mrva_job)
+    prior_csp_href = mrva_job.output("csp")   # chain to next day
+    publish_stac_item(mrva_job.output("netcdf"), process_date, mode)</code></pre>
+
+<h3>10.3 &nbsp;Cold start: where does the first day's prior-CSP come from?</h3>
+
+<p>Three cases:</p>
+<ul>
+  <li><strong>Normal operations:</strong> yesterday's MRVA run already produced a CSP file sitting in S3 at the
+      deterministic prefix. The driver retrieves it.</li>
+  <li><strong>First-ever run / gap recovery:</strong> MRVA uses a static climatological first-guess (already
+      part of the static resources baked into the image or staged from S3). No external dependency.</li>
+  <li><strong>Reprocessing (--date):</strong> the driver looks up the CSP from the day immediately before the
+      reprocessing window in S3.</li>
+</ul>
+
+<h3>10.4 &nbsp;Container change for per-day mode</h3>
+
+<p>The MRVA container already processes a single (year, doy, mode) tuple per invocation — no change
+   to its core interface. The only new input is <code>--prior-csp &lt;path&gt;</code>, which the entrypoint
+   maps to the appropriate internal location (where <code>mrva4com.m</code> expects the prior-day CSP file).
+   If omitted, MRVA falls back to the static first-guess (existing behavior for the first day of a window).</p>
+
+<table>
+  <thead><tr><th>Concern</th><th>Today (local multi-day loop)</th><th>On MAAP (per-day job)</th></tr></thead>
+  <tbody>
+    <tr><td>Multi-day sequencing</td><td>Python loop in <code>run_mur_pipeline.py</code></td><td>Python loop in <code>run_mur_maap.py</code> submitting one job per day</td></tr>
+    <tr><td>Prior-day CSP handoff</td><td>Persisted on local disk between loop iterations</td><td>Passed as CWL File input; S3 href from prior job's output</td></tr>
+    <tr><td>Cold start first-guess</td><td>Read from static-resources mount</td><td>Baked into image or staged from S3 (same file)</td></tr>
+    <tr><td>Failure handling</td><td>Entire window aborts</td><td>Driver retries failed day; prior days' outputs persist in S3</td></tr>
+    <tr><td>Max job duration</td><td>Up to 16 h (full window)</td><td>30–90 min per day (comfortably within queue limits)</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>No shared state between days except the CSP handoff.</strong> BIC/iquam/landice inputs are independently
+  staged per job. The only sequential dependency is the CSP coefficient chain — and that's just one file passed
+  from job N to job N+1 via S3.
+</div>
+
+<!-- ================================================================== -->
+<h2>11. Summary: what's truly different per container</h2>
+<p><em>(See section 10 for the MRVA per-day decomposition detail.)</em></p>
+
+<table class="delta-table">
+  <thead><tr><th>Container</th><th>Container-level changes</th><th>Orchestration-level changes</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>landice</code></td>
+      <td>Named args. Output path env check. That's it.</td>
+      <td>Submit via OGC. Confirm egress to <code>thredds.met.no</code>.</td>
+    </tr>
+    <tr>
+      <td><code>iquam</code></td>
+      <td>Named args. Output path env check. Optional: cache dir persistence.</td>
+      <td>Submit via OGC. Confirm egress to <code>star.nesdis.noaa.gov</code>.</td>
+    </tr>
+    <tr>
+      <td><code>l2p</code></td>
+      <td>Named args. Output path env check. Reads from <code>input/</code> instead of globbing a year/DOY tree
+          (trivial &mdash; it already reads all <code>.nc</code> in a dir).</td>
+      <td><strong>Discovery moves here:</strong> driver does STAC query, passes S3 hrefs as CWL File inputs.
+          <strong>BIC caching moves here:</strong> S3 existence check + deterministic prefix replaces <code>Path.exists()</code>.</td>
+    </tr>
+    <tr>
+      <td><code>mrva</code></td>
+      <td>Named args. Output/input path env check. Static resources strategy (bake in or stage).
+          New <code>--prior-csp</code> input for day-to-day coefficient chain.</td>
+      <td><strong>Per-day decomposition</strong> (section 10): one job per analysis day, submitted sequentially.
+          Prior day's CSP passed as File input. Fan-in of BIC+iquam+landice S3 hrefs.
+          "Skip if exists" via S3/STAC. <strong>STAC publish</strong> per day.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>Bottom line:</strong> the container changes are small and mechanical (named args + path env check).
+  The real development effort is the <strong>orchestration driver</strong> &mdash; STAC queries, S3 caching logic,
+  OGC job submission, output chaining, and STAC publish. This is purely Python/maap-py work and doesn't touch
+  MATLAB or Fortran.
+</div>
+
+<!-- ================================================================== -->
+<h2>12. Open items to confirm with MAAP ops</h2>
+<ul>
+  <li>Exact large-queue name/specs (RAM, vCPU, max walltime, disk) for MRVA.</li>
+  <li>Custom-image push path/permissions to <code>mas.maap-project.org</code>.</li>
+  <li>Whether DPS workers allow <code>ulimit -s unlimited</code> and the arbitrary-UID / group-0 pattern.</li>
+  <li>Worker egress to <code>thredds.met.no</code> (landice) and <code>star.nesdis.noaa.gov</code> (iquam).</li>
+  <li>STAC item ingest API access (self-service after collection creation, or requires data team per-item?).</li>
+  <li>CWL <code>File[]</code> input limits &mdash; MRVA may have 50+ staged files; confirm DPS handles this.</li>
+  <li>S3 Mountpoint FUSE availability (if static resources are too large to bake into the image).</li>
+</ul>
+
+<!-- ================================================================== -->
+<h2>13. Verification plan</h2>
+<ol class="steps">
+  <li><strong>Single stage smoke test.</strong> Register <code>mur-iquam</code> (self-contained, downloads from NOAA).
+      Submit on a small queue. Confirm <code>.bii</code> appears in S3 <code>output/</code>.</li>
+  <li><strong>STAC-driven L2P.</strong> Driver queries STAC for one sensor-day, passes hrefs to <code>mur-l2p</code> job.
+      Confirm BIC lands at the deterministic S3 prefix. Run a second time: confirm the driver's cache check
+      skips re-submission.</li>
+  <li><strong>MRVA on the large queue.</strong> Submit one NRT analysis day with chained BIC + iquam + landice S3
+      inputs. Confirm MUR NetCDF is produced.</li>
+  <li><strong>Scientific equivalence.</strong> Compare MAAP-produced NetCDF against a local <code>docker&nbsp;run</code>
+      reference for the same date (reuse <code>mur/eval.py</code> / <code>mur/compare_bic.py</code>). Must be
+      byte-comparable within floating-point tolerance.</li>
+  <li><strong>Full-day driver test.</strong> Run <code>run_mur_maap.py --date &lt;D&gt; -p -1</code> (NRT) and a REA
+      boundary day. Confirm stage ordering, NRT/REA mode, stablat skip/rewrite, and STAC publish all behave
+      correctly.</li>
+</ol>
+
+<!-- ================================================================== -->
+<footer>
+  Generated for the MUR containerization effort.<br>
+  Sources:
+  <a href="https://docs.maap-project.org/en/ogc/technical_tutorials/ogc/build_application_packages.html">OGC App Packages</a> &middot;
+  <a href="https://docs.maap-project.org/en/ogc/technical_tutorials/ogc/transition_to_ogc.html">Transition to OGC</a> &middot;
+  <a href="https://docs.maap-project.org/en/latest/technical_tutorials/search/searching_the_stac_catalog.html">STAC Search</a> &middot;
+  <a href="https://docs.maap-project.org/en/latest/system_reference_guide/jobs_maappy.html">Job Management</a> &middot;
+  <a href="https://docs.maap-project.org/en/latest/technical_tutorials/search/catalog.html">Dual Catalog</a>
+</footer>
+
+</div>
+</body>
+</html>

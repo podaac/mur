@@ -8,7 +8,7 @@ The IQUAM processing module has been containerized using a multi-stage Docker bu
 - **License-free runtime:** Only the build process requires a MATLAB license
 - **Reproducible builds:** Consistent execution environment across systems
 - **Simplified deployment:** No MATLAB installation needed on production systems
-- **Automated NRT processing:** Container runs in NRT mode by default
+- **Explicit inputs:** Every invocation is told exactly which day, mode, and reference date to process — the container never infers "today" or a processing window itself
 
 ## Architecture
 
@@ -30,18 +30,16 @@ The container build uses two stages:
 
 ### Directory Structure
 
-The container uses a fixed directory structure optimized for volume mounting:
+The container uses a fixed directory structure optimized for volume mounting. There is no cache directory — the module has never persisted downloaded NetCDF data between runs (see `makedailyiquam.m`'s own comment: "no persistent cache needed... matches production behavior and avoids cache staleness issues").
 
 ```
 /data/                          # Container working directory
 ├── output/iquam/              # Output .bii files (REQUIRED mount)
 │   └── YYYY/
 │       └── Global_IQUAM0_YYYY_DDD.bii
-├── cache/iquam/               # Monthly NetCDF cache (REQUIRED mount)
-│   └── iquam.YYYY.MM.mat
 ├── logs/                      # Processing logs (REQUIRED mount)
 │   └── buoy.log
-└── /tmp/makebic/              # Temporary workspace (ephemeral)
+└── /tmp/makebic/              # Temporary workspace (ephemeral, not mounted)
 ```
 
 ## Volume Mounts
@@ -53,16 +51,14 @@ These directories must be mounted from the host system for the container to func
 | Container Path | Purpose | Access | Typical Host Path | Notes |
 |----------------|---------|--------|-------------------|-------|
 | `/data/output/iquam` | Daily .bii output files | Read/Write | `/data/iquam/output` | Organized by year subdirectories |
-| `/data/cache/iquam` | Monthly NetCDF cache | Read/Write | `/data/iquam/cache` | Avoids re-downloading data |
 | `/data/logs` | Processing logs | Read/Write | `/data/iquam/logs` | Contains buoy.log |
+
+`/tmp/makebic` (the working directory) does not need a host mount — it's ephemeral scratch space inside the container, cleaned at the start of each run.
 
 ### Volume Persistence
 
-**Important:** The cache directory (`/data/cache/iquam`) should be a persistent volume to avoid re-downloading large NetCDF files (~500MB per month) on each container run.
-
 **Storage Requirements:**
 - **Output:** ~5 MB per day, ~1.8 GB per year
-- **Cache:** ~100 MB per month processed, ~1.2 GB per year
 - **Logs:** Grows indefinitely (rotate externally)
 - **Temporary:** ~500 MB peak (ephemeral, can use tmpfs)
 
@@ -73,21 +69,41 @@ These directories must be mounted from the host system for the container to func
 - Docker or compatible container runtime
 - Network access to JPL MATLAB license servers during build
 - Valid MATLAB and MATLAB Compiler licenses
+- `network.lic` in the `mur/` directory (`cp network.lic.example network.lic`, then edit)
 - ~10 GB disk space for build process
 
 ### Build Command
 
-**IMPORTANT:** The Dockerfile references shared utilities from the `../common` folder, so the build context must include the parent `mur` directory. Build from within the iquam directory and set the context to the parent (`..`).
+Use `build_module.sh` from the `mur/` directory:
+
+```bash
+cd mur
+./build_module.sh iquam
+```
+
+That builds the `mur-matlab-base:r2024b` image first if it's missing, verifies
+`network.lic`, builds `--platform linux/amd64` with the parent `mur/` directory as
+context, and tags the image `mur-iquam:latest` — the name the pipeline config expects.
+
+### Manual Build (Advanced)
+
+Only needed when `build_module.sh` doesn't fit: a custom tag, an external CI system, or
+debugging the Dockerfile itself.
+
+**IMPORTANT:** The Dockerfile references shared utilities from the `../common` folder, so
+the build context must include the parent `mur` directory. Build from within the iquam
+directory and set the context to the parent (`..`). The base image must already exist —
+build it with `./build_matlab_base.sh` first.
 
 ```bash
 # Navigate to the iquam directory
 cd mur/iquam
 
 # Build for AMD64 (most common Linux servers)
-docker build --platform linux/amd64 -f Dockerfile -t iquam:latest ..
+docker build --platform linux/amd64 -f Dockerfile -t mur-iquam:latest ..
 
 # Or using Apple's container tools on macOS
-container build --arch amd64 -f Dockerfile -t iquam:latest ..
+container build --arch amd64 -f Dockerfile -t mur-iquam:latest ..
 ```
 
 **Note:** The `..` at the end sets the build context to the parent `mur` directory, which allows the Dockerfile to access both `iquam/` and `common/` folders.
@@ -115,52 +131,55 @@ Common causes:
 The Dockerfile includes a 10-minute timeout for the mcc compilation. If your build consistently times out:
 1. Verify license server is responding
 2. Check that MATLAB Compiler license is available (not just base MATLAB)
-3. Increase timeout in Dockerfile line 72: `timeout 600s` → `timeout 1200s`
+3. Increase timeout in Dockerfile: `timeout 600s` → `timeout 1200s`
 
 ## Running the Container
 
 ### Basic Usage
 
-The container runs in **NRT mode by default** and processes the most recent available data:
+The container is **named-args-only** — it does not infer the date, mode, or window itself. All nine flags below are required; there is no "run with defaults" invocation:
 
 ```bash
 docker run --rm \
   --shm-size=512M \
   -v /local/path/output:/data/output/iquam \
-  -v /local/path/cache:/data/cache/iquam \
   -v /local/path/logs:/data/logs \
-  iquam:latest
+  mur-iquam:latest \
+  --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+  --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+  --buoy-day-range 3 --stability-latency 2
 ```
 
-### NRT Mode Operation
+### What One Invocation Does
 
-When the container runs, it automatically:
-1. Calculates the current date and determines the processing window (last 9 days)
-2. Downloads monthly IQUAM NetCDF files from NOAA STAR (if not cached)
-3. Extracts and processes daily observations
-4. Filters observations by quality level (≥5)
-5. Writes binary .bii files to `/data/output/iquam/YYYY/`
-6. Logs all operations to `/data/logs/buoy.log`
+Given the flags above, the container:
+1. Downloads monthly IQUAM NetCDF files from NOAA STAR for the `±buoy-day-range` window around the target day (no cache — always freshly downloaded)
+2. Extracts and processes daily observations for each offset day in that window
+3. Filters observations by quality level (≥5)
+4. Writes binary .bii files to `/data/output/iquam/YYYY/` for each offset day that needs (re)processing
+5. Logs all operations to `/data/logs/buoy.log`
 
-**Processing Window Details:**
-- **NRT Latency:** 1 day behind current date
-- **Scan Window:** 9 days backward
-- **Stability Window:** 2 days (files older than 2 days are not reprocessed)
-- **Temporal Range:** ±3 days for each analysis day
+**Who decides what to process:** the calling orchestrator (`run_mur_pipeline.py`/`run_mur_maap.py`) decides the target day, the NRT/REA mode, and the reference date — normally by iterating a 9-day scan window (1-day NRT latency, 4-day REA latency) and invoking this container once per day in that window. The container itself only ever processes the one day (plus its own `±buoy-day-range` sub-window) it's explicitly told about via flags:
+
+- **`--buoy-day-range`:** temporal window processed per invocation (±days around the target day)
+- **`--stability-latency`:** files older than this many days (relative to `--reference-date`) are not reprocessed unless missing
 
 ### Scheduled Execution
 
-For operational NRT processing, run the container on a daily schedule:
+For operational NRT processing, run the container on a daily schedule. The example below uses `date` to compute the flag values for "today" — in practice, prefer driving this from `run_mur_pipeline.py` (which already computes the NRT/REA window and mode) rather than reimplementing that logic in a shell script.
 
 **Using cron:**
 ```bash
 # Add to crontab (runs daily at 12:00 UTC)
-0 12 * * * /usr/bin/docker run --rm \
+0 12 * * * YEAR=$(date -u -d yesterday +\%Y) DOY=$(date -u -d yesterday +\%j) REF=$(date -u +\%Y-\%m-\%d) && \
+  /usr/bin/docker run --rm \
   --shm-size=512M \
   -v /data/iquam/output:/data/output/iquam \
-  -v /data/iquam/cache:/data/cache/iquam \
   -v /data/iquam/logs:/data/logs \
-  iquam:latest >> /var/log/iquam_cron.log 2>&1
+  mur-iquam:latest \
+  --year "$YEAR" --doy "$DOY" --mode nrt --reference-date "$REF" \
+  --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+  --buoy-day-range 3 --stability-latency 2 >> /var/log/iquam_cron.log 2>&1
 ```
 
 **Using systemd timer:**
@@ -173,12 +192,15 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/docker run --rm \
+Environment=YEAR=%Y DOY=%j
+ExecStart=/bin/sh -c '/usr/bin/docker run --rm \
   --shm-size=512M \
   -v /data/iquam/output:/data/output/iquam \
-  -v /data/iquam/cache:/data/cache/iquam \
   -v /data/iquam/logs:/data/logs \
-  iquam:latest
+  mur-iquam:latest \
+  --year $(date -u +%%Y) --doy $(date -u +%%j) --mode nrt --reference-date $(date -u +%%Y-%%m-%%d) \
+  --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+  --buoy-day-range 3 --stability-latency 2'
 
 [Install]
 WantedBy=multi-user.target
@@ -215,7 +237,10 @@ MATLAB Runtime requires adequate shared memory. **Always** include `--shm-size=5
 docker run --rm \
   --shm-size=512M \
   [other options] \
-  iquam:latest
+  mur-iquam:latest \
+  --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+  --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+  --buoy-day-range 3 --stability-latency 2
 ```
 
 **Without this flag, the container may:**
@@ -235,20 +260,21 @@ docker run --rm \
   --memory-swap="6g" \
   --cpus="2.0" \
   -v /data/iquam/output:/data/output/iquam \
-  -v /data/iquam/cache:/data/cache/iquam \
   -v /data/iquam/logs:/data/logs \
-  iquam:latest
+  mur-iquam:latest \
+  --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+  --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+  --buoy-day-range 3 --stability-latency 2
 ```
 
 **Resource Guidelines:**
 - **Minimum RAM:** 2 GB
 - **Recommended RAM:** 4 GB
 - **CPUs:** 1-2 (processing is I/O bound, not CPU intensive)
-- **Disk I/O:** Fast storage for cache directory improves performance
 
 ### MCR Cache Optimization
 
-Optimize MATLAB Runtime caching:
+This is the **MATLAB Runtime's own** startup cache (unrelated to IQUAM data — there is no IQUAM data cache). Optimize it the same way as the other containers in this pipeline:
 
 ```bash
 docker run --rm \
@@ -257,39 +283,21 @@ docker run --rm \
   -e MCR_CACHE_SIZE=1024M \
   -e MCR_CACHE_VERBOSE=true \
   -v /data/iquam/output:/data/output/iquam \
-  -v /data/iquam/cache:/data/cache/iquam \
   -v /data/iquam/logs:/data/logs \
-  iquam:latest
+  mur-iquam:latest \
+  --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+  --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+  --buoy-day-range 3 --stability-latency 2
 ```
 
 ### Network Optimization
 
-The container downloads data from NOAA STAR servers. If multiple containers run concurrently or network bandwidth is limited:
+The container downloads data from NOAA STAR servers on every run (there is no cache to avoid re-downloading). If multiple containers run concurrently or network bandwidth is limited:
 
-1. **Use a shared cache volume** across multiple container instances
-2. **Pre-download NetCDF files** to the cache directory
-3. **Set download timeouts** if using unreliable networks (requires modifying makedailyiquam.m)
+1. **Stagger scheduled runs** rather than launching many containers at once
+2. **Set download timeouts** if using unreliable networks (requires modifying `makedailyiquam.m`)
 
 ## Data Management
-
-### Cache Management
-
-The cache directory stores monthly MATLAB `.mat` files derived from IQUAM NetCDF downloads. These files are regenerated if:
-- The source NetCDF is newer than the cached .mat file
-- The cached file is corrupted or missing
-- The `rewrite` flag is set
-
-**Cache Cleanup Strategy:**
-
-```bash
-# Remove cache files older than 1 year (optional)
-find /data/iquam/cache -name "iquam.*.mat" -mtime +365 -delete
-
-# Remove specific month cache to force re-download
-rm /data/iquam/cache/iquam.2024.10.mat
-```
-
-**Note:** Deleting cache files forces re-download (~500MB per month) on next run.
 
 ### Log Management
 
@@ -338,9 +346,11 @@ Add a health check to ensure the container completed successfully:
 docker run --rm \
   --shm-size=512M \
   -v /data/iquam/output:/data/output/iquam \
-  -v /data/iquam/cache:/data/cache/iquam \
   -v /data/iquam/logs:/data/logs \
-  iquam:latest
+  mur-iquam:latest \
+  --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+  --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+  --buoy-day-range 3 --stability-latency 2
 
 EXIT_CODE=$?
 if [ $EXIT_CODE -ne 0 ]; then
@@ -414,7 +424,26 @@ spec:
           restartPolicy: OnFailure
           containers:
           - name: iquam
-            image: iquam:latest
+            image: mur-iquam:latest
+            args:
+              - "--year"
+              - "2026"
+              - "--doy"
+              - "220"
+              - "--mode"
+              - "nrt"
+              - "--reference-date"
+              - "2026-08-09"
+              - "--work-dir"
+              - "/tmp/makebic"
+              - "--log-dir"
+              - "/data/logs"
+              - "--output-dir"
+              - "/data/output/iquam"
+              - "--buoy-day-range"
+              - "3"
+              - "--stability-latency"
+              - "2"
             resources:
               requests:
                 memory: "2Gi"
@@ -425,8 +454,6 @@ spec:
             volumeMounts:
             - name: output
               mountPath: /data/output/iquam
-            - name: cache
-              mountPath: /data/cache/iquam
             - name: logs
               mountPath: /data/logs
             - name: shm
@@ -435,9 +462,6 @@ spec:
           - name: output
             persistentVolumeClaim:
               claimName: iquam-output-pvc
-          - name: cache
-            persistentVolumeClaim:
-              claimName: iquam-cache-pvc
           - name: logs
             persistentVolumeClaim:
               claimName: iquam-logs-pvc
@@ -446,6 +470,8 @@ spec:
               medium: Memory
               sizeLimit: 512Mi
 ```
+
+(In practice, the `--year`/`--doy`/`--mode`/`--reference-date` values need to be computed fresh per run rather than hardcoded as shown here — e.g. by templating this manifest from `run_mur_pipeline.py`'s own window/mode calculation, or by wrapping the CronJob's command in a small script that computes them at container start.)
 
 ### Persistent Volume Claims
 
@@ -461,18 +487,6 @@ spec:
   resources:
     requests:
       storage: 10Gi
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: iquam-cache-pvc
-  namespace: mur-sst
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 5Gi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -497,18 +511,36 @@ version: '3.8'
 
 services:
   iquam-processor:
-    image: iquam:latest
+    image: mur-iquam:latest
     shm_size: 512m
     mem_limit: 4g
     mem_reservation: 2g
     cpus: 2.0
     volumes:
       - iquam-output:/data/output/iquam
-      - iquam-cache:/data/cache/iquam
       - iquam-logs:/data/logs
     environment:
       - MCR_CACHE_ROOT=/tmp/mcr_cache
       - MCR_CACHE_SIZE=1024M
+    command:
+      - "--year"
+      - "${YEAR}"
+      - "--doy"
+      - "${DOY}"
+      - "--mode"
+      - "${MODE}"
+      - "--reference-date"
+      - "${REFERENCE_DATE}"
+      - "--work-dir"
+      - "/tmp/makebic"
+      - "--log-dir"
+      - "/data/logs"
+      - "--output-dir"
+      - "/data/output/iquam"
+      - "--buoy-day-range"
+      - "3"
+      - "--stability-latency"
+      - "2"
     restart: "no"  # Run once, don't restart automatically
 
 volumes:
@@ -518,12 +550,6 @@ volumes:
       type: none
       o: bind
       device: /data/iquam/output
-  iquam-cache:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /data/iquam/cache
   iquam-logs:
     driver: local
     driver_opts:
@@ -532,15 +558,9 @@ volumes:
       device: /data/iquam/logs
 ```
 
-Run manually:
+Run manually (with `YEAR`/`DOY`/`MODE`/`REFERENCE_DATE` set in the environment or a `.env` file):
 ```bash
-docker-compose up
-```
-
-Or schedule with cron:
-```bash
-# Run via cron
-0 12 * * * cd /path/to/docker-compose && /usr/local/bin/docker-compose up >> /var/log/iquam.log 2>&1
+YEAR=2026 DOY=220 MODE=nrt REFERENCE_DATE=2026-08-09 docker-compose up
 ```
 
 ## Security Considerations
@@ -554,9 +574,11 @@ docker run --rm \
   --shm-size=512M \
   --user $(id -u):$(id -g) \
   -v /data/iquam/output:/data/output/iquam \
-  -v /data/iquam/cache:/data/cache/iquam \
   -v /data/iquam/logs:/data/logs \
-  iquam:latest
+  mur-iquam:latest \
+  --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+  --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+  --buoy-day-range 3 --stability-latency 2
 ```
 
 **Important:** Ensure mounted directories have appropriate permissions for the specified UID/GID.
@@ -571,9 +593,11 @@ docker run --rm \
   --read-only \
   --tmpfs /tmp:size=2g \
   -v /data/iquam/output:/data/output/iquam \
-  -v /data/iquam/cache:/data/cache/iquam \
   -v /data/iquam/logs:/data/logs \
-  iquam:latest
+  mur-iquam:latest \
+  --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+  --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+  --buoy-day-range 3 --stability-latency 2
 ```
 
 ### Network Isolation
@@ -587,9 +611,11 @@ docker run --rm \
   --network iquam-net \
   --shm-size=512M \
   -v /data/iquam/output:/data/output/iquam \
-  -v /data/iquam/cache:/data/cache/iquam \
   -v /data/iquam/logs:/data/logs \
-  iquam:latest
+  mur-iquam:latest \
+  --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+  --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+  --buoy-day-range 3 --stability-latency 2
 ```
 
 ## Troubleshooting
@@ -604,19 +630,21 @@ docker run --rm \
 docker run -it --rm \
   --shm-size=512M \
   -v /data/iquam/output:/data/output/iquam \
-  -v /data/iquam/cache:/data/cache/iquam \
   -v /data/iquam/logs:/data/logs \
-  iquam:latest \
-  /bin/bash
+  --entrypoint /bin/bash \
+  mur-iquam:latest
 
-# Manually run entrypoint to see errors
-/opt/iquam/bin/entrypoint.sh
+# Manually run entrypoint to see errors (all 9 flags required)
+/opt/iquam/bin/entrypoint.sh --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+  --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+  --buoy-day-range 3 --stability-latency 2
 ```
 
 **Common causes:**
 - Missing or inaccessible volume mounts
 - Insufficient permissions on mounted directories
 - MCR initialization failure (check shm-size)
+- A required flag omitted, or an unrecognized flag passed — the entrypoint prints a usage message and exits non-zero (positional arguments are not accepted at all)
 
 ### No Output Files Created
 
@@ -633,15 +661,16 @@ grep -i "error\|cannot\|failed" /data/iquam/logs/buoy.log
 # Verify output directory is writable
 docker run --rm \
   -v /data/iquam/output:/data/output/iquam \
-  iquam:latest \
-  touch /data/output/iquam/test.txt
+  --entrypoint /bin/sh \
+  mur-iquam:latest \
+  -c "touch /data/output/iquam/test.txt"
 ```
 
 **Common causes:**
 - Output directory not writable
 - Data download failures (check network/firewall)
 - NOAA server unavailable
-- Incorrect date calculation (future dates skipped)
+- `--reference-date` is in the past relative to the day being processed, so every offset day in the `±buoy-day-range` window was skipped as a future date
 
 ### Memory Errors
 
@@ -655,14 +684,16 @@ docker run --rm \
   --memory="8g" \
   --memory-swap="16g" \
   -v /data/iquam/output:/data/output/iquam \
-  -v /data/iquam/cache:/data/cache/iquam \
   -v /data/iquam/logs:/data/logs \
-  iquam:latest
+  mur-iquam:latest \
+  --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+  --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+  --buoy-day-range 3 --stability-latency 2
 ```
 
 ### Network Download Failures
 
-**Symptoms:** wget errors in logs, missing cache files
+**Symptoms:** wget errors in logs
 
 **Check:**
 ```bash
@@ -670,8 +701,8 @@ docker run --rm \
 curl -I https://www.star.nesdis.noaa.gov/pub/socd/sst/iquam/v2.10/
 
 # Check if firewall/proxy is blocking
-docker run --rm iquam:latest \
-  wget --spider https://www.star.nesdis.noaa.gov/pub/socd/sst/iquam/v2.10/
+docker run --rm --entrypoint wget mur-iquam:latest \
+  --spider https://www.star.nesdis.noaa.gov/pub/socd/sst/iquam/v2.10/
 ```
 
 **Solutions:**
@@ -683,33 +714,34 @@ docker run --rm iquam:latest \
 
 ### REA Mode Support
 
-Currently, the container operates in **NRT mode only**. Future enhancements will add REA mode with:
+Currently, REA aggregation (`refbii2biq.m`) is stubbed, not implemented — passing `--mode rea` runs the container in REA *latency* mode (the stability-window/rewrite behavior changes) but does not produce aggregated `.biq` output yet. Future enhancements will add:
 - Temporal aggregation (±3 day windows)
 - Platform-specific error weighting
 - Output of `.biq` files for analysis
 
-To enable REA mode (when implemented), modify the entrypoint to set `config.enableREA = true`.
+Enabling REA aggregation (when implemented) will be via `buoyDataProcessing.m`'s `enableREA` parameter, which is not exposed as a container flag today.
 
 ### Multi-Architecture Builds
 
-Current build targets `linux/amd64`. To support ARM64 (AWS Graviton, Apple Silicon):
+Current build targets `linux/amd64` (`build_module.sh` hard-codes it). Multi-arch support
+for ARM64 (AWS Graviton, Apple Silicon) would need a manual `buildx` invocation — note the
+parent build context, same as every other manual build:
 
 ```bash
+cd mur/iquam
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
   -f Dockerfile \
-  -t iquam:latest \
+  -t mur-iquam:latest \
   --push \
-  .
+  ..
 ```
+
+This also requires an ARM64 `mur-matlab-base` image, which MathWorks does not currently publish.
 
 ### Configuration Flexibility
 
-Future versions may expose additional configuration options via environment variables:
-- `IQUAM_NRT_LATENCY` - Override NRT latency
-- `IQUAM_SCAN_WINDOW` - Override scan window
-- `IQUAM_QUALITY_THRESHOLD` - Override quality filtering
-- `IQUAM_SOURCE_URL` - Override NOAA data source
+Every input this container needs is already an explicit named flag (`--year`, `--doy`, `--mode`, `--reference-date`, `--work-dir`, `--log-dir`, `--output-dir`, `--buoy-day-range`, `--stability-latency`) — there's no remaining case for environment-variable overrides of these values. `--source-url` remains a MATLAB-side default (`buoyDataProcessing.m`), not exposed as a flag; that would be a natural next addition if a use case for overriding it arises.
 
 ## Additional Resources
 

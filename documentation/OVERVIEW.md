@@ -128,7 +128,7 @@ See [SENSOR_ADAPTATION.md](SENSOR_ADAPTATION.md) for adding new sensors.
 - Container execution management
 - L2P download purge (on-demand cleanup of old DOY directories)
 
-**Status:** Currently handles preprocessing; MRVA integration pending
+**Status:** Coordinates all four stages (landice, iquam, l2p, mrva)
 
 ## Containerized MATLAB Approach
 
@@ -164,7 +164,7 @@ docker run --rm \
   --shm-size=512M \
   -v /input:/input:ro \
   -v /output:/output \
-  ghcr.io/nasa-jpl/mur-<component>:latest \
+  ghcr.io/podaac/mur-<component>:latest \
   <args...>
 ```
 
@@ -208,8 +208,8 @@ Day D:          Ice concentration data
 Day D:          Land/Ice mask generation
 Day D:          L2P preprocessing (5-day window)
 Day D:          iQUAM preprocessing (7-day window)
-Day D:          MRVA analysis [PENDING]
-Day D:          NetCDF output generation [PENDING]
+Day D:          MRVA analysis
+Day D:          NetCDF output generation
 ```
 
 ### Data Volumes
@@ -226,7 +226,7 @@ Day D:          NetCDF output generation [PENDING]
 - iQUAM .bii files: ~50 MB
 - **Total:** ~650-950 MB/day
 
-**Final Products per Day:** [PENDING MRVA COMPLETION]
+**Final Products per Day:**
 - MUR SST NetCDF: ~500 MB
 - Coefficient files: ~350 MB
 - **Total:** ~850 MB/day
@@ -298,7 +298,7 @@ Analysis regions are identified by short codes:
 /nas2/bii/YYYY/                   - iQUAM processed
 ```
 
-### Output Products [PENDING]
+### Output Products
 
 ```
 /nas2/output/YYYY/                - Final MUR NetCDF files
@@ -319,7 +319,7 @@ Analysis regions are identified by short codes:
 - iQUAM: ~5-15 minutes (cached monthly files)
 - **Total Preprocessing:** ~40-80 minutes
 
-**MRVA Analysis:** [Timing TBD upon implementation]
+**MRVA Analysis:** ~30-90 minutes (NRT, L0=6); longer for REA (coarser starting scale, L0=2)
 
 ### Resource Requirements
 
@@ -360,14 +360,16 @@ Components can run in parallel:
 
 ## Migration Status
 
-### Current State (Containerized Preprocessing)
+### Current State
 
 - ✅ Land/Ice mask generation
-- ✅ L2P satellite processing (4 sensors)
+- ✅ L2P satellite processing (5 sensors: AMSR2R, MODISA, MODIST, AVMTAG, AVMTBG)
 - ✅ iQUAM buoy processing
-- ✅ Pipeline orchestrator
-- ⏳ MRVA analysis (in development)
-- ⏳ NetCDF output generation (in development)
+- ✅ MRVA multi-scale analysis
+- ✅ NetCDF4 output generation (full MUR + MUR25 sibling product)
+- ✅ Pipeline orchestrator (`run_mur_pipeline.py`)
+
+All four containers take their inputs as explicit named flags (local path or `s3://` href) rather than bind-mounted directories — see `INPUT_CONTRACT.md`.
 
 ### Legacy System
 
@@ -396,10 +398,13 @@ The original `nrtMRVA.py` system used:
 
 2. **Build Containers:**
    ```bash
-   cd landice/ && docker build -t mur-landice .
-   cd ../l2p/ && docker build -t mur-l2p .
-   cd ../iquam/ && docker build -t mur-iquam .
+   # From mur/ -- builds the MATLAB base image first if needed
+   cp network.lic.example network.lic   # first time only; edit for your license server
+   ./build_module.sh all                # iquam, l2p, landice, mrva
    ```
+
+   For raw `docker build` invocations, see
+   [Manual Builds (Advanced)](PIPELINE_CONFIGURATION.md#manual-builds-advanced).
 
 3. **Run Pipeline:**
    ```bash
@@ -424,7 +429,7 @@ See [PIPELINE_CONFIGURATION.md](PIPELINE_CONFIGURATION.md) for detailed setup an
 
 ### Project Resources
 
-- **GitHub:** [NASA-JPL MUR Repository]
+- **GitHub:** [podaac/mur](https://github.com/podaac/mur)
 - **Data Access:** [PO.DAAC MUR Dataset](https://podaac.jpl.nasa.gov/dataset/MUR-JPL-L4-GLOB-v4.1)
 - **User Guide:** [MUR User Guide PDF]
 

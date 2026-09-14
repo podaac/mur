@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adding a sensor · MUR SST</title>
+<meta name="description" content="How to add a new L2P satellite sensor to the MUR analysis: requirements, parameters and integration steps.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav><div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <div class="nav-group">Operating it</div>
+    <a href="static-data.html">Static input data</a>
+    <a href="sensors.html" aria-current="page">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a></nav>
+  <div class="nav-group">Reference</div>
+  <nav>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">Configuration reference</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">Input contract</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/LANDICE_ENCODING.md">Land/ice encoding</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/mrva/docs/OVERVIEW.md">MRVA internals</a>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>Adding a sensor</h1>
+    <p class="lede">What a new L2P instrument needs in order to contribute to the analysis.</p>
+
+    <h2>Current sensors</h2>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Sensor</th><th>Instrument</th><th>La&ndash;Lb</th><th>Window</th><th>Stability</th></tr></thead>
+      <tbody>
+        <tr><td><code>AMSR2R</code></td><td>AMSR2 microwave (GCOM-W1)</td><td>2&ndash;8</td><td>&plusmn;2 d</td><td>2 d</td></tr>
+        <tr><td><code>MODISA</code></td><td>MODIS Aqua infrared</td><td>2&ndash;12</td><td>&plusmn;2 d</td><td>2 d</td></tr>
+        <tr><td><code>MODIST</code></td><td>MODIS Terra infrared</td><td>2&ndash;12</td><td>&plusmn;2 d</td><td>3 d</td></tr>
+        <tr><td><code>AVMTAG</code></td><td>AVHRR MetOp-A infrared</td><td>2&ndash;9</td><td>&plusmn;2 d</td><td>2 d</td></tr>
+        <tr><td><code>AVMTBG</code></td><td>AVHRR MetOp-B infrared</td><td>2&ndash;9</td><td>&plusmn;2 d</td><td>2 d</td></tr>
+        <tr><td><code>IQUAM0</code></td><td>In-situ buoys</td><td>0&ndash;6</td><td>&plusmn;3 d</td><td>2 d</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>Requirements</h2>
+    <p>A candidate instrument must supply GHRSST L2P NetCDF granules through
+    PO.DAAC, carrying SST, quality level, and per-pixel uncertainty. Without
+    a usable quality flag and error estimate there is no principled way to
+    weight the observations against the existing sensors.</p>
+
+    <h2>The four parameters that matter</h2>
+    <dl>
+      <dt><strong><code>La</code> and <code>Lb</code></strong></dt>
+      <dd>The scale band the sensor contributes to. <code>Lb</code> should
+      reflect what the instrument can genuinely resolve &mdash; a 25&nbsp;km
+      microwave footprint stops around L=8, a 1&nbsp;km infrared imager can
+      run to L=12. Setting <code>Lb</code> too high injects noise into fine
+      scales as though it were signal.</dd>
+
+      <dt><strong><code>day_range</code></strong></dt>
+      <dd>How many days either side of the analysis day are pulled in. Wider
+      windows help sparse or heavily cloud-affected sensors and cost
+      processing time.</dd>
+
+      <dt><strong><code>stable</code></strong></dt>
+      <dd>Days after which that sensor's data for a given day is considered
+      settled and will no longer be reprocessed. Set it from the provider's
+      actual latency, not optimistically &mdash; too low and the pipeline
+      freezes an incomplete day.</dd>
+    </dl>
+
+    <h2>Integration steps</h2>
+    <ol>
+      <li><strong>Assess suitability</strong> &mdash; resolution, coverage,
+          latency, and whether quality and uncertainty fields are
+          usable.</li>
+      <li><strong>Add the sensor table entry</strong> so the L2P reader knows
+          the granule's variable names and quality conventions.</li>
+      <li><strong>Add it to the configuration</strong> &mdash; collection
+          name, region, <code>La</code>/<code>Lb</code>,
+          <code>day_range</code>, <code>stable</code>, and a start date.</li>
+      <li><strong>Verify the binary output</strong> for a known day before
+          enabling it in the analysis.</li>
+      <li><strong>Compare analyses with and without the sensor</strong> to
+          confirm it improves rather than perturbs the field.</li>
+    </ol>
+
+    <h3>Configuration shape</h3>
+<pre><code>"SENSOR": {
+  "collection_name": ["PODAAC-COLLECTION-ID"],
+  "start_date": "2026-01-01T00:00:00Z",
+  "region": "Global",
+  "La": 2,
+  "Lb": 9,
+  "day_range": [2, 2],
+  "stable": 2,
+  "description": "Instrument, platform"
+}</code></pre>
+
+    <div class="note">
+      <p>The full walkthrough &mdash; quality filtering, bias and error
+      estimates, and the sensor table format &mdash; is in
+      <a href="https://github.com/podaac/mur/blob/HEAD/documentation/SENSOR_ADAPTATION.md">SENSOR_ADAPTATION.md</a>.</p>
+    </div>
+
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. Deeper
+      reference material stays as Markdown in the repository and is linked
+      from each page.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

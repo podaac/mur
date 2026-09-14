@@ -12,12 +12,11 @@ The IQUAM (in-situ SST Quality Monitor) module processes in-situ sea surface tem
 
 **Processing Steps:**
 
-1. **Download** monthly IQUAM NetCDF files from NOAA (~200-500 MB/month)
+1. **Download** monthly IQUAM NetCDF files from NOAA (~200-500 MB/month) to an ephemeral working directory — there is no persistent cache; each run downloads fresh (see `makedailyiquam.m`'s own note on this)
 2. **Filter** observations by quality level (keep only `quality_level ≥ 5` - highest quality)
 3. **Convert** units (Kelvin → Celsius) and time format (hour + minute → decimal hours)
 4. **Extract** daily subsets from monthly files
 5. **Reformat** to compact binary format (int16, scaled ×100 for 0.01° precision)
-6. **Cache** monthly data as `.mat` files to avoid re-downloading
 
 **Output Characteristics:**
 
@@ -79,9 +78,9 @@ The iQUAM dataset includes observations from multiple platform types, each with 
 
 ### Active Processing Pipeline (3 files)
 
-1. **[buoyDataProcessing.m](buoyDataProcessing.m)** - Main orchestrator
-   - Manages NRT/REA mode switching
-   - Configurable paths via config struct
+1. **[buoyDataProcessing.m](buoyDataProcessing.m)** - Per-day processor, compiled entry point
+   - Takes one explicit analysis day (`year`/`doy`), `mode` (`nrt`/`rea`), and `referenceToday` from the caller — it does not compute "today" or a processing window itself; the calling orchestrator (`run_mur_pipeline.py`/`run_mur_maap.py`) already owns that loop and passes each day explicitly
+   - All parameters are individual positional arguments (not a struct)
    - Contains stubs for future REA temporal aggregation
 
 2. **[makedailyiquam.m](makedailyiquam.m)** - Daily processor
@@ -116,14 +115,13 @@ The IQUAM processing module operates as a three-stage pipeline:
 flowchart TD
     Start([Start Processing]) --> Stage1
 
-    subgraph Stage1["STAGE 1: ORCHESTRATION (buoyDataProcessing)"]
+    subgraph Stage1["STAGE 1: PER-DAY PROCESSING (buoyDataProcessing)"]
         direction LR
-        S1A[Calculate date ranges<br/>NRT vs REA mode]
-        S1B[Determine which days need<br/>processing/reprocessing]
-        S1C[Manage configuration<br/>and paths]
-        S1D[Coordinate temporary<br/>working directories]
+        S1A[Receive explicit year/doy/mode/<br/>referenceToday from caller]
+        S1B[Determine +/-buoyDayRange<br/>rewrite/stability per offset day]
+        S1C[Coordinate temporary<br/>working directory]
 
-        S1A --> S1B --> S1C --> S1D
+        S1A --> S1B --> S1C
     end
 
     subgraph Stage2["STAGE 2: ACQUISITION & QC (makedailyiquam)"]
@@ -133,9 +131,8 @@ flowchart TD
         S2C[Apply quality control<br/>filters qual >= 5]
         S2D[Convert units<br/>Kelvin → Celsius]
         S2E[Extract daily subsets<br/>from monthly files]
-        S2F[Cache intermediate .mat<br/>for efficiency]
 
-        S2A --> S2B --> S2C --> S2D --> S2E --> S2F
+        S2A --> S2B --> S2C --> S2D --> S2E
     end
 
     subgraph Stage3["STAGE 3: FORMAT CONVERSION (writeiquambii)"]
@@ -172,7 +169,7 @@ The system operates in two distinct modes based on data maturity:
 - **Purpose:** Provide rapid SST analysis for operational users
 - **Characteristics:**
   - Uses most recent available data (may be incomplete)
-  - No reprocessing of previous days (realtime flag = 1)
+  - No reprocessing of previous days (`mode='nrt'`, i.e. `realtime` true)
   - Faster execution (avoids re-downloads)
   - Outputs: Individual daily .bii files
   - May include provisional/uncorrected observations
@@ -189,7 +186,7 @@ The system operates in two distinct modes based on data maturity:
   - **[Future]** Outputs: Aggregated .biq files for analysis
   - Higher data completeness and quality
 
-The system automatically processes a **9-day sliding window** to cover both modes, ensuring continuous production while maintaining data quality standards. REA temporal aggregation functionality is designed but not yet active (see [buoyDataProcessing.m:238-263](buoyDataProcessing.m#L238-L263) for stub).
+**Who decides the window and mode:** the 1-day NRT latency, 4-day REA latency, and 9-day scan window above are the calling orchestrator's decisions (`run_mur_pipeline.py`/`run_mur_maap.py`), not `buoyDataProcessing.m`'s. The orchestrator iterates that 9-day window itself and invokes the container once per day, passing that day's `year`/`doy`/`mode`/`referenceToday` explicitly — `buoyDataProcessing.m` only ever processes the one day it's told about (plus its own `±buoyDayRange` sub-window around that day). REA temporal aggregation functionality is designed but not yet active (see [buoyDataProcessing.m:223-247](buoyDataProcessing.m#L223-L247) for stub).
 
 ## Quality Control Strategy
 
@@ -405,39 +402,40 @@ This approach allows the system to:
 
 #### Date Range Control ([buoyDataProcessing.m](buoyDataProcessing.m))
 
-The function uses MATLAB's modern `arguments` block for parameter validation. All parameters are optional and have sensible defaults. Parameters are passed as individual positional arguments (not as a struct).
+The function uses MATLAB's modern `arguments` block for parameter validation. `year`, `doy`, `mode`, and `referenceToday` are **required** (no default) — everything else has a default. Parameters are passed as individual positional arguments (not as a struct), and there is no `cacheDir` parameter — this module has never had a persistent cache directory.
 
 **Parameter List (in order):**
 
 ```matlab
-buoyDataProcessing(workDir, logDir, outputDir, cacheDir, sourceUrl, ...
-                   enableREA, testing, nrtLatency, reaLatency, ...
-                   scanLatency, buoyDayRange, buoyStabilityLatency, ...
+buoyDataProcessing(year, doy, mode, referenceToday, ...
+                   workDir, logDir, outputDir, ...
+                   buoyDayRange, buoyStabilityLatency, ...
+                   sourceUrl, enableREA, testing, ...
                    reaAggregationWindow, reaOutputDir)
 ```
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| `year` | *(required)* | Year of the one analysis day to process |
+| `doy` | *(required)* | Day-of-year of the one analysis day to process |
+| `mode` | *(required)* | `'nrt'` or `'rea'` — decided by the caller, not computed internally |
+| `referenceToday` | *(required)* | `'YYYY-MM-DD'` — what the caller considers "today," used for the `±buoyDayRange` stability/rewrite decision and the skip-future-dates check |
 | `workDir` | `'./tmp/makebic'` | Temporary working directory |
 | `logDir` | `'./logs'` | Directory for log files |
 | `outputDir` | `'./output/iquam'` | Root directory for output .bii files |
-| `cacheDir` | `'./cache/iquam'` | Cache directory for monthly .mat files |
+| `buoyDayRange` | `'3'` | Temporal window around the analysis day to (re)process (±days) |
+| `buoyStabilityLatency` | `'2'` | Days old before a file is considered stable (no reprocessing) |
 | `sourceUrl` | `'https://www.star.nesdis.noaa.gov/pub/socd/sst/iquam/v2.10/'` | URL for IQUAM NetCDF downloads |
 | `enableREA` | `'false'` | Enable REA mode (string: 'true' or 'false') |
 | `testing` | `'0'` | Testing mode flag (string: '0' or '1') |
-| `nrtLatency` | `'1'` | Days behind current for NRT processing |
-| `reaLatency` | `'4'` | Days behind current for reanalysis |
-| `scanLatency` | `'9'` | Days to scan backward (total window) |
-| `buoyDayRange` | `'3'` | Temporal window for observation aggregation (±days) |
-| `buoyStabilityLatency` | `'2'` | Stability latency before allowing reprocessing |
 | `reaAggregationWindow` | `'3'` | REA temporal aggregation window (±days) |
 | `reaOutputDir` | `'./output/iquam_rea'` | Output directory for .biq files (REA mode) |
 
 **Note:** When calling from command-line or Docker, all parameters must be passed as strings. The function automatically converts numeric parameters from strings.
 
+**What this function does *not* do:** compute "today," decide NRT vs. REA, or loop over a multi-day processing window — all of that is the calling orchestrator's job (`run_mur_pipeline.py`/`run_mur_maap.py`), which already iterates the full window and calls this function once per day. This function's only date-related work is the `±buoyDayRange` sub-window around the one day it's given.
+
 **Tuning Guidance:**
-- Increase `nrtLatency` if data transmission delays are observed
-- Increase `reaLatency` if delayed corrections are common
 - Adjust `buoyDayRange` based on data density and SST variability
 - Set `buoyStabilityLatency` to balance data quality vs. reprocessing frequency
 - Set `enableREA = 'true'` when REA aggregation is implemented
@@ -445,51 +443,38 @@ buoyDataProcessing(workDir, logDir, outputDir, cacheDir, sourceUrl, ...
 **Usage Examples:**
 
 ```matlab
-% 1. Use all defaults
-buoyDataProcessing()
+% Process day 220 of 2026, NRT mode, using 2026-08-09 as "today"
+buoyDataProcessing('2026', '220', 'nrt', '2026-08-09')
 
-% 2. Override first few parameters (leave rest as defaults)
-buoyDataProcessing('./tmp/work', './logs', '/data/output/iquam')
+% Override the working/log/output directories too (still positional —
+% mode/referenceToday can't be skipped since they precede these)
+buoyDataProcessing('2026', '220', 'nrt', '2026-08-09', ...
+                   './tmp/work', './logs', '/data/output/iquam')
 
-% 3. Override specific parameters by position
-buoyDataProcessing('./tmp/makebic', './logs', './output/iquam', ...
-                   './cache/iquam', ...
-                   'https://www.star.nesdis.noaa.gov/pub/socd/sst/iquam/v2.10/', ...
-                   'true', '0', '1', '4', '9', '3', '2', '3', './output/iquam_rea')
-
-% 4. From compiled executable (command-line)
-% ./IquamProcessor  # Uses all defaults
-
-% 5. From compiled executable with custom paths
-% ./IquamProcessor /tmp/work /logs /output/iquam /cache/iquam
+% From the compiled executable (command-line) — the container's
+% entrypoint.sh translates named flags into exactly this positional order
+% ./IquamProcessor 2026 220 nrt 2026-08-09 ./tmp/work ./logs /data/output/iquam 3 2
 ```
 
 **Docker Usage:**
 
-```bash
-# Use all defaults (container paths from volume mounts)
-docker run --rm \
-  -v /host/output:/data/output/iquam \
-  -v /host/cache:/data/cache/iquam \
-  -v /host/logs:/data/logs \
-  iquam:latest
+The container entrypoint (`iquam/bin/entrypoint.sh`) is named-args-only — every input is an explicit flag, and there is no positional or zero-argument form:
 
-# Override specific parameters
+```bash
 docker run --rm \
   -v /host/output:/data/output/iquam \
-  -v /host/cache:/data/cache/iquam \
   -v /host/logs:/data/logs \
-  iquam:latest \
-  /tmp/makebic /data/logs /data/output/iquam /data/cache/iquam \
-  https://www.star.nesdis.noaa.gov/pub/socd/sst/iquam/v2.10/ \
-  false 1 1 4 9 3 2 3 /data/output/iquam_rea
+  mur-iquam:latest \
+  --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+  --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+  --buoy-day-range 3 --stability-latency 2
 ```
 
+`--source-url` is not exposed as a flag — it stays at `buoyDataProcessing.m`'s own default unless you're modifying the source.
+
 **Important Notes:**
-- MATLAB's `arguments` block allows partial argument lists - you can provide only the first N parameters and the rest use defaults
-- When calling from Docker/command-line, you must provide arguments in order (you cannot skip middle parameters)
-- To change a late parameter (e.g., `buoyStabilityLatency`), you must provide all preceding parameters
-- For maximum flexibility with Docker, consider using environment variables or a configuration file
+- All nine flags above are required — there is no "use all defaults" invocation for the container, unlike calling the MATLAB function directly
+- `run_mur_pipeline.py`'s `run_iquam()` and `run_mur_maap.py`'s `run_day()` already construct these values for you (`year`/`doy` from the day being processed, `mode` from NRT/REA window logic, `reference_date` from `get_reference_today()`, `buoy_day_range`/`stability_latency` from `config.json`'s `iquam.buoy_dayrange`/`iquam.stable_latency`) — you only need to build the command by hand for manual testing
 
 #### Quality Thresholds ([makedailyiquam.m:75](makedailyiquam.m#L75))
 
@@ -535,25 +520,14 @@ High-Precision   0.2°C          0.1 - 0.4°C
     ├── ...
     └── Global_IQUAM0_YYYY_366.bii
 
-./cache/iquam/
-├── iquam.2023.01.mat                  # Monthly NetCDF cache
-├── iquam.2023.02.mat
-└── ...
-
 ./tmp/makebic/
-└── [temporary working files, auto-cleaned at startup]
+└── [temporary working files, auto-cleaned at startup — no persistent cache]
 
 ./logs/
 └── buoy.log                           # Processing log (appended)
 ```
 
-**Legacy Configuration (absolute paths):**
-For backward compatibility, can configure absolute paths:
-```matlab
-config.outputDir = '/nas2/iquam';
-config.logDir = '/home/tmchin/logs';
-buoyDataProcessing(config)
-```
+There is no cache directory — `workDir`, `outputDir`, and `logDir` are the only directory parameters `buoyDataProcessing.m` takes.
 
 **Deployment:**
 The application runs in a containerized environment. See [CONTAINER_SETUP.md](CONTAINER_SETUP.md) for volume mount specifications and configuration options.
@@ -618,30 +592,26 @@ assert(sum(platform_counts > 0) >= 4, 'Insufficient platform diversity')
 ### Execution Environment
 
 **Software Dependencies:**
-- MATLAB R2021b+ (NetCDF reading, binary I/O, orchestration)
+- MATLAB R2024b (NetCDF reading, binary I/O, orchestration)
 - wget (data download)
 - Network access to NOAA STAR servers
 
 **Computational Resources:**
 - Memory: ~2 GB per daily process (monthly NetCDF in memory)
 - Disk: ~500 MB temporary per day, ~5 MB permanent output per day
-- Disk (cache): ~100 MB per month for .mat cache files
 - CPU: Minimal (I/O bound, not compute intensive)
-- Network: ~50-200 MB download per month (NetCDF files, cached after first download)
+- Network: ~50-200 MB download per month (NetCDF files — no cache, downloaded fresh every run that needs them)
 
 ### Performance Optimization
 
-#### Caching Strategy
-Monthly NetCDF files are cached as MATLAB `.mat` files:
-- **First access:** Download + process (slow, ~2-5 minutes)
-- **Subsequent access:** Load from cache (fast, ~10-30 seconds)
-- **Cache invalidation:** Automatic after 2-day stability window
+#### No Persistent Cache
+There is no cache directory or cached `.mat` file — every invocation downloads the monthly NetCDF file(s) it needs to an ephemeral working directory and discards them afterward. This is a deliberate design choice (see `makedailyiquam.m`'s own comment) to match production behavior and avoid cache-staleness bugs, at the cost of re-downloading on every run.
 
 #### Conditional Reprocessing
 The system avoids unnecessary work by:
-- Checking output file existence before processing
-- Comparing file timestamps against stability latency
-- Only reprocessing when `rewrite=1` or data is unstable
+- Checking output `.bii` file existence before processing
+- Comparing the file's age against `buoyStabilityLatency`
+- Only reprocessing when `rewrite=1` or the existing file is unstable
 
 #### Parallel Opportunities
 Currently sequential, but could parallelize:
@@ -650,9 +620,8 @@ Currently sequential, but could parallelize:
 - Daily extraction and QC could be threaded
 
 **Typical Runtime:**
-- First run (cold cache): ~3-5 minutes per day
-- Subsequent runs (warm cache): ~30-60 seconds per day
-- Full 9-day window: ~15-30 minutes total
+- Per day: ~2-5 minutes (download + process; no cache to shortcut a repeat run)
+- A full 9-day scan window, one container invocation per day: ~20-45 minutes total, driven by the orchestrator's per-day loop, not by `buoyDataProcessing.m` itself
 
 ### Error Handling and Recovery
 
@@ -671,13 +640,13 @@ Currently sequential, but could parallelize:
 
 **3. Corrupted NetCDF**
 - **Symptom:** MATLAB netcdf.open() error
-- **Recovery:** Delete cached `.mat` file from cacheDir, re-run with rewrite flag
-- **Command:** `makedailyiquam(year, doy, 1, outputDir, cacheDir, sourceUrl)` with rewrite=1
+- **Recovery:** Since there's no cache to clear, just re-run with `rewrite=1` for that day — the corrupt download will be discarded and re-fetched from `sourceUrl`
+- **Command:** `makedailyiquam(year, doy, 1, outputDir, sourceUrl)` with rewrite=1
 
 **4. Disk Space Exhaustion**
 - **Symptom:** Write errors, incomplete output files
-- **Prevention:** Monitor outputDir, cacheDir, and workDir usage
-- **Recovery:** Clean old cache files, increase quota, or adjust mount sizes
+- **Prevention:** Monitor `outputDir` and `workDir` usage (there is no cache directory to also monitor)
+- **Recovery:** Increase quota or adjust mount sizes
 
 **5. Zero Observations After QC**
 - **Symptom:** Output file has N=0 header
@@ -687,31 +656,36 @@ Currently sequential, but could parallelize:
 
 #### Logging and Diagnostics
 
-All operations logged to `<logDir>/buoy.log` (default: `./logs/buoy.log`):
+All operations logged to `<logDir>/buoy.log` (default: `./logs/buoy.log`). Each container invocation processes exactly one analysis day, given explicitly by the caller — the log no longer shows a multi-day window being scanned, just that one day's `±buoyDayRange` sub-window:
+
 ```
----------- Today = Year 2025 Day 295 ----------
-           from (2025,286) to (2025,294)
-  ======== Final run for Year 2025 Day 286 ========
-Processing year=2025 day=286 rewrite=0
-makedailyiquam: reading ./cache/iquam/iquam.2025.10.mat
-  ======== Interim run for Year 2025 Day 294 ========
-Processing year=2025 day=294 rewrite=1
+---------- Reference today = 2026-08-09 ----------
+  ======== Interim run for Year 2026 Day 218 ========
+Processing year=2026 day=215 rewrite=0
+keeping old ./output/iquam/2026/Global_IQUAM0_2026_215.bii
+Processing year=2026 day=216 rewrite=0
+Processing year=2026 day=217 rewrite=1
 [wget output showing YYYYMM-STAR-L2i_GHRSST-SST-iQuam-GLOBALOCEAN-v02.0-fv01.0.nc download]
-[REA STUB] Would aggregate temporal window for analysis day 2025/286
+Processing year=2026 day=218 rewrite=1
+Processing year=2026 day=219 rewrite=1
+Processing year=2026 day=220 rewrite=1
+Processing year=2026 day=221 rewrite=1
 ```
 
+(This example is one call with `--buoy-day-range 3`, so days 215-221 around the target day 218 are each evaluated; a day beyond `referenceToday` would be silently skipped rather than logged as "Processing" or "keeping old.")
+
 **Key Log Patterns:**
-- `Interim run` - NRT mode (recent, unstable data)
-- `Final run` - REA mode (older, stable data)
+- `Interim run` - NRT mode (`mode=nrt`, recent/unstable data, never rewritten)
+- `Final run` - REA mode (`mode=rea`, older/stable data)
 - `keeping old` - File exists, not reprocessing
-- `rewrite=1` - Force reprocessing
+- `rewrite=1` - Reprocessing this offset day (file missing, or younger than `buoyStabilityLatency`)
 - `[REA STUB]` - REA aggregation point (not yet implemented)
 
 **Key Metrics to Monitor:**
 - Download success rate
 - Observation count trends (check file sizes)
 - Processing time per day
-- Disk usage growth in outputDir and cacheDir
+- Disk usage growth in `outputDir`
 
 ## Future Improvements and Considerations
 

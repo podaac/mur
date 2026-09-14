@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The MRVA algorithm · MUR SST</title>
+<meta name="description" content="How MUR&#x27;s multi-scale variational analysis fits a global SST field from basin scale down to a few kilometres.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav><div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html" aria-current="page">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <div class="nav-group">Operating it</div>
+    <a href="static-data.html">Static input data</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a></nav>
+  <div class="nav-group">Reference</div>
+  <nav>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">Configuration reference</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">Input contract</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/LANDICE_ENCODING.md">Land/ice encoding</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/mrva/docs/OVERVIEW.md">MRVA internals</a>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>The MRVA algorithm</h1>
+    <p class="lede">Multi-scale variational analysis: one field fitted from the basin scale down to a few kilometres, on a B-spline basis.</p>
+
+    <h2>The idea</h2>
+    <p>Rather than interpolating observations directly, MRVA solves for the
+    coefficients of a smooth field that best fits every observation at once,
+    subject to a smoothness penalty. It does this repeatedly at a ladder of
+    resolutions &mdash; coarse first, then progressively finer &mdash; with
+    each scale correcting the residual left by the one above it.</p>
+
+    <p>This matters because the observing system is heterogeneous. A
+    microwave radiometer sees through cloud at roughly 25&nbsp;km; an
+    infrared imager resolves a kilometre but only in clear sky; a buoy is a
+    single exact point. Fitting them all at a single resolution would either
+    throw away the fine detail or over-fit the sparse instruments. Solving
+    scale by scale lets each instrument contribute only at the scales it can
+    actually resolve.</p>
+
+    <h2>Scales</h2>
+    <p>The analysis runs from a starting scale <code>L0</code> down to a
+    final scale <code>LF</code>, doubling the coefficient grid resolution at
+    each step. Near-real-time runs start at <code>L0=6</code> using the
+    previous day's coefficients as a background; reanalysis runs start cold
+    at <code>L0=2</code>. Both finish at <code>LF=11</code>.</p>
+
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Scale L</th><th>Grid spacing</th><th>Effective resolution</th><th>Feature size</th><th>Typical use</th></tr></thead>
+      <tbody>
+        <tr><td>2</td><td>~11.25&deg;</td><td>~1250 km</td><td>Basin-scale</td><td>Major ocean basins</td></tr>
+        <tr><td>3</td><td>~5.6&deg;</td><td>~625 km</td><td>Gyre-scale</td><td>Subtropical gyres</td></tr>
+        <tr><td>4</td><td>~2.8&deg;</td><td>~312 km</td><td>Large mesoscale</td><td>Major eddies</td></tr>
+        <tr><td>5</td><td>~1.4&deg;</td><td>~156 km</td><td>Mesoscale</td><td>Medium eddies</td></tr>
+        <tr><td>6</td><td>~0.7&deg;</td><td>~78 km</td><td>Sub-mesoscale</td><td>Thermal fronts; NRT background</td></tr>
+        <tr><td>7</td><td>~0.35&deg;</td><td>~39 km</td><td>High resolution</td><td>Small fronts</td></tr>
+        <tr><td>8</td><td>~0.17&deg;</td><td>~19 km</td><td>Very high res</td><td>Coastal features</td></tr>
+        <tr><td>9</td><td>~0.09&deg;</td><td>~10 km</td><td>Ultra high res</td><td>Nearshore details</td></tr>
+        <tr><td>10</td><td>~0.045&deg;</td><td>~5 km</td><td>Product output</td><td>1 km MUR product</td></tr>
+        <tr><td>11</td><td>~0.022&deg;</td><td>~2.5 km</td><td>Maximum detail</td><td>Coefficient storage</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>Processing flow</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TD
+    START([Initialize MRVA]) --&gt; CONFIG[Read configuration&lt;br/&gt;scales, sensors, parameters]
+    CONFIG --&gt; CHECKMODE{NRT or&lt;br/&gt;REA mode?}
+
+    CHECKMODE --&gt;|NRT| LOADBG[Load L=6 coefficients&lt;br/&gt;from previous day]
+    CHECKMODE --&gt;|REA| ZEROBG[Start from zero&lt;br/&gt;L0=2]
+
+    LOADBG --&gt; LOOPSTART{For L = L0 to LF}
+    ZEROBG --&gt; LOOPSTART
+
+    LOOPSTART --&gt;|L = L0| INITGRID[Initialize grid&lt;br/&gt;mx, my at L0]
+    LOOPSTART --&gt;|L &gt; L0| DOUBLEGRID[Double resolution&lt;br/&gt;mx *= 2, my *= 2&lt;br/&gt;Upsample coefficients]
+
+    INITGRID --&gt; BUILDMAT[Build regularization matrix&lt;br/&gt;Thin-plate operator R]
+    DOUBLEGRID --&gt; BUILDMAT
+
+    BUILDMAT --&gt; CHECKBG{L == L0 and&lt;br/&gt;background?}
+    CHECKBG --&gt;|Yes| ADDBG[Add background field&lt;br/&gt;to system]
+    CHECKBG --&gt;|No| ADDOBS
+    ADDBG --&gt; ADDOBS
+
+    ADDOBS[Incorporate observations&lt;br/&gt;Filter by La ≤ L ≤ Lb] --&gt; WEIGHT[Apply weights:&lt;br/&gt;- Temporal decay&lt;br/&gt;- Rho scaling&lt;br/&gt;- Error weighting]
+
+    WEIGHT --&gt; PROJECT[Project to B-spline basis&lt;br/&gt;Build system matrix A, vector b]
+
+    PROJECT --&gt; SOLVE[Solve PCG:&lt;br/&gt;A + R c = b&lt;br/&gt;Tolerance: 1e-8 or 1e-3]
+
+    SOLVE --&gt; RESIDUAL[Compute residuals&lt;br/&gt;obs - analysis]
+
+    RESIDUAL --&gt; ACCUMULATE[Accumulate coefficients&lt;br/&gt;csp = dsp + csp]
+
+    ACCUMULATE --&gt; WRITECOEF[Write outputs:&lt;br/&gt;- mrva.cXX&lt;br/&gt;- mrva.uXX&lt;br/&gt;- map file]
+
+    WRITECOEF --&gt; NEXTSCALE[dsp := csp&lt;br/&gt;Prepare for next scale]
+
+    NEXTSCALE --&gt; CHECKLAST{L &lt; LF?}
+    CHECKLAST --&gt;|Yes, L++| LOOPSTART
+    CHECKLAST --&gt;|No| SAMPLE[Sample at L=10&lt;br/&gt;~1km resolution]
+
+    SAMPLE --&gt; NETCDF[Generate NetCDF&lt;br/&gt;SST, error, mask]
+
+    NETCDF --&gt; END([Complete])
+
+    style START fill:#90ee90
+    style END fill:#90ee90
+    style SOLVE fill:#ffb6c1
+    style NETCDF fill:#87ceeb
+</pre>
+<figcaption>One pass per scale: build the regularization operator, add observations eligible at that scale, solve the preconditioned conjugate-gradient system, accumulate the coefficients, then double the grid and repeat.</figcaption>
+</figure>
+    <h3>What each scale adds</h3>
+<figure class="diagram">
+<pre class="mermaid">
+timeline
+    title Multi-Scale Refinement Process
+    section Coarse Scales (Basin-scale)
+        L=2 (1250 km) : Fit large-scale features
+                      : Basin-scale circulation
+                      : All sensors contribute
+        L=3 (625 km)  : Add gyre-scale details
+                      : Major ocean currents
+        L=4 (312 km)  : Add large eddies
+                      : Mesoscale features
+    section Medium Scales (Fronts)
+        L=5 (156 km)  : Medium eddies
+        L=6 (78 km)   : Thermal fronts
+                      : NRT background field
+        L=7 (39 km)   : Small fronts
+        L=8 (19 km)   : Coastal features
+                      : Buoys excluded (L&gt;8)
+    section Fine Scales (High-res)
+        L=9 (10 km)   : Nearshore details
+                      : Only high-res sensors
+        L=10 (5 km)   : Product output
+                      : 1km MUR SST
+        L=11 (2.5 km) : Maximum detail
+                      : Coefficient storage
+</pre>
+<figcaption>Coarse scales fix basin circulation; medium scales resolve fronts and eddies; fine scales add nearshore structure from the high-resolution instruments only.</figcaption>
+</figure>
+    <h2>How observations enter</h2>
+    <p>Each sensor declares a scale band &mdash; <code>La</code> to
+    <code>Lb</code> &mdash; and contributes only within it. A buoy is an
+    exact point measurement but represents a single location rather than an
+    area, so it is excluded from the finest scales; a 25&nbsp;km microwave
+    footprint cannot inform a 2.5&nbsp;km feature and is cut off likewise.</p>
+<figure class="diagram">
+<pre class="mermaid">
+gantt
+    title Sensor Usage Across Scales (La to Lb)
+    dateFormat X
+    axisFormat %L
+
+    section Buoys (In-situ)
+    IQUAM Buoys (La=2, Lb=8)    :buoy, 2, 7
+
+    section Microwave
+    AMSR2R ~25km (La=2, Lb=8)   :amsr, 2, 7
+
+    section Infrared (High-res)
+    MODISA ~1km (La=2, Lb=12)   :modisa, 2, 11
+    MODIST ~1km (La=2, Lb=12)   :modist, 2, 11
+
+    section Infrared (Medium-res)
+    AVMTBG ~1-4km (La=2, Lb=9)  :avhrr, 2, 8
+
+    section Ice Model
+    Ice SST ~10km (La=2, Lb=9)  :ice, 2, 8
+</pre>
+<figcaption>Scale bands per sensor class. Infrared imagers run to the finest scales; buoys and microwave stop well short of them.</figcaption>
+</figure>
+    <p>Within a band, each observation is weighted by three things: a
+    temporal decay against the analysis time, a scale-dependent factor, and
+    the instrument's own error estimate. The decay is scale-dependent too
+    &mdash; coarse scales tolerate observations several days old, while the
+    finest scales weight sharply toward the analysis time.</p>
+
+    <h2>Outlier and bias handling</h2>
+    <p>Before the final solve, observations are screened against a reference
+    field built from the coarse scales, and a per-sensor bias correction is
+    applied to the infrared instruments. The reference field is normally the
+    analysis's own coarse-scale solution; a separate L4 product can serve as
+    a bootstrap background when no prior coefficient exists at all.</p>
+
+    <div class="note">
+      <p>The mathematical formulation, the B-spline basis and the solver are
+      documented in full in
+      <a href="https://github.com/podaac/mur/blob/HEAD/documentation/ALGORITHM_FLOW.md">ALGORITHM_FLOW.md</a>, with
+      the implementation covered in
+      <a href="https://github.com/podaac/mur/blob/HEAD/mrva/docs/OVERVIEW.md">mrva/docs/OVERVIEW.md</a>.</p>
+    </div>
+
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. Deeper
+      reference material stays as Markdown in the repository and is linked
+      from each page.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

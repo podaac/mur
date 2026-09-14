@@ -49,7 +49,7 @@ def resolve_landice_static_hrefs(static_resources_root: str) -> Dict[str, str]:
 
 
 def build_l2p_manifest_from_hrefs(granule_hrefs: List[str]) -> Dict:
-    """Build the granules manifest (docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md
+    """Build the granules manifest (documentation/INPUT_CONTRACT.md
     section 3) for L2P from stac_search()'s already-s3://-href granule list
     -- no path rewriting needed here, unlike the local-mode equivalent in
     run_mur_pipeline.py's build_l2p_granules_manifest, since these hrefs are
@@ -114,7 +114,7 @@ class MAAPClient:
         raise NotImplementedError("MAAPClient.list_objects: wire up boto3 listing")
 
     def write_manifest(self, prefix: str, manifest: Dict) -> str:
-        """Write a manifest JSON (docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md
+        """Write a manifest JSON (documentation/INPUT_CONTRACT.md
         section 3) to S3 at `prefix` and return its s3:// href, for
         fan-in inputs that can't be a repeated flag on real MAAP (section 7).
         Scoped to one invocation only -- not written for reuse across runs.

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data lifecycle · MUR SST</title>
+<meta name="description" content="MUR data lifecycle: sources, temporal windows, reprocessing rules and storage requirements.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav><div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html" aria-current="page">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <div class="nav-group">Operating it</div>
+    <a href="static-data.html">Static input data</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a></nav>
+  <div class="nav-group">Reference</div>
+  <nav>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">Configuration reference</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">Input contract</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/LANDICE_ENCODING.md">Land/ice encoding</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/mrva/docs/OVERVIEW.md">MRVA internals</a>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>Data lifecycle</h1>
+    <p class="lede">Where the inputs come from, how long they stay in flux, and what it all costs on disk.</p>
+
+    <h2>Sources and flow</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+    subgraph external[&quot;External Data Sources&quot;]
+        PODAAC[&quot;PO.DAAC&lt;br/&gt;L2P Satellite Files&quot;]
+        OSISAF[&quot;OSI-SAF&lt;br/&gt;Ice Concentration&quot;]
+        IQUAM_SRC[&quot;NOAA iQUAM&lt;br/&gt;Buoy Data&quot;]
+        PREV[&quot;Previous MUR Run&lt;br/&gt;(NRT mode)&quot;]
+    end
+
+    subgraph storage[&quot;Input Data Storage&quot;]
+        PODAAC_STOR[&quot;L2P granule store&lt;br/&gt;inputs/l2p/SENSOR/YYYY/DOY&quot;]
+        ICE_STOR[&quot;Sea ice&lt;br/&gt;fetched on demand&quot;]
+        IQUAM_STOR[&quot;iQUAM store&lt;br/&gt;monthly files&quot;]
+        COEF_STOR[&quot;Coefficient store&lt;br/&gt;output/csp/YYYY&quot;]
+    end
+
+    subgraph containers[&quot;Preprocessing Containers&quot;]
+        L2P_PROC[&quot;L2P Processor&lt;br/&gt;l2p2bic.m&quot;]
+        LANDICE_PROC[&quot;Land/Ice Generator&lt;br/&gt;makeicefiles.m&quot;]
+        IQUAM_PROC[&quot;iQUAM Processor&lt;br/&gt;makedailyiquam.m&quot;]
+        BG[&quot;Background Field&lt;br/&gt;(NRT only)&quot;]
+    end
+
+    subgraph preprocessed[&quot;Preprocessed Data Storage&quot;]
+        BIC[&quot;output/l2p/SENSOR/YYYY&lt;br/&gt;.bic files&quot;]
+        GDS[&quot;output/landice/YYYY&lt;br/&gt;.gds files&quot;]
+        BIP[&quot;output/landice/YYYY&lt;br/&gt;.bip files&quot;]
+        BII[&quot;output/iquam/YYYY&lt;br/&gt;.bii files&quot;]
+    end
+
+    subgraph analysis[&quot;Analysis &amp; Output&quot;]
+        MRVA[&quot;MRVA Algorithm&quot;]
+        OUTPUT[&quot;MUR SST Product&lt;br/&gt;NetCDF Output&quot;]
+    end
+
+    PODAAC --&gt;|&quot;Download&lt;br/&gt;(hourly cron)&quot;| PODAAC_STOR
+    OSISAF --&gt;|&quot;Download&lt;br/&gt;(on-demand)&quot;| ICE_STOR
+    IQUAM_SRC --&gt;|&quot;Download&lt;br/&gt;(monthly)&quot;| IQUAM_STOR
+    PREV --&gt;|&quot;Read&lt;br/&gt;(NRT)&quot;| COEF_STOR
+
+    PODAAC_STOR --&gt;|Process| L2P_PROC
+    ICE_STOR --&gt;|Process| LANDICE_PROC
+    IQUAM_STOR --&gt;|Process| IQUAM_PROC
+    COEF_STOR --&gt;|Read| BG
+
+    L2P_PROC --&gt; BIC
+    LANDICE_PROC --&gt; GDS
+    LANDICE_PROC --&gt; BIP
+    IQUAM_PROC --&gt; BII
+
+    BIC --&gt; MRVA
+    GDS --&gt; MRVA
+    BIP --&gt; MRVA
+    BII --&gt; MRVA
+    BG --&gt; MRVA
+
+    MRVA --&gt; OUTPUT
+
+    style MRVA fill:#e1f5ff,stroke:#0288d1,stroke-width:2px,stroke-dasharray: 5 5
+    style OUTPUT fill:#e1f5ff,stroke:#0288d1,stroke-width:2px,stroke-dasharray: 5 5
+</pre>
+<figcaption>External sources are downloaded to local storage, converted to compact binary by the preprocessing containers, and consumed together by MRVA.</figcaption>
+</figure>
+    <h2>The four inputs</h2>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Input</th><th>Source</th><th>Cadence</th><th>Window</th></tr></thead>
+      <tbody>
+        <tr><td>L2P satellite granules</td><td>PO.DAAC</td><td>Downloaded continuously</td><td>&plusmn;2 days per sensor</td></tr>
+        <tr><td>Sea ice concentration</td><td>OSI-SAF</td><td>Daily, fetched on demand</td><td>Analysis day, with fallback</td></tr>
+        <tr><td>In-situ buoys</td><td>NOAA iQUAM</td><td>Monthly files</td><td>&plusmn;3 days</td></tr>
+        <tr><td>Background field</td><td>Previous MUR run</td><td>Daily</td><td>Previous day only (NRT)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>Why data is reprocessed</h2>
+    <p>Satellite data does not arrive all at once. A granule for a given day
+    may be delivered hours or days late, and near-real-time streams are
+    superseded by better-calibrated versions. Each sensor therefore has a
+    <em>stability latency</em>: the number of days after which its data for a
+    given day is considered settled.</p>
+
+    <p>Within that latency a day's inputs are rebuilt on each run; past it
+    they are left alone. The same logic governs the product: near-real-time
+    output is always rewritten, while a reanalysis product that already
+    exists is never regenerated.</p>
+
+    <h2>A day in the life</h2>
+<figure class="diagram">
+<pre class="mermaid">
+gantt
+    title NRT Processing Timeline (Day 042)
+    dateFormat HH:mm
+    axisFormat %H:%M
+
+    section Downloads
+    Hourly L2P cron jobs     :active, download, 00:00, 06:00
+
+    section Preprocessing
+    Ice mask generation      :ice, 09:00, 5m
+    L2P day 042 (fresh)      :l2p042, after ice, 60m
+    L2P day 041 (reprocess)  :l2p041, after ice, 60m
+    iQUAM (cached)           :iquam, after ice, 1m
+
+    section Analysis
+    MRVA processing          :crit, mrva, after l2p042, 1h
+    NetCDF generation        :netcdf, after mrva, 30m
+
+    section Milestones
+    L2P data ready           :milestone, m1, 06:00, 0m
+    Processing starts        :milestone, m2, 09:00, 0m
+    Product available        :milestone, m3, 12:00, 0m
+</pre>
+<figcaption>Downloads run continuously; preprocessing and analysis run once the day's data has largely landed.</figcaption>
+</figure>
+    <h2>Storage</h2>
+<figure class="diagram">
+<pre class="mermaid">
+pie title Annual Storage Requirements (2.3 TB total)
+    &quot;L2P Input (1.5 TB)&quot; : 1500
+    &quot;L2P Preprocessed (300 GB)&quot; : 300
+    &quot;Final Products (310 GB)&quot; : 310
+    &quot;Ice Data (73 GB)&quot; : 73
+    &quot;iQUAM Input/Preprocessed (19 GB)&quot; : 19
+    &quot;Other (98 GB)&quot; : 98
+</pre>
+<figcaption>Annual storage, dominated by the raw L2P granules rather than by any pipeline output.</figcaption>
+</figure>
+    <p>The raw L2P archive dominates the footprint by a wide margin. The
+    pipeline includes a purge stage that removes downloaded granule
+    directories once they fall outside the rolling window, which is what
+    keeps that number bounded.</p>
+
+    <div class="note">
+      <p>Per-sensor windows, latencies, caching rules and the full storage
+      breakdown are in
+      <a href="https://github.com/podaac/mur/blob/HEAD/documentation/DATA_LIFECYCLE.md">DATA_LIFECYCLE.md</a>.</p>
+    </div>
+
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. Deeper
+      reference material stays as Markdown in the repository and is linked
+      from each page.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -103,36 +103,51 @@ cp /nas2/landice/CylinderP01_edge.bip \
 
 ### Quick Start
 
-```bash
-cd mur/mrva
-./build.sh
-```
-
-### Manual Build
+Build with `build_module.sh` from the `mur/` directory:
 
 ```bash
-cd mur/mrva
-docker build --platform linux/amd64 -t mrva:latest -f Dockerfile ..
+cd mur
+./build_module.sh mrva
 ```
+
+It builds the `mur-matlab-base:r2024b` image first if missing, checks that `network.lic`
+exists, builds `--platform linux/amd64` with the parent `mur/` directory as context, and
+tags the image **`mur-mrva:latest`** — the name `config.json` expects.
 
 **Build Options:**
 
 ```bash
 # Force rebuild without cache (useful after code changes)
-./build.sh --no-cache
+./build_module.sh mrva --no-cache
 
-# Build for specific platform (Apple Silicon compatibility)
-./build.sh --platform linux/arm64
+# Debug build: symbols, bounds checking, uninitialized-variable and FP-exception traps
+# (still tagged :latest, so the pipeline picks it up unchanged)
+./build_module.sh mrva --debug
 ```
 
-**Build Time:** ~15-30 minutes (depends on network speed and CPU)
+**Build Time:** ~15-30 minutes (depends on network speed and CPU), plus ~15-20 minutes the
+first time the base image is built.
 
 **Build Stages:**
-1. Download MATLAB Package Manager (~1 min)
-2. Install MATLAB toolboxes (~5 min)
-3. Compile Fortran executables (~2 min)
-4. Compile MATLAB application (~10-20 min)
-5. Create runtime image (~2 min)
+1. Compile Fortran executables with the Intel oneAPI toolchain (~2 min)
+2. Compile the MATLAB application against `mur-matlab-base:r2024b` (~10-20 min)
+3. Create runtime image (~2 min)
+
+### Manual Build (Advanced)
+
+Only when `build_module.sh` doesn't fit — a custom tag, external CI, or debugging the
+Dockerfile. Build context must be the parent `mur` directory (for `common/`), and the base
+image must already exist (`./build_matlab_base.sh` from `mur/`):
+
+```bash
+cd mur/mrva
+docker build --platform linux/amd64 -t mur-mrva:latest -f Dockerfile ..
+
+# Debug variant (what --debug passes)
+docker build --platform linux/amd64 --build-arg DEBUG=1 -t mur-mrva:latest -f Dockerfile ..
+```
+
+See [Manual Builds (Advanced)](../documentation/PIPELINE_CONFIGURATION.md#manual-builds-advanced).
 
 ## Running the Container
 
@@ -144,12 +159,12 @@ Python orchestrator (`run_mur_pipeline.py` / `run_mur_maap.py`). See
 static/dynamic-input flags mirror `documentation/STATIC_DATA.md`.
 
 ```bash
-docker run [OPTIONS] mrva:latest \
+docker run [OPTIONS] mur-mrva:latest \
   --year YEAR --doy DOY --mode MODE [--sensors LIST] \
   --polar-cap-edge-file FILE --seasonal-file FILE \
   --landice-ice-p011-file FILE --landice-grid-p01-file FILE --landice-icefiles-p011-file FILE \
-  --sensor-inputs-manifest FILE --l4-reference-root DIR \
-  [--mur25-grid-file FILE] [--prior-csp-file FILE] [--debug]
+  --sensor-inputs-manifest FILE \
+  [--mur25-grid-file FILE] [--prior-csp-file FILE] [--l4-reference-root DIR] [--debug]
 ```
 
 **Arguments:**
@@ -160,7 +175,7 @@ docker run [OPTIONS] mrva:latest \
 | `--doy` | Yes | Day of year (1-366) | `220` |
 | `--mode` | Yes | Processing mode: `nrt` or `rea` | `nrt` |
 | `--sensors` | No | Comma-separated sensor list (default: all configured) | `AMSR2R,MODISA` |
-| `--sensor-inputs-manifest` | Yes | Path/href to a manifest JSON listing this run's BIC + iQuam files (schema: `docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md` section 3) | |
+| `--sensor-inputs-manifest` | Yes | Path/href to a manifest JSON listing this run's BIC + iQuam files (schema: `documentation/INPUT_CONTRACT.md` section 3) | |
 | `--mur25-grid-file` | No | Absent → skip MUR25 generation | |
 | `--prior-csp-file` | No | Absent → bootstrap reference field from L4 instead | |
 
@@ -212,7 +227,7 @@ docker run --rm \
   -v /local/mrva/output:/data/output \
   -v /local/mrva/cache:/data/cache \
   -v /local/mrva/logs:/data/logs \
-  mrva:latest \
+  mur-mrva:latest \
   --year 2025 --doy 220 --mode nrt \
   --polar-cap-edge-file /local/static-resources/landice/CylinderP01_edge.bip \
   --seasonal-file /local/static-resources/seasonal/mur_220.nc \
@@ -265,7 +280,7 @@ Add MRVA configuration to `mur/config.json`:
 ```json
 {
   "mrva": {
-    "container_image": "mrva:latest",
+    "container_image": "mur-mrva:latest",
     "input_dir_bic": "testing/preprocessing/output/l2p",
     "input_dir_iquam": "testing/preprocessing/output/iquam",
     "input_dir_landice": "testing/preprocessing/output/landice",
@@ -284,16 +299,20 @@ Add MRVA configuration to `mur/config.json`:
 
 ### Running via Orchestrator
 
+There is no separate `--run-mrva` flag — MRVA runs by default alongside landice/iquam/l2p unless you narrow the run with `--preprocess-only` or `--execute`:
+
 ```bash
 # Run full pipeline including MRVA
-uv run run_mur_pipeline.py --config config.json --date 2024-08-08 --run-mrva
+uv run run_mur_pipeline.py --config config.json --date 2024-08-08
 
-# Run only MRVA stage (requires preprocessed inputs)
-uv run run_mur_pipeline.py --config config.json --date 2024-08-08 --execute mrva --run-mrva
+# Run only MRVA stage (requires preprocessed inputs already present)
+uv run run_mur_pipeline.py --config config.json --date 2024-08-08 --execute mrva --keep-containers
 
-# Run full window (9 days) with MRVA
-uv run run_mur_pipeline.py --config config.json --all-stages --run-mrva
+# Run full window (9 days) including MRVA
+uv run run_mur_pipeline.py --config config.json --all-stages
 ```
+
+`--keep-containers` is worth adding when debugging a specific day — it stops the container from being auto-removed on failure, so `docker logs <container_name>` still works afterward.
 
 ## Output Files
 
@@ -392,7 +411,7 @@ ERROR: /opt/mrva/bin/mrva: No such file or directory
 
 **Solution:** Platform mismatch (common on Apple Silicon)
 - Add `--platform linux/amd64` to docker run command
-- Rebuild with correct platform: `./build.sh --platform linux/amd64`
+- Rebuild with `./build_module.sh mrva` (from `mur/`), which always builds `--platform linux/amd64`
 
 ---
 

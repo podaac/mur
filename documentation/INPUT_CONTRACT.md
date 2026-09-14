@@ -1,8 +1,23 @@
-# Explicit Input Contract — Common Design
+# Explicit Input Contract
 
-**Status:** design, pending user review
-**Scope:** core processing pipeline only — `landice/`, `l2p/`, `iquam/`, `mrva/`, their wrappers/entrypoints, `run_mur_pipeline.py`, `run_mur_maap.py`, `config.json`/`config.example.json`. Excludes `dataviewer/`, analysis scripts under `utils/`, `run_web_viewer.py`, `mrva/src/fortran/`.
-**Precedes:** per-container implementation plans, starting with landice (see build order, §11). Builds on the findings in `docs/superpowers/specs/2026-07-27-pipeline-input-inventory.md`.
+**Status:** implemented — this is the contract the four containers and both
+orchestrators follow today. Code comments in `common/bin/localize.sh`,
+`mrva/src/matlab/workflow/mrva4com_container.m`, `run_mur_pipeline.py` and
+`run_mur_maap.py` cite this document by section.
+
+**Scope:** core processing pipeline only — `landice/`, `l2p/`, `iquam/`,
+`mrva/`, their wrappers/entrypoints, `run_mur_pipeline.py`,
+`run_mur_maap.py`, `config.json`/`config.example.json`. Excludes
+`dataviewer/`, analysis scripts under `utils/`, `run_web_viewer.py`,
+`mrva/src/fortran/`.
+
+**See also:** [STATIC_DATA.md](STATIC_DATA.md) for the `static-resources/`
+layout the orchestrators resolve against, and [MAAP_EXECUTION.md](MAAP_EXECUTION.md)
+for the MAAP-side status of the same contract.
+
+> Originally written as a design document before implementation; the build
+> order in §11 and the forward-looking phrasing in §5 and §7 are kept as the
+> historical record of why the contract has the shape it does.
 
 ## 1. Purpose
 

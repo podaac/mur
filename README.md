@@ -10,7 +10,13 @@ The MUR workflow is made up of several components:
 
 ## Documentation
 
-**Comprehensive documentation is available in the [`documentation/`](documentation/) directory:**
+**Start with the documentation site: <https://podaac.github.io/mur/>** — an
+overview of the system, a quick start, how the multi-scale analysis works, and
+guides for operating the pipeline. It is published from [`docs/`](docs/) via
+GitHub Pages.
+
+**Detailed reference material stays as Markdown in [`documentation/`](documentation/),
+next to the code it describes:**
 
 - **[OVERVIEW.md](documentation/OVERVIEW.md)** - High-level system architecture and component overview
 - **[ALGORITHM_FLOW.md](documentation/ALGORITHM_FLOW.md)** - MRVA algorithm details and multi-scale processing
@@ -18,8 +24,10 @@ The MUR workflow is made up of several components:
 - **[DATA_LIFECYCLE.md](documentation/DATA_LIFECYCLE.md)** - Data flow, caching, and storage management
 - **[SENSOR_ADAPTATION.md](documentation/SENSOR_ADAPTATION.md)** - Guide for integrating new satellite sensors
 - **[PIPELINE_CONFIGURATION.md](documentation/PIPELINE_CONFIGURATION.md)** - Installation, configuration, and operation
+- **[INPUT_CONTRACT.md](documentation/INPUT_CONTRACT.md)** - The explicit named-flag and manifest contract every container implements
 - **[LANDICE_ENCODING.md](documentation/LANDICE_ENCODING.md)** - Land/ice mask encoding reference
 - **[STATIC_DATA.md](documentation/STATIC_DATA.md)** - Static data files and reference datasets
+- **[MAAP_EXECUTION.md](documentation/MAAP_EXECUTION.md)** - Current state of running on NASA's MAAP platform: what's real vs. stubbed, the actual OGC/WPS submission mechanism, and what's left to do
 - **[FUTURE_ENHANCEMENTS.md](documentation/FUTURE_ENHANCEMENTS.md)** - Planned features and considered enhancements
 
 **Component-specific documentation:**
@@ -64,7 +72,7 @@ source .venv/bin/activate
 
 ### Building Containers
 
-Use the `build_module.sh` script to build Docker images for processing modules:
+`./build_module.sh` is the supported way to build every processing container. Run it from the `mur/` directory:
 
 ```bash
 # Build all modules (iquam, l2p, landice, mrva)
@@ -80,14 +88,18 @@ Use the `build_module.sh` script to build Docker images for processing modules:
 ./build_module.sh all --no-cache
 ```
 
-The script automatically checks for the MATLAB base image and `network.lic` license file before building. See [MATLAB Base Image](matlab-base/README.md) for base image details.
+The script builds the `mur-matlab-base:r2024b` image first if it is missing, verifies `network.lic` exists, always builds `--platform linux/amd64` with the parent `mur/` directory as build context, and tags the result `mur-iquam:latest`, `mur-l2p:latest`, `mur-landice:latest`, or `mur-mrva:latest` — the exact names the pipeline config (`config.json`) expects.
+
+Prerequisite: copy `network.lic.example` to `network.lic` and point it at your MATLAB license server before the first build.
+
+For raw `docker build` invocations (CI images, one-off experiments, debugging the Dockerfiles themselves), see [Manual Builds (Advanced)](documentation/PIPELINE_CONFIGURATION.md#manual-builds-advanced). See [MATLAB Base Image](matlab-base/README.md) for base image details.
 
 ### Production-Style Pipeline Orchestrator
 
 A production-style test orchestrator is available that mimics the architecture of `nrtMRVA.py`:
 
 ```bash
-# Run for yesterday's data (NRT mode)
+# Run for yesterday's data (NRT mode) -- landice, iquam, l2p, and mrva
 mur-pipeline --config config.json
 # or: uv run run_mur_pipeline.py --config config.json
 
@@ -97,19 +109,21 @@ mur-pipeline --config config.json --all-stages
 # Run for specific date
 mur-pipeline --config config.json --date 2024-08-08
 
-# Run with MRVA stage (when ready)
-mur-pipeline --config config.json --all-stages --run-mrva
+# Preprocessing only (landice, iquam, l2p), skip MRVA
+mur-pipeline --config config.json --all-stages --preprocess-only
 ```
+
+**L2P downloading is a separate stage, not run by default** — `l2p` only turns already-downloaded granules into BIC files; nothing downloads unless you run `--execute l2p-download` explicitly (normally via cron: `run_l2p_download_cron.sh`/`run_l2p_deepsync_cron.sh` at the repo root). See [documentation/PIPELINE_CONFIGURATION.md](documentation/PIPELINE_CONFIGURATION.md) for the full command-line reference.
 
 **Key Features:**
 
-- **Cron-style L2P downloads**: Mimics production hourly download jobs
-- **Direct container calls**: L2P containers called directly (not via Python helpers)
+- **Explicit-args containers**: every input (static files, per-day outputs, sensor fan-in) is a named flag, resolved by the Python orchestrator — never a bind-mounted directory the container scans
+- **Local or S3, uniformly**: the same flags accept either a local path or an `s3://` href
 - **NRT vs REA modes**: Automatic mode detection based on data age
 - **Stability latency**: Smart reprocessing only when data changes
-- **MRVA-ready**: Stage 5 prepared but not yet executed
+- **All four stages operational**: landice, iquam, l2p, and mrva all produce real output
 
-See [run_mur_pipeline.py](run_mur_pipeline.py) for full details on the test driver.
+See [run_mur_pipeline.py](run_mur_pipeline.py) and [documentation/PIPELINE_CONFIGURATION.md](documentation/PIPELINE_CONFIGURATION.md) for full details.
 
 ## InputGen Operations
 

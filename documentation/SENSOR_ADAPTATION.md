@@ -549,9 +549,12 @@ def download_l2p_data(sensor, year, doy, dayrange):
 **Rebuild to include SensorTable changes:**
 
 ```bash
-cd mur/l2p
-docker build --platform linux/amd64 -t mur-l2p:latest -f Dockerfile ..
+cd mur
+./build_module.sh l2p
 ```
+
+(For a manual `docker build`, see
+[Manual Builds (Advanced)](PIPELINE_CONFIGURATION.md#manual-builds-advanced).)
 
 **Tag for versioning:**
 ```bash
@@ -560,7 +563,7 @@ docker tag mur-l2p:latest mur-l2p:v1.1-newsensor
 
 **Push to registry (if using):**
 ```bash
-docker push ghcr.io/nasa-jpl/mur-l2p:latest
+docker push ghcr.io/podaac/mur-l2p:latest
 ```
 
 ## Testing and Validation

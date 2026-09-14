@@ -22,25 +22,17 @@ The application:
 
 ### Build and Run
 
-**⚠️ Important:** The build process requires a valid MATLAB license server connection during compilation. If the license server is unreachable, the build may hang at the compilation step.
-
-**IMPORTANT:** The Dockerfile references shared utilities from the `../common` folder, so the build context must include the parent `mur` directory. Build from within the landice directory and set the context to the parent (`..`).
+**⚠️ Important:** The build process requires a valid MATLAB license server connection during compilation. If the license server is unreachable, the build may hang at the compilation step. Copy `network.lic.example` to `mur/network.lic` and point it at your license server before the first build.
 
 ```bash
-# Navigate to the landice directory
-cd mur/landice
-
-# Build the container (AMD64 for production compatibility)
-docker build --platform linux/amd64 -f Dockerfile -t mur-landice:latest ..
-
-# For macOS with Apple container tools:
-# container build --arch amd64 -f Dockerfile -t mur-landice:latest ..
+# Build with build_module.sh from the mur/ directory
+cd mur
+./build_module.sh landice
 
 # Run — every static input is an explicit flag, bind-mounted individually
 docker run --rm --shm-size=512M \
-  -e OSISAF_FTP_REPROCESSED="ftp://osisaf.met.no/reprocessed" \
-  -e OSISAF_FTP_ARCHIVE="ftp://osisaf.met.no/archive" \
-  -e OSISAF_FTP_PROD="ftp://osisaf.met.no/prod" \
+  -e OSISAF_FTP_ARCHIVE="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
+  -e OSISAF_FTP_PROD="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
   -v /path/to/static-resources/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro \
   -v /path/to/static-resources/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro \
   -v /path/to/static-resources/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro \
@@ -60,6 +52,24 @@ docker run --rm --shm-size=512M \
 ```
 
 See [documentation/STATIC_DATA.md](../documentation/STATIC_DATA.md) for where the six static files (`grids/maskGLOBp01deg.gds`, `mat/p01/saf2north.mat`, etc.) come from and their full-tree layout.
+
+#### Manual Build (Advanced)
+
+`build_module.sh` is the supported path. Build by hand only for a custom tag, external CI,
+or Dockerfile debugging — the build context must be the parent `mur` directory so the
+Dockerfile can reach `common/`, and the `mur-matlab-base:r2024b` image must already exist
+(`./build_matlab_base.sh` from `mur/`):
+
+```bash
+cd mur/landice
+docker build --platform linux/amd64 -f Dockerfile -t mur-landice:latest ..
+
+# Or with Apple's container tools on macOS:
+# container build --arch amd64 -f Dockerfile -t mur-landice:latest ..
+```
+
+See [Manual Builds (Advanced)](../documentation/PIPELINE_CONFIGURATION.md#manual-builds-advanced)
+and [BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md) for the in-container `mcc` workflow.
 
 ### Container Features
 
@@ -145,9 +155,8 @@ docker run --rm \
   -e MCR_CACHE_ROOT=/tmp/mcr_cache \
   -e MCR_CACHE_SIZE=1024M \
   -e _JAVA_OPTIONS="-Xmx2048m -Xms512m -XX:+UseG1GC" \
-  -e OSISAF_FTP_REPROCESSED="ftp://osisaf.met.no/reprocessed" \
-  -e OSISAF_FTP_ARCHIVE="ftp://osisaf.met.no/archive" \
-  -e OSISAF_FTP_PROD="ftp://osisaf.met.no/prod" \
+  -e OSISAF_FTP_ARCHIVE="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
+  -e OSISAF_FTP_PROD="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
   -v /data/static-resources/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro \
   -v /data/static-resources/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro \
   -v /data/static-resources/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro \
@@ -181,9 +190,8 @@ for DOY in $(seq $START_DOY $END_DOY); do
     echo "Processing Year: $YEAR, DOY: $DOY"
 
     docker run --rm --shm-size=512M \
-        -e OSISAF_FTP_REPROCESSED="ftp://osisaf.met.no/reprocessed" \
-        -e OSISAF_FTP_ARCHIVE="ftp://osisaf.met.no/archive" \
-        -e OSISAF_FTP_PROD="ftp://osisaf.met.no/prod" \
+        -e OSISAF_FTP_ARCHIVE="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
+        -e OSISAF_FTP_PROD="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
         -v "$STATIC/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro" \
         -v "$STATIC/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro" \
         -v "$STATIC/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro" \
@@ -213,11 +221,24 @@ In practice, `run_mur_pipeline.py` already does this per-day looping and flag co
 
 ## Environment Variables
 
-The application uses these environment variables for OSI SAF FTP access:
+The application uses these environment variables to locate OSI-SAF ice
+concentration data. OSI-SAF's anonymous FTP host is dead — connections to
+`ftp://osisaf.met.no` time out — so the defaults are HTTPS THREDDS endpoints.
+The names keep their `_FTP_` spelling because they are part of the container's
+published interface; `readosisafice.m` dispatches on the URL scheme, so an
+`ftp://` value still works if one is supplied.
 
-- `OSISAF_FTP_REPROCESSED`: FTP path for reprocessed data (default: ftp://osisaf.met.no/reprocessed)
-- `OSISAF_FTP_ARCHIVE`: FTP path for archive data (default: ftp://osisaf.met.no/archive)  
-- `OSISAF_FTP_PROD`: FTP path for production data (default: ftp://osisaf.met.no/prod)
+- `OSISAF_FTP_ARCHIVE`: recent days (default: `https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc`)
+- `OSISAF_FTP_PROD`: current day (default: same as archive)
+- `OSISAF_FTP_REPROCESSED`: pre-2009 dates — **no default**. The `polstere-100`
+  "reproc" product this once pointed at has no verified HTTPS equivalent on
+  thredds.met.no, so historical reprocessing must supply it explicitly rather
+  than inherit a dead URL.
+
+> **Note on the `amsr2_conc` path:** despite the name, that tree serves AMSR3
+> files from 2026-08-31 onward. `readosisafice.m` selects the `amsr2`/`amsr3`
+> filename token by date; the cutover is overridable with
+> `OSISAF_AMSR3_START=YYYYMMDD`.
 
 ---
 
@@ -333,8 +354,10 @@ spec:
           - "--gridindex-south-p011-file"
           - "/input/gridindex-south-p011.mat"
         env:
-        - name: OSISAF_FTP_REPROCESSED
-          value: "ftp://osisaf.met.no/reprocessed"
+        - name: OSISAF_FTP_ARCHIVE
+          value: "https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc"
+        - name: OSISAF_FTP_PROD
+          value: "https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc"
         volumeMounts:
         - name: static-resources
           mountPath: /input

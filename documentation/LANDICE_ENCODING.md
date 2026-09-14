@@ -188,7 +188,7 @@ Value 13 (ice lake):  <0.01% (frozen Great Lakes)
 
 **Daily Update:** Ice mask regenerated every day (no caching)
 
-### Step 3: NetCDF Output Generation [PENDING]
+### Step 3: NetCDF Output Generation
 
 **Tool:** `csp2nc4a.m` (MRVA post-processing)
 

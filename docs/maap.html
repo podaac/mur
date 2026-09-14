@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Running on MAAP · MUR SST</title>
+<meta name="description" content="Running the MUR pipeline on MAAP: the shared container contract, manifest fan-in, and current implementation status.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav><div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <div class="nav-group">Operating it</div>
+    <a href="static-data.html">Static input data</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html" aria-current="page">Running on MAAP</a></nav>
+  <div class="nav-group">Reference</div>
+  <nav>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">Configuration reference</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">Input contract</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/LANDICE_ENCODING.md">Land/ice encoding</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/mrva/docs/OVERVIEW.md">MRVA internals</a>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>Running on MAAP</h1>
+    <p class="lede">The same container images, submitted as cloud jobs instead of local Docker &mdash; and an honest account of how far that is wired up.</p>
+
+    <h2>What it means here</h2>
+    <p>The container images do not change. Because every input is a named
+    flag whose value may be a local path <em>or</em> an <code>s3://</code>
+    href, the same image runs unmodified in both environments; only the
+    orchestrator differs. <code>run_mur_pipeline.py</code> resolves host
+    paths and bind-mounts them; <code>run_mur_maap.py</code> resolves
+    <code>s3://</code> hrefs and submits jobs.</p>
+
+    <p>Each entrypoint sources a shared helper that fetches
+    <code>s3://</code> values into local scratch before MATLAB starts. Local
+    paths pass through untouched. Nothing in the MATLAB code knows which
+    environment it is running in.</p>
+
+    <h2>Fan-in</h2>
+    <p>Stages with a variable number of inputs &mdash; L2P's granules, MRVA's
+    per-sensor observation files across a multi-day window &mdash; cannot use
+    a repeated flag, because the job submission interface takes a fixed set
+    of named parameters. They take a manifest instead: a small JSON file
+    listing exactly the files this run needs, each entry carrying the path or
+    href plus enough metadata to reconstruct the directory layout MATLAB
+    expects.</p>
+
+    <p>That indirection is what lets an unbounded fan-in travel through a
+    fixed-arity interface, and it works identically on both backends.</p>
+
+    <h2>Current state</h2>
+    <div class="warn">
+      <p>The MAAP path is <strong>partially implemented</strong>. The
+      contract, the manifest mechanism and the localization helper are real
+      and exercised by the local pipeline every run. The job submission and
+      output-retrieval layer is still a stub, and cross-run output discovery
+      &mdash; MRVA finding the previous day's coefficients produced by an
+      earlier job &mdash; depends on a cataloguing mechanism that has not
+      been designed yet.</p>
+    </div>
+
+    <p>In practice that means the containers are ready for the environment
+    but the orchestration around them is not finished. Treat
+    <code>run_mur_maap.py</code> as the shape of the intended solution rather
+    than something deployable today.</p>
+
+    <div class="note">
+      <p>The per-container status table, the confirmed submission mechanism
+      and what remains are in
+      <a href="https://github.com/podaac/mur/blob/HEAD/documentation/MAAP_EXECUTION.md">MAAP_EXECUTION.md</a>. The
+      contract itself is in
+      <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">INPUT_CONTRACT.md</a>.</p>
+    </div>
+
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. Deeper
+      reference material stays as Markdown in the repository and is linked
+      from each page.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

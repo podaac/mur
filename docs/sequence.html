@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Daily execution · MUR SST</title>
+<meta name="description" content="What a scheduled MUR run does day by day, and how near-real-time and reanalysis modes differ.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav><div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html" aria-current="page">Daily execution</a>
+    <div class="nav-group">Operating it</div>
+    <a href="static-data.html">Static input data</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a></nav>
+  <div class="nav-group">Reference</div>
+  <nav>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">Configuration reference</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">Input contract</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/LANDICE_ENCODING.md">Land/ice encoding</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/mrva/docs/OVERVIEW.md">MRVA internals</a>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>Daily execution</h1>
+    <p class="lede">What a scheduled run actually does, and why the same day gets processed more than once.</p>
+
+    <h2>Two modes, one pipeline</h2>
+    <p>Every analysis day is processed in one of two modes, chosen by how old
+    it is relative to the run day:</p>
+
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th></th><th>NRT (&ldquo;Interim&rdquo;)</th><th>REA (&ldquo;Final&rdquo;)</th></tr></thead>
+      <tbody>
+        <tr><th>Applies to</th><td>Recent days, inside the latency window</td><td>Older days, once inputs have settled</td></tr>
+        <tr><th>Starting scale</th><td><code>L0=6</code>, from the previous day's coefficients</td><td><code>L0=2</code>, cold start</td></tr>
+        <tr><th>Existing product</th><td>Always rewritten</td><td>Never regenerated</td></tr>
+        <tr><th>Optimises for</th><td>Latency</td><td>Completeness</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Starting near-real-time runs from the previous day's L=6 coefficients
+    is what makes them fast: the basin- and gyre-scale structure is already
+    solved and only the finer scales need refitting. A reanalysis run cannot
+    assume that background is correct, so it starts cold.</p>
+
+    <h2>The run</h2>
+<figure class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    participant Cron as Scheduled run
+    participant Orch as run_mur_pipeline.py
+    participant Cont as Containers
+    participant Store as Storage
+
+    Cron-&gt;&gt;Orch: Execute with --config
+
+    Orch-&gt;&gt;Orch: Resolve run day and&lt;br/&gt;NRT / REA boundary
+
+    loop For each analysis day in the window
+
+        Orch-&gt;&gt;Orch: Mode for this day&lt;br/&gt;NRT if newer than boundary, else REA
+
+        rect rgb(200, 220, 255)
+            Note over Orch,Cont: 1. LAND / ICE MASK
+            Orch-&gt;&gt;Cont: mur-landice, explicit file flags
+            Cont-&gt;&gt;Cont: Fetch OSI-SAF ice&lt;br/&gt;(walk back if unavailable)
+            Cont-&gt;&gt;Store: Masks and ice points&lt;br/&gt;at both grid resolutions
+        end
+
+        rect rgb(220, 255, 200)
+            Note over Orch,Store: 2. BUOYS (+/- 3 day window)
+            Orch-&gt;&gt;Cont: mur-iquam, year / doy / mode
+            Cont-&gt;&gt;Store: Binary buoy observations
+        end
+
+        rect rgb(255, 240, 200)
+            Note over Orch,Store: 3. L2P SENSORS (+/- 2 day window)
+            loop For each sensor, for each day in window
+                alt Output exists and past stability latency
+                    Orch-&gt;&gt;Store: Keep existing file
+                else Still in flux
+                    Orch-&gt;&gt;Cont: mur-l2p with granule manifest
+                    Cont-&gt;&gt;Store: Binary observation bundle
+                end
+            end
+        end
+
+        rect rgb(255, 220, 220)
+            Note over Orch,Cont: 4. MRVA ANALYSIS
+            alt Product exists and REA mode
+                Orch-&gt;&gt;Store: Keep existing product
+            else Missing, or NRT mode
+                Orch-&gt;&gt;Orch: Build sensor-inputs manifest&lt;br/&gt;resolve prior coefficient
+                Orch-&gt;&gt;Cont: mur-mrva, explicit flags + manifest
+                Cont-&gt;&gt;Store: Coefficients and NetCDF product
+            end
+        end
+    end
+
+    rect rgb(235, 235, 235)
+        Note over Orch,Store: 5. PURGE
+        Orch-&gt;&gt;Store: Drop granules outside the rolling window
+    end
+
+    Orch-&gt;&gt;Cron: Exit with per-stage summary
+</pre>
+<figcaption>A scheduled run walks a window of days, regenerating only the inputs that are still in flux, then runs the analysis for each day.</figcaption>
+</figure>
+    <h2>Stage order</h2>
+    <p>Within a day the stages run in dependency order. Land/ice must exist
+    before MRVA; the L2P and iQUAM conversions are independent of each other
+    but both must finish before the analysis starts.</p>
+    <ol>
+      <li><strong>Land/ice mask</strong> &mdash; fetch sea ice, build the
+          day's masks at both grid resolutions</li>
+      <li><strong>iQUAM</strong> &mdash; convert the buoy window</li>
+      <li><strong>L2P</strong> &mdash; per sensor, per day in the window,
+          convert granules to a binary bundle</li>
+      <li><strong>MRVA</strong> &mdash; fit the analysis, write coefficients
+          and the NetCDF product</li>
+      <li><strong>Purge</strong> &mdash; drop downloaded granules that have
+          aged out of the rolling window</li>
+    </ol>
+
+    <div class="warn">
+      <p>A stage reporting success is not always the same as a stage using
+      the data you expect. The land/ice stage will substitute an older day's
+      sea ice if the requested day is unavailable upstream, and only warns
+      about it &mdash; see the note on reading logs in the
+      <a href="quickstart.html">quick start</a>.</p>
+    </div>
+
+    <div class="note">
+      <p>Exact window arithmetic, rewrite rules and per-sensor latencies are
+      in <a href="https://github.com/podaac/mur/blob/HEAD/documentation/MUR_EXECUTION_SEQUENCE.md">MUR_EXECUTION_SEQUENCE.md</a>.</p>
+    </div>
+
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. Deeper
+      reference material stays as Markdown in the repository and is linked
+      from each page.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

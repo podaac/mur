@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture · MUR SST</title>
+<meta name="description" content="How the MUR pipeline is structured: four MATLAB containers on a shared base image and the explicit-input contract they follow.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav><div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html" aria-current="page">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <div class="nav-group">Operating it</div>
+    <a href="static-data.html">Static input data</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a></nav>
+  <div class="nav-group">Reference</div>
+  <nav>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">Configuration reference</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">Input contract</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/LANDICE_ENCODING.md">Land/ice encoding</a>
+    <a href="https://github.com/podaac/mur/blob/HEAD/mrva/docs/OVERVIEW.md">MRVA internals</a>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>Architecture</h1>
+    <p class="lede">Four MATLAB containers on a shared base image, driven by a Python orchestrator that resolves every input path before any container starts.</p>
+
+    <h2>Four containers, one base image</h2>
+    <p>Each processing stage is a separate Docker image. All four compile
+    MATLAB code against a shared base, <code>mur-matlab-base:r2024b</code>,
+    which is built once and supplies the common toolchain &mdash; so the base
+    must exist before any module will build.</p>
+
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Container</th><th>Does</th><th>Reads</th><th>Writes</th></tr></thead>
+      <tbody>
+        <tr><td><code>mur-landice</code></td>
+            <td>Builds the daily land/ice mask from sea-ice concentration</td>
+            <td>OSI-SAF ice concentration, static land masks and grid indices</td>
+            <td><code>.gds</code> masks, <code>.bip</code> ice SST points</td></tr>
+        <tr><td><code>mur-iquam</code></td>
+            <td>Converts in-situ buoy observations to binary</td>
+            <td>NOAA iQUAM NetCDF</td>
+            <td><code>.bii</code> buoy observations</td></tr>
+        <tr><td><code>mur-l2p</code></td>
+            <td>Converts one sensor-day of L2P granules to a binary bundle</td>
+            <td>PO.DAAC L2P granules (per sensor, per day)</td>
+            <td><code>.bic</code> satellite observations</td></tr>
+        <tr><td><code>mur-mrva</code></td>
+            <td>Fits the multi-scale analysis and writes the product</td>
+            <td>Everything above, plus static grids and climatology</td>
+            <td>Coefficient files and the NetCDF L4 product</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3>Why containers</h3>
+    <p>The analysis is MATLAB and Fortran with a long dependency tail. Each
+    image compiles its MATLAB sources during the build &mdash; which needs a
+    MATLAB Compiler licence &mdash; and ships only the compiled binaries plus
+    the MATLAB Runtime on a slim Debian base. Running the pipeline therefore
+    needs no MATLAB licence at all; only rebuilding does.</p>
+
+    <h2>The explicit-input contract</h2>
+    <p>No container discovers its own inputs. Nothing scans a directory,
+    builds a path from a root, or infers a sensor or date by parsing a
+    filename. Every input arrives as an explicit named flag whose value the
+    Python orchestrator resolved first.</p>
+
+    <p>Inputs take exactly two shapes:</p>
+    <ul>
+      <li><strong>A direct value flag</strong> &mdash;
+          <code>--seasonal-file &lt;path-or-href&gt;</code> &mdash; for anything that
+          resolves to exactly one file.</li>
+      <li><strong>A manifest flag</strong> &mdash;
+          <code>--sensor-inputs-manifest &lt;path-or-href&gt;</code> &mdash; for a
+          variable, unbounded count of files, listed in a small JSON file.</li>
+    </ul>
+
+    <p>Every value may be a local filesystem path <em>or</em> an
+    <code>s3://</code> href. A shared helper sourced by each entrypoint
+    fetches <code>s3://</code> values to local scratch before MATLAB starts;
+    local paths pass through untouched. That is what lets the same image run
+    unchanged locally and in a cloud environment &mdash; only how Python
+    <em>discovers</em> the values differs.</p>
+
+    <div class="note">
+      <p>The manifest schema and the reasoning behind it are specified in the
+      <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">explicit input contract</a>,
+      which code comments cite by section number.</p>
+    </div>
+
+    <h3>Required versus optional</h3>
+    <p>An absent optional input is a meaningful state, not an error. MRVA's
+    previous-day coefficient file is the clearest case: when it is missing the
+    analysis builds its reference field from scratch instead of failing. The
+    entrypoints enforce only the genuinely required flags and check that every
+    supplied path actually exists <em>before</em> MATLAB starts, so a
+    misconfigured path fails immediately and by name rather than surfacing as
+    an opaque read error deep inside a long run.</p>
+
+    <h2>Orchestration</h2>
+    <p>Two orchestrators implement the same contract against different
+    execution backends:</p>
+    <ul>
+      <li><code>run_mur_pipeline.py</code> &mdash; local Docker. Resolves host
+          paths, bind-mounts them, and invokes <code>docker run</code> per
+          stage.</li>
+      <li><code>run_mur_maap.py</code> &mdash; MAAP. Resolves
+          <code>s3://</code> hrefs and submits jobs. See
+          <a href="maap.html">Running on MAAP</a> for what is and is not
+          wired up yet.</li>
+    </ul>
+
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. Deeper
+      reference material stays as Markdown in the repository and is linked
+      from each page.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>
