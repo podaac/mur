@@ -132,8 +132,8 @@ RUN cd /app/matlab && \
     echo "Starting MATLAB compilation..." && \
     echo "  Main entry: mrva4com_container.m" && \
     echo "  All dependencies in: /app/matlab/" && \
-    timeout 600s matlab -batch "results = compiler.build.standaloneApplication('mrva4com_container.m', 'TreatInputsAsNumeric', 'off', 'OutputDir', '/tmp/mrva_build', 'ExecutableName', 'MrvaProcessor', 'EmbedArchive', false); compiler.internal.runtime.utils.setInstallerLocation('/app/matlab/MATLAB_Runtime_R2024b_Update_6_glnxa64.zip'); compiler.runtime.customInstaller('mrva_runtime', results, OutputDir='/tmp/runtime_installer', RuntimeDelivery='installer'); disp('Custom installer generated successfully');" || \
-    (echo "ERROR: Compilation failed. Check license availability." && exit 1) && \
+    timeout 600s matlab -batch "results = compiler.build.standaloneApplication('mrva4com_container.m', 'TreatInputsAsNumeric', 'off', 'OutputDir', '/tmp/mrva_build', 'ExecutableName', 'MrvaProcessor', 'EmbedArchive', false); compiler.internal.runtime.utils.setInstallerLocation('/app/matlab/MATLAB_Runtime_glnxa64.zip'); compiler.runtime.customInstaller('mrva_runtime', results, OutputDir='/tmp/runtime_installer', RuntimeDelivery='installer'); disp('Custom installer generated successfully');" || \
+    (echo "ERROR: MATLAB build step failed for mrva." && echo "  This covers BOTH license checkout AND runtime-installer packaging." && echo "  'Invalid MATLAB Runtime installer' => the installer in the base image does" && echo "  not match the installed MATLAB; rebuild mur-matlab-base (its digest pin)." && echo "  A license-server timeout => check connectivity to the servers in network.lic." && exit 1) && \
     echo "Verifying compiled files:" && \
     ls -lh /tmp/mrva_build/
 
