@@ -57,12 +57,23 @@ Set permissions: `chmod 600 ~/.netrc`
 ## Build & Deployment
 
 ### Docker Build
-Each component has its own Dockerfile:
+Build every module with `build_module.sh` from the `mur/` directory — it builds the
+`mur-matlab-base:r2024b` image if missing, checks `network.lic`, sets the platform and
+build context, and applies the `mur-<module>:latest` tags the pipeline config expects:
 ```bash
-# Build from repository root
-docker build --platform linux/amd64 -t mur-l2p:latest ./l2p
-docker build --platform linux/amd64 -t mur-landice:latest ./landice
+./build_module.sh all            # iquam, l2p, landice, mrva
+./build_module.sh l2p            # single module
+./build_module.sh mrva --debug   # symbols + bounds checking
 ```
+
+**Advanced — manual build:** only when `build_module.sh` doesn't fit (custom tags, CI,
+Dockerfile debugging). The build context must be the parent `mur/` directory so `common/`
+is reachable:
+```bash
+cd mur/l2p
+docker build --platform linux/amd64 -t mur-l2p:latest -f Dockerfile ..
+```
+See [Manual builds (advanced)](https://podaac.github.io/mur/configuration.html#manual-builds-advanced).
 
 ### Docker Execution
 ```bash
@@ -165,12 +176,22 @@ python landice/tests/test_execute_landice.py -c landice/tests/config_test.json
 
 ## Environment Variables
 
-### OSI SAF FTP Endpoints (Land Ice)
+### OSI-SAF Endpoints (Land Ice)
+
+OSI-SAF's anonymous FTP is dead (`ftp://osisaf.met.no` times out). These are
+the HTTPS THREDDS endpoints; the variables keep their `_FTP_` names because
+they are part of the container's published interface.
+
 ```bash
-export OSISAF_FTP_REPROCESSED="ftp://osisaf.met.no/reprocessed/ice/conc/v1p2"
-export OSISAF_FTP_ARCHIVE="ftp://osisaf.met.no/archive/ice/conc"  
-export OSISAF_FTP_PROD="ftp://osisaf.met.no/prod/ice/conc"
+export OSISAF_FTP_ARCHIVE="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc"
+export OSISAF_FTP_PROD="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc"
+# OSISAF_FTP_REPROCESSED (pre-2009 dates) has no default and no verified
+# HTTPS equivalent — set it explicitly only for historical reprocessing.
 ```
+
+That tree serves AMSR3 files from 2026-08-31 onward despite the `amsr2_conc`
+name; `landice/src/readosisafice.m` picks the filename token by date, and the
+cutover is overridable with `OSISAF_AMSR3_START=YYYYMMDD`.
 
 ## Workflow Execution Order
 

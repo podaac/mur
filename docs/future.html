@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Future enhancements — MUR SST</title>
+<meta name="description" content="Capabilities that have been considered or partly scaffolded, and are deliberately not part of the operational system today.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav>
+    <div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <a href="mrva-internals.html">MRVA internals</a>
+    <div class="nav-group">Operating it</div>
+    <a href="configuration.html">Configuration</a>
+    <a href="static-data.html">Static input data</a>
+    <a href="input-contract.html">Input contract</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a>
+    <div class="nav-group">Containers</div>
+    <a href="container-landice.html">Land/ice</a>
+    <a href="container-l2p.html">L2P</a>
+    <a href="container-iquam.html">iQUAM</a>
+    <a href="container-mrva.html">MRVA</a>
+    <div class="nav-group">Reference</div>
+    <a href="landice-encoding.html">Land/ice encoding</a>
+    <a href="future.html" aria-current="page">Future enhancements</a>
+    <div class="nav-group">Project</div>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>Future enhancements</h1>
+    <p class="lede">Capabilities that have been considered or partly scaffolded, and are deliberately not part of the operational system today.</p>
+    <nav class="toc" aria-label="On this page">
+    <b>On this page</b>
+    <ul>
+      <li><a href="#introduction">Introduction</a></li>
+      <li><a href="#daytime-data-processing">Daytime Data Processing</a></li>
+      <li><a href="#ecmwf-wind-based-filtering">ECMWF Wind-Based Filtering</a></li>
+      <li><a href="#rea-mode-full-implementation">REA Mode Full Implementation</a></li>
+      <li><a href="#additional-sensor-integration">Additional Sensor Integration</a></li>
+      <li><a href="#processing-optimizations">Processing Optimizations</a></li>
+      <li><a href="#quality-control-enhancements">Quality Control Enhancements</a></li>
+      <li><a href="#implementation-priorities">Implementation Priorities</a></li>
+      <li><a href="#decision-considerations">Decision Considerations</a></li>
+      <li><a href="#references">References</a></li>
+      <li><a href="#conclusion">Conclusion</a></li>
+    </ul>
+    </nav>
+    <h2 id="introduction">Introduction</h2>
+    <p>This document describes features and enhancements that have been considered for the MUR SST processing system but are not currently implemented. Some of these features have preliminary groundwork in the codebase, while others represent potential improvements based on scientific requirements and operational experience.</p>
+    <p><strong>Status:</strong> These features are documented for future reference but are <strong>not part of the current operational system</strong>. They should not be assumed to be available in the preprocessing pipeline or MRVA algorithm.</p>
+    <h2 id="daytime-data-processing">Daytime Data Processing</h2>
+    <h3 id="current-state-nighttime-only">Current State: Nighttime Only</h3>
+    <p><strong>Implementation Status:</strong> ❌ Not Implemented</p>
+    <p><strong>Current Approach:</strong></p>
+    <ul>
+    <li>MUR SST currently uses <strong>nighttime-only observations</strong> from infrared sensors</li>
+    <li>Daytime data is <strong>excluded during preprocessing</strong> to avoid diurnal warming effects</li>
+    <li>This filtering happens in the <code>makebiq</code> stage when converting BIC files to BIQ format</li>
+    </ul>
+    <p><strong>Rationale for Nighttime-Only:</strong></p>
+    <ul>
+    <li>Infrared sensors measure <strong>skin temperature</strong> at the ocean surface</li>
+    <li>During daytime, solar heating creates a warm surface layer (diurnal warm layer)</li>
+    <li>This warm layer can be 1-3°C warmer than the subsurface <strong>foundation temperature</strong></li>
+    <li>Nighttime observations avoid this diurnal warming complication</li>
+    <li>Foundation temperature is what oceanographers typically want for climate studies</li>
+    </ul>
+    <h3 id="proposed-enhancement-daytime-data-integration">Proposed Enhancement: Daytime Data Integration</h3>
+    <p><strong>Scientific Motivation:</strong></p>
+    <ul>
+    <li>Daytime observations could improve spatial coverage, especially in cloud-prone regions</li>
+    <li>High-resolution satellites (MODIS, VIIRS) have many daytime passes</li>
+    <li>Excluding daytime data reduces effective observation count by ~40-50%</li>
+    </ul>
+    <p><strong>Technical Challenges:</strong></p>
+    <ol>
+    <li><strong>Diurnal Warming Correction</strong>
+    <ul>
+    <li>Need model to estimate diurnal warming magnitude</li>
+    <li>Depends on: solar radiation, wind speed, cloud cover, stratification</li>
+    <li>ECMWF provides some of these inputs (see next section)</li>
+    </ul>
+    </li>
+    <li><strong>Foundation Temperature Conversion</strong>
+    <ul>
+    <li>Convert skin temperature → foundation temperature</li>
+    <li>Foundation temp = skin temp - diurnal_warming_correction</li>
+    <li>Correction varies by time of day, season, latitude</li>
+    </ul>
+    </li>
+    <li><strong>Sensor-Specific Handling</strong>
+    <ul>
+    <li>Microwave sensors (AMSR2) less affected by diurnal cycle</li>
+    <li>Infrared sensors (MODIS, VIIRS) strongly affected</li>
+    <li>Need sensor-dependent correction strategies</li>
+    </ul>
+    </li>
+    </ol>
+    <p><strong>Preliminary Groundwork:</strong></p>
+    <ul>
+    <li>Code references in <code>makebiq</code> for daytime filtering exist</li>
+    <li>Infrastructure for time-of-day metadata present in BIC files</li>
+    <li>Would need wind speed input (see ECMWF section)</li>
+    </ul>
+    <p><strong>Implementation Requirements:</strong></p>
+    <pre><code>1. Diurnal Warming Model Integration
+       - Select model (e.g., COARE, Gentemann et al., Fairall et al.)
+       - Implement in MATLAB preprocessing
+       - Validate against buoy observations
+
+    2. Wind Speed Input
+       - Integrate ECMWF ERA5 wind data (see next section)
+       - Or use satellite wind products (ASCAT, WindSat)
+
+    3. Quality Control
+       - Flag uncertain corrections (low wind, high solar)
+       - Monitor foundation temp consistency
+       - Compare daytime vs nighttime residuals
+
+    4. Testing
+       - Run parallel processing (nighttime-only vs. nighttime+daytime)
+       - Validate against independent observations
+       - Assess impact on product quality</code></pre>
+    <p><strong>Estimated Effort:</strong> 6-12 months (model selection, implementation, validation)</p>
+    <p><strong>Priority:</strong> Medium (coverage improvement) vs. High (maintain current quality)</p>
+    <h2 id="ecmwf-wind-based-filtering">ECMWF Wind-Based Filtering</h2>
+    <h3 id="current-state-not-implemented">Current State: Not Implemented</h3>
+    <p><strong>Implementation Status:</strong> ❌ Not Implemented (Groundwork Only)</p>
+    <p><strong>Current Approach:</strong></p>
+    <ul>
+    <li>No wind-based filtering in operational system</li>
+    <li>All quality-passed observations used regardless of wind conditions</li>
+    </ul>
+    <p><strong>Rationale for Wind Filtering:</strong></p>
+    <ul>
+    <li>High winds (&gt;10-15 m/s) can affect SST retrievals</li>
+    <li>Rough seas increase uncertainty in satellite measurements</li>
+    <li>Very low winds (&lt;2 m/s) can lead to diurnal warm layers during daytime</li>
+    </ul>
+    <h3 id="proposed-enhancement-ecmwf-era5-wind-integration">Proposed Enhancement: ECMWF ERA5 Wind Integration</h3>
+    <p><strong>Purpose:</strong></p>
+    <ul>
+    <li>Filter observations under extreme wind conditions</li>
+    <li>Enable diurnal warming corrections (for daytime data)</li>
+    <li>Improve quality control for satellite retrievals</li>
+    </ul>
+    <p><strong>Data Source:</strong></p>
+    <ul>
+    <li><strong>ECMWF ERA5 Reanalysis</strong></li>
+    <li>Variables: 10m u/v wind components</li>
+    <li>Resolution: 0.25° × 0.25° (global)</li>
+    <li>Temporal: Hourly</li>
+    <li>Latency: ~5 days (reanalysis), ~5 hours (operational forecast)</li>
+    </ul>
+    <p><strong>Use Cases:</strong></p>
+    <ol>
+    <li><strong>Quality Filtering (Conservative)</strong>
+    <pre><code>Reject observations where:
+    - Wind speed &gt; 15 m/s (high uncertainty in rough seas)
+    - Wind speed &lt; 1 m/s AND solar_zenith &lt; 60° (diurnal warming risk)</code></pre></li>
+    <li><strong>Diurnal Warming Correction (If Daytime Data Enabled)</strong>
+    <pre><code>correction = f(wind_speed, solar_radiation, time_of_day)
+
+    Where:
+    - Low winds → larger corrections
+    - High winds → minimal corrections
+    - Nighttime → no correction needed</code></pre></li>
+    <li><strong>Uncertainty Weighting</strong>
+    <pre><code>observation_weight = base_weight * wind_factor
+
+    Where:
+    - wind_factor = 1.0 for moderate winds (3-10 m/s)
+    - wind_factor = 0.5 for extreme winds (&gt;15 m/s or &lt;2 m/s)</code></pre></li>
+    </ol>
+    <p><strong>Implementation Requirements:</strong></p>
+    <pre><code>1. ECMWF Data Access
+       - Copernicus Climate Data Store (CDS) API
+       - Download ERA5 hourly winds
+       - Grid: 0.25° resolution (or 0.5° for efficiency)
+       - Variables: u10, v10 (10-meter wind components)
+
+    2. Preprocessing Integration
+       - Add wind field reader to preprocessing containers
+       - Spatiotemporal interpolation to observation locations
+       - Calculate wind speed: sqrt(u10^2 + v10^2)
+
+    3. Filtering Logic
+       - Add wind-based QC flags to BIC/BIQ files
+       - Implement in makebiq.m or l2p2bic.m
+       - Configurable thresholds per sensor
+
+    4. Storage Requirements
+       - ERA5 winds: ~50 MB/day compressed
+       - Annual: ~18 GB
+       - Modest compared to L2P data (~1.6 TB/year)</code></pre>
+    <p><strong>Code References (Groundwork):</strong></p>
+    <ul>
+    <li><code>makebiq</code> mentions "wind-dependent filtering" (not implemented)</li>
+    <li>Infrastructure exists for additional QC flags in BIQ format</li>
+    </ul>
+    <p><strong>Estimated Effort:</strong> 3-6 months (data pipeline, interpolation, validation)</p>
+    <p><strong>Priority:</strong> Low-Medium (quality improvement, prerequisite for daytime data)</p>
+    <p><strong>Challenges:</strong></p>
+    <ul>
+    <li>Data latency: ERA5 reanalysis has 5-day lag</li>
+    <li>Could use ECMWF operational forecast for NRT (5-hour latency)</li>
+    <li>Need to validate wind product quality against buoy winds</li>
+    </ul>
+    <h2 id="rea-mode-full-implementation">REA Mode Full Implementation</h2>
+    <h3 id="current-state-partially-implemented">Current State: Partially Implemented</h3>
+    <p><strong>Implementation Status:</strong> ⚠️ Partially Implemented (Infrastructure Present)</p>
+    <p><strong>Current Status:</strong></p>
+    <ul>
+    <li><strong>NRT (Near Real-Time) Mode:</strong> ✅ Fully operational
+    <ul>
+    <li>Uses previous day's L=6 coefficients as background</li>
+    <li>Fast processing for operational delivery</li>
+    <li>Optimizes for speed over completeness</li>
+    </ul>
+    </li>
+    <li><strong>REA (Reanalysis) Mode:</strong> ⚠️ Partially implemented
+    <ul>
+    <li>Infrastructure exists (mode detection, parameter handling)</li>
+    <li>Preprocessing components support REA</li>
+    <li><strong>MRVA stage not yet containerized</strong> (pending development)</li>
+    </ul>
+    </li>
+    </ul>
+    <p><strong>What Works:</strong></p>
+    <ul>
+    <li>Mode detection based on data age</li>
+    <li>Stability latency logic for REA vs NRT</li>
+    <li>Preprocessing respects REA requirements (no cache skipping)</li>
+    <li>Configuration parameters for REA processing</li>
+    </ul>
+    <p><strong>What's Missing:</strong></p>
+    <ol>
+    <li><strong>MRVA Container for REA</strong>
+    <ul>
+    <li>Current: MRVA not containerized</li>
+    <li>Needed: Containerized MRVA with REA mode support</li>
+    <li>Difference: REA starts from L=2 (coarse), NRT starts from L=6 (medium)</li>
+    </ul>
+    </li>
+    <li><strong>Quality Assurance for REA</strong>
+    <ul>
+    <li>Need validation against buoy/ship observations</li>
+    <li>Comparison with NRT products</li>
+    <li>Consistency checks across reprocessed periods</li>
+    </ul>
+    </li>
+    <li><strong>Automated Reprocessing Workflows</strong>
+    <ul>
+    <li>Systematic reanalysis for data corrections</li>
+    <li>Batch processing of historical periods</li>
+    <li>Gap filling for missed NRT days</li>
+    </ul>
+    </li>
+    </ol>
+    <p><strong>Implementation Requirements:</strong></p>
+    <pre><code>1. MRVA Containerization
+       - Port Fortran MRVA code to container
+       - Support both NRT (L0=6) and REA (L0=2) modes
+       - Parameter configuration via environment variables
+
+    2. REA Orchestration
+       - Enhanced pipeline orchestrator
+       - Multi-day batch processing
+       - Resource management for long runs
+
+    3. Validation Pipeline
+       - Compare REA vs NRT statistics
+       - Validation against withheld observations
+       - Long-term consistency checks
+
+    4. Documentation
+       - REA-specific configuration guide
+       - Best practices for reanalysis campaigns
+       - Expected runtime and resource usage</code></pre>
+    <p><strong>Estimated Effort:</strong> 4-8 months (MRVA containerization, testing, validation)</p>
+    <p><strong>Priority:</strong> High (enables reprocessing for data corrections and research)</p>
+    <h2 id="additional-sensor-integration">Additional Sensor Integration</h2>
+    <h3 id="sensors-considered-but-not-yet-integrated">Sensors Considered but Not Yet Integrated</h3>
+    <p><strong>Implementation Status:</strong> ❌ Not Implemented</p>
+    <p>Several satellite sensors could enhance MUR coverage and quality:</p>
+    <h3 id="1-viirs-visible-infrared-imaging-radiometer-suite">1. VIIRS (Visible Infrared Imaging Radiometer Suite)</h3>
+    <p><strong>Satellite:</strong> NOAA-20, SNPP <strong>Type:</strong> Infrared <strong>Resolution:</strong> ~750m (similar to MODIS) <strong>Status:</strong> Available from PO.DAAC</p>
+    <p><strong>Advantages:</strong></p>
+    <ul>
+    <li>Similar resolution to MODIS</li>
+    <li>Additional temporal coverage</li>
+    <li>Improved cloud detection</li>
+    </ul>
+    <p><strong>Integration Path:</strong></p>
+    <ul>
+    <li>Add to <code>SensorTable.m</code> with La=2, Lb=12</li>
+    <li>Similar processing to MODISA/MODIST</li>
+    <li>Collection: <code>VIIRS_NPP-OSPO-L2P-v2.61</code></li>
+    </ul>
+    <h3 id="2-goes-r-abi-geostationary">2. GOES-R ABI (Geostationary)</h3>
+    <p><strong>Satellite:</strong> GOES-16/17 (West/East) <strong>Type:</strong> Infrared (geostationary) <strong>Resolution:</strong> ~2 km <strong>Coverage:</strong> Americas only</p>
+    <p><strong>Advantages:</strong></p>
+    <ul>
+    <li>High temporal resolution (15 min)</li>
+    <li>Excellent for diurnal studies (if daytime enabled)</li>
+    <li>Cloud gap filling</li>
+    </ul>
+    <p><strong>Challenges:</strong></p>
+    <ul>
+    <li>Regional coverage only</li>
+    <li>Large data volume (many granules/day)</li>
+    <li>Geostationary viewing angle effects</li>
+    </ul>
+    <h3 id="3-himawari-89-ahi">3. Himawari-8/9 AHI</h3>
+    <p><strong>Satellite:</strong> Himawari-8/9 <strong>Type:</strong> Infrared (geostationary) <strong>Resolution:</strong> ~2 km <strong>Coverage:</strong> Asia-Pacific</p>
+    <p><strong>Similar to GOES:</strong> High temporal, regional coverage</p>
+    <h3 id="4-smap-sst">4. SMAP SST</h3>
+    <p><strong>Satellite:</strong> Soil Moisture Active Passive <strong>Type:</strong> Microwave (L-band) <strong>Resolution:</strong> ~40 km <strong>Status:</strong> Available</p>
+    <p><strong>Advantages:</strong></p>
+    <ul>
+    <li>All-weather like AMSR2</li>
+    <li>Different frequency (complementary)</li>
+    </ul>
+    <p><strong>Configuration:</strong></p>
+    <ul>
+    <li>Add with La=2, Lb=7 (coarse resolution)</li>
+    </ul>
+    <p><strong>See:</strong> <a href="sensors.html">Adding a sensor</a> for integration procedures</p>
+    <h2 id="processing-optimizations">Processing Optimizations</h2>
+    <h3 id="potential-performance-improvements">Potential Performance Improvements</h3>
+    <p><strong>Implementation Status:</strong> ❌ Not Implemented</p>
+    <h3 id="1-gpu-acceleration-for-mrva">1. GPU Acceleration for MRVA</h3>
+    <p><strong>Current:</strong> CPU-only PCG solver <strong>Proposed:</strong> GPU-accelerated sparse linear algebra</p>
+    <p><strong>Potential Speedup:</strong> 5-10x for solver stage</p>
+    <p><strong>Requirements:</strong></p>
+    <ul>
+    <li>CUDA/OpenCL implementation</li>
+    <li>GPU-compatible MATLAB or Fortran libraries</li>
+    <li>Testing on GPU-enabled infrastructure</li>
+    </ul>
+    <h3 id="2-parallel-l2p-processing">2. Parallel L2P Processing</h3>
+    <p><strong>Current:</strong> Sequential sensor processing <strong>Proposed:</strong> Parallel execution of multiple sensors</p>
+    <p><strong>Implementation:</strong></p>
+    <ul>
+    <li>Already possible with current containers</li>
+    <li>Need orchestrator enhancement</li>
+    <li>Resource management (memory, I/O)</li>
+    </ul>
+    <p><strong>Speedup:</strong> ~4x (processing 4 sensors in parallel)</p>
+    <h3 id="3-incremental-processing">3. Incremental Processing</h3>
+    <p><strong>Current:</strong> Full reprocessing each day <strong>Proposed:</strong> Update only changed observations</p>
+    <p><strong>Concept:</strong></p>
+    <ul>
+    <li>Track which observations changed since last run</li>
+    <li>Only reprocess affected scales</li>
+    <li>Maintain coefficient continuity</li>
+    </ul>
+    <p><strong>Complexity:</strong> High (dependency tracking) <strong>Benefit:</strong> Potentially 50% reduction in processing time</p>
+    <h3 id="4-cloud-native-storage">4. Cloud-Native Storage</h3>
+    <p><strong>Current:</strong> Local filesystem (/nas2) <strong>Proposed:</strong> Object storage (S3, GCS)</p>
+    <p><strong>Advantages:</strong></p>
+    <ul>
+    <li>Scalable storage</li>
+    <li>Redundancy</li>
+    <li>Cost-effective archival</li>
+    <li>Multi-region access</li>
+    </ul>
+    <p><strong>Challenges:</strong></p>
+    <ul>
+    <li>I/O performance for random access</li>
+    <li>Data transfer costs</li>
+    <li>Need for caching layer</li>
+    </ul>
+    <h2 id="quality-control-enhancements">Quality Control Enhancements</h2>
+    <h3 id="advanced-qc-methods">Advanced QC Methods</h3>
+    <p><strong>Implementation Status:</strong> ❌ Not Implemented</p>
+    <h3 id="1-machine-learning-based-qc">1. Machine Learning-Based QC</h3>
+    <p><strong>Concept:</strong></p>
+    <ul>
+    <li>Train ML model to detect anomalous observations</li>
+    <li>Features: SST, location, time, sensor, neighboring obs</li>
+    <li>Flag suspicious data before MRVA</li>
+    </ul>
+    <p><strong>Potential Applications:</strong></p>
+    <ul>
+    <li>Cloud contamination detection</li>
+    <li>Sensor calibration drift</li>
+    <li>Frontal feature validation</li>
+    </ul>
+    <h3 id="2-cross-sensor-consistency-checks">2. Cross-Sensor Consistency Checks</h3>
+    <p><strong>Current:</strong> Basic range checks <strong>Proposed:</strong> Inter-sensor validation</p>
+    <p><strong>Example:</strong></p>
+    <pre><code>If MODIS and AMSR2 differ by &gt;2°C at same location:
+      - Flag as potential issue
+      - Check other sensors
+      - Downweight if inconsistent</code></pre>
+    <h3 id="3-temporal-consistency">3. Temporal Consistency</h3>
+    <p><strong>Concept:</strong></p>
+    <ul>
+    <li>Check if SST change from previous day is reasonable</li>
+    <li>Flag sudden jumps (&gt;5°C/day) for review</li>
+    <li>Useful for detecting sensor issues</li>
+    </ul>
+    <h3 id="4-spatial-gradient-limits">4. Spatial Gradient Limits</h3>
+    <p><strong>Current:</strong> No explicit gradient constraints <strong>Proposed:</strong> Flag extreme spatial gradients</p>
+    <p><strong>Rationale:</strong></p>
+    <ul>
+    <li>Real ocean fronts rarely exceed ~0.5°C/km</li>
+    <li>Stronger gradients may indicate retrieval errors</li>
+    <li>Could flag cloud edges, land contamination</li>
+    </ul>
+    <h2 id="implementation-priorities">Implementation Priorities</h2>
+    <h3 id="recommended-phasing">Recommended Phasing</h3>
+    <p><strong>Phase 1 (High Priority, 6-12 months):</strong></p>
+    <ol>
+    <li>✅ Complete MRVA containerization</li>
+    <li>✅ Full REA mode support</li>
+    <li>⚠️ Basic quality assurance pipeline</li>
+    </ol>
+    <p><strong>Phase 2 (Medium Priority, 12-18 months):</strong></p>
+    <ol>
+    <li>❌ VIIRS sensor integration</li>
+    <li>❌ Parallel L2P processing optimization</li>
+    <li>❌ Cross-sensor consistency checks</li>
+    </ol>
+    <p><strong>Phase 3 (Lower Priority, 18-24 months):</strong></p>
+    <ol>
+    <li>❌ ECMWF wind integration (if daytime not pursued)</li>
+    <li>❌ Geostationary sensors (GOES, Himawari)</li>
+    <li>❌ GPU acceleration exploration</li>
+    </ol>
+    <p><strong>Phase 4 (Research/Long-term):</strong></p>
+    <ol>
+    <li>❌ Daytime data processing (requires ECMWF)</li>
+    <li>❌ Machine learning QC</li>
+    <li>❌ Cloud-native architecture</li>
+    </ol>
+    <h2 id="decision-considerations">Decision Considerations</h2>
+    <h3 id="daytime-data-proceed-or-not">Daytime Data: Proceed or Not?</h3>
+    <p><strong>Arguments For:</strong></p>
+    <ul>
+    <li>40-50% more observations</li>
+    <li>Better coverage in cloudy regions</li>
+    <li>Higher resolution temporal sampling</li>
+    </ul>
+    <p><strong>Arguments Against:</strong></p>
+    <ul>
+    <li>Diurnal warming model complexity</li>
+    <li>Additional dependencies (ECMWF winds)</li>
+    <li>Risk to product quality if correction fails</li>
+    <li>Nighttime-only is scientifically sound approach</li>
+    </ul>
+    <p><strong>Recommendation:</strong> Defer until REA mode is fully operational and validated. Then prototype daytime processing in research mode with extensive validation.</p>
+    <h3 id="ecmwf-wind-independent-value">ECMWF Wind: Independent Value?</h3>
+    <p><strong>Without Daytime Processing:</strong></p>
+    <ul>
+    <li>Limited benefit (quality filtering only)</li>
+    <li>Adds dependency and latency</li>
+    <li>May not justify complexity</li>
+    </ul>
+    <p><strong>With Daytime Processing:</strong></p>
+    <ul>
+    <li>Essential for diurnal warming correction</li>
+    <li>Enables quality improvements</li>
+    <li>Worth the implementation cost</li>
+    </ul>
+    <p><strong>Recommendation:</strong> Implement only if daytime data processing is pursued, or if specific quality issues emerge that wind filtering would address.</p>
+    <h3 id="rea-mode-critical-path">REA Mode: Critical Path</h3>
+    <p><strong>Why Important:</strong></p>
+    <ul>
+    <li>Enables reprocessing for data corrections</li>
+    <li>Required for long-term climate record consistency</li>
+    <li>Allows validation and improvement studies</li>
+    <li>Supports research applications</li>
+    </ul>
+    <p><strong>Recommendation:</strong> Complete REA implementation before pursuing other enhancements. It's foundational for product quality and scientific credibility.</p>
+    <h2 id="references">References</h2>
+    <h3 id="scientific-literature">Scientific Literature</h3>
+    <ul>
+    <li><strong>Diurnal Warming:</strong>
+    <ul>
+    <li>Gentemann, C. L., et al. (2003). "Diurnal signals in satellite sea surface temperature measurements." <em>Geophysical Research Letters</em>, 30(3).</li>
+    <li>Fairall, C. W., et al. (1996). "Cool-skin and warm-layer effects on sea surface temperature." <em>Journal of Geophysical Research</em>, 101(C1), 1295-1308.</li>
+    </ul>
+    </li>
+    <li><strong>Foundation Temperature:</strong>
+    <ul>
+    <li>Donlon, C. J., et al. (2002). "Toward improved validation of satellite sea surface skin temperature measurements for climate research." <em>Journal of Climate</em>, 15(4), 353-369.</li>
+    </ul>
+    </li>
+    <li><strong>MUR Algorithm:</strong>
+    <ul>
+    <li>Chin, T. M., et al. (2017). "A multi-scale high-resolution analysis of global sea surface temperature." <em>Remote Sensing of Environment</em>, 200, 154-169.</li>
+    </ul>
+    </li>
+    </ul>
+    <h3 id="external-resources">External Resources</h3>
+    <ul>
+    <li>ECMWF ERA5: https://www.ecmwf.int/en/forecasts/datasets/reanalysis-datasets/era5</li>
+    <li>PO.DAAC L2P Data: https://podaac.jpl.nasa.gov/</li>
+    <li>GHRSST Science Team: https://www.ghrsst.org/</li>
+    </ul>
+    <h2 id="conclusion">Conclusion</h2>
+    <p>This document captures enhancements that have been considered for the MUR system. While some features have preliminary groundwork in the codebase (daytime filtering hooks, REA mode infrastructure), they should not be considered operational.</p>
+    <p><strong>Key Takeaways:</strong></p>
+    <ol>
+    <li><strong>Current system is nighttime-only</strong> - This is scientifically sound and avoids diurnal complications</li>
+    <li><strong>REA mode exists in infrastructure</strong> - But MRVA containerization needed for full implementation</li>
+    <li><strong>Daytime + ECMWF are coupled decisions</strong> - Don't implement one without the other</li>
+    <li><strong>Focus on fundamentals first</strong> - Complete REA mode before pursuing advanced features</li>
+    </ol>
+    <p>Future development should prioritize product quality and operational stability over coverage expansion or algorithmic complexity.</p>
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. This site is
+      the documentation &mdash; there is no separate Markdown copy to fall out of date.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -23,6 +23,16 @@ function [ice,lon,lat] = readosisafice( hem, year, doy, ...
   %% ftp source and file name(s):
   current_mjd = julian(doy,1,year,3);
 
+  % OSI-SAF replaced AMSR2 with AMSR3 inside this same amsr2_conc tree:
+  % verified against thredds.met.no's monthly catalogs, nh/sh amsr2 files
+  % run through 2026-08-30 and amsr3 starts 2026-08-31, with no overlap.
+  % The products are otherwise identical (same grid, dimensions, variables,
+  % scale_factor and _FillValue), so only the name token changes -- but
+  % reprocessing a pre-cutover day still needs the amsr2 name, so this is a
+  % date switch rather than a rename.
+  amsr3_mjd = amsr3_start_mjd();
+  amsr = amsr_tag(current_mjd, amsr3_mjd);
+
   if current_mjd <= lastMJD_reprocessed
 
     ftpdir = getenv("OSISAF_FTP_REPROCESSED"); % 1978-2015.04
@@ -34,7 +44,7 @@ function [ice,lon,lat] = readosisafice( hem, year, doy, ...
   elseif current_mjd <= lastMJD_archive
 
     ftpdir = getenv("OSISAF_FTP_ARCHIVE");
-    filename = sprintf('ice_conc_%s_polstere-100_amsr2_%s1200.nc',hem,date);
+    filename = sprintf('ice_conc_%s_polstere-100_%s_%s1200.nc',hem,amsr,date);
     fprintf(1, 'readOSISAF: Date %s (%s, MJD=%d) > reprocessing cutoff (MJD=%d), <= archive cutoff (MJD=%d)\n', ...
         date, hem, current_mjd, lastMJD_reprocessed, lastMJD_archive);
     fprintf(1, 'readOSISAF: Using ARCHIVE FTP source: %s\n', ftpdir);
@@ -42,12 +52,24 @@ function [ice,lon,lat] = readosisafice( hem, year, doy, ...
   else
 
     ftpdir = getenv("OSISAF_FTP_PROD");
-    subdir = '';
-    filename = sprintf('ice_conc_%s_polstere-100_amsr2_%s1200.nc',hem,date);
+    % No subdir reset here: the THREDDS fileServer tree this points at is
+    % laid out as <root>/YYYY/MM/<file> exactly like the archive endpoint,
+    % so blanking subdir made every production-branch URL a 404.
+    filename = sprintf('ice_conc_%s_polstere-100_%s_%s1200.nc',hem,amsr,date);
     fprintf(1, 'readOSISAF: Date %s (%s, MJD=%d) > archive cutoff (MJD=%d)\n', ...
         date, hem, current_mjd, lastMJD_archive);
     fprintf(1, 'readOSISAF: Using PRODUCTION FTP source: %s\n', ftpdir);
 
+  end
+
+  % An unset endpoint used to mean "build ftp:///path and let each of the 11
+  % download attempts time out". OSI-SAF's FTP is gone, so name the missing
+  % variable once and stop.
+  if isempty(ftpdir)
+    lon=[]; lat=[]; ice=[];
+    fprintf(1, ['readOSISAF: no OSI-SAF endpoint configured for %s (%s). ' ...
+                'Set the matching OSISAF_FTP_* variable.\n'], date, hem);
+    return
   end
 
   % Attempt to retrieve the file
@@ -68,11 +90,14 @@ function [ice,lon,lat] = readosisafice( hem, year, doy, ...
     
     % Set new paths and filenames based on date.
     % NOTE: this fallback only fires for current-date (PROD/ARCHIVE branch)
-    % runs, so the filename pattern must match the AMSR2-only product used
-    % above. The reprocessed branch (pre-cutoff dates) never reaches here
-    % because reprocessed files are always available historically.
+    % runs. Walking back up to 10 days can cross the AMSR2/AMSR3 cutover, so
+    % the generation is re-resolved per day rather than fixed from the
+    % originally requested date. The reprocessed branch (pre-cutoff dates)
+    % never reaches here because reprocessed files are always available
+    % historically.
     subdir = sprintf('/%04d/%02d',year,month);
-    filename = sprintf('ice_conc_%s_polstere-100_amsr2_%s1200.nc',hem,date);
+    filename = sprintf('ice_conc_%s_polstere-100_%s_%s1200.nc', ...
+                       hem,amsr_tag(julian(day,month,year,3),amsr3_mjd),date);
     pathname = sprintf('%s%s/%s',ftpdir,subdir,filename);
     download_file(pathname, filename);
     
@@ -82,7 +107,19 @@ function [ice,lon,lat] = readosisafice( hem, year, doy, ...
 
   % Determine file existence
   if exist(filename,'file'),
-    
+
+    % The walk-back above silently substitutes an older day's ice when the
+    % requested day is unavailable, and the stage still reports success. That
+    % is how MUR analysed 2026-08-30 ice for 2026-09-09 right through the
+    % AMSR2/AMSR3 changeover without a single error. Say so loudly whenever
+    % the file actually used is not the day that was asked for.
+    days_stale = double(current_mjd - julian(day,month,year,3));
+    if days_stale > 0
+      fprintf(1, ['readOSISAF: WARNING: no %s ice available for the ' ...
+                  'requested day; falling back to %s (%d day(s) stale).\n'], ...
+              hem, filename, days_stale);
+    end
+
     % Write out txt file to indicate the data file that will be used in processing
     write_file(out_dir, original_year, original_doy, filename);
 
@@ -113,6 +150,42 @@ function [ice,lon,lat] = readosisafice( hem, year, doy, ...
   end;
 
   lon=fliplr(lon); lat=fliplr(lat); ice=fliplr(ice);
+
+end
+
+% Returns the OSI-SAF AMSR generation token ('amsr2' or 'amsr3') for an MJD.
+function tag = amsr_tag(mjd, cutover_mjd)
+
+  if mjd >= cutover_mjd
+    tag = 'amsr3';
+  else
+    tag = 'amsr2';
+  end
+
+end
+
+% First MJD served as AMSR3 rather than AMSR2. Overridable via
+% OSISAF_AMSR3_START (YYYYMMDD) so another sensor changeover -- or a
+% correction to this one -- needs a config change, not an image rebuild.
+function mjd = amsr3_start_mjd()
+
+  default_start = '20260831';
+  start = getenv('OSISAF_AMSR3_START');
+  if isempty(start), start = default_start; end
+
+  y = NaN; m = NaN; d = NaN;
+  if length(start) == 8
+    y = str2double(start(1:4));
+    m = str2double(start(5:6));
+    d = str2double(start(7:8));
+  end
+  if isnan(y) || isnan(m) || isnan(d)
+    fprintf(1, ['readOSISAF: ignoring malformed OSISAF_AMSR3_START="%s", ' ...
+                'using %s\n'], start, default_start);
+    y = 2026; m = 8; d = 31;
+  end
+
+  mjd = julian(d,m,y,3);
 
 end
 

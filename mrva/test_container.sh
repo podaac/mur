@@ -32,18 +32,18 @@ test_basic() {
     echo ""
 
     # Test 1: Check if image exists
-    echo "Test 1: Checking if mrva:latest image exists..."
-    if docker images mrva:latest | grep -q mrva; then
+    echo "Test 1: Checking if mur-mrva:latest image exists..."
+    if docker images mur-mrva:latest | grep -q mrva; then
         echo "  ✓ Image found"
     else
-        echo "  ✗ Image not found. Run ./build.sh first"
+        echo "  ✗ Image not found. Run ./build_module.sh mrva (from mur/) first"
         exit 1
     fi
     echo ""
 
     # Test 2: Check entrypoint shows usage
     echo "Test 2: Checking entrypoint shows usage on invalid args..."
-    if docker run --rm mrva:latest 2>&1 | grep -q "Usage:"; then
+    if docker run --rm mur-mrva:latest 2>&1 | grep -q "Usage:"; then
         echo "  ✓ Usage information displayed"
     else
         echo "  ✗ Expected usage information not found"
@@ -53,7 +53,7 @@ test_basic() {
 
     # Test 3: Verify Fortran executables are in container
     echo "Test 3: Checking Fortran executables..."
-    EXEC_CHECK=$(docker run --rm --entrypoint /bin/bash mrva:latest -c "ls /opt/mrva/bin/{mrva,spgrid,trimbip3,makehiresgrid,samplegdscsp} 2>&1")
+    EXEC_CHECK=$(docker run --rm --entrypoint /bin/bash mur-mrva:latest -c "ls /opt/mrva/bin/{mrva,spgrid,trimbip3,makehiresgrid,samplegdscsp} 2>&1")
     if echo "$EXEC_CHECK" | grep -q "No such file"; then
         echo "  ✗ Some Fortran executables missing"
         echo "$EXEC_CHECK"
@@ -65,7 +65,7 @@ test_basic() {
 
     # Test 4: Verify MATLAB executable is in container
     echo "Test 4: Checking MATLAB executable..."
-    if docker run --rm --entrypoint /bin/bash mrva:latest -c "test -x /opt/mrva/bin/MrvaProcessor && echo OK" | grep -q "OK"; then
+    if docker run --rm --entrypoint /bin/bash mur-mrva:latest -c "test -x /opt/mrva/bin/MrvaProcessor && echo OK" | grep -q "OK"; then
         echo "  ✓ MATLAB executable present"
     else
         echo "  ✗ MATLAB executable not found or not executable"
@@ -74,8 +74,12 @@ test_basic() {
     echo ""
 
     # Test 5: Check directory structure
+    # Inputs are no longer pre-created directories (explicit-args contract --
+    # every input is now a named flag, localized/materialized at runtime by
+    # entrypoint.sh; see docs/static-data.html). Only output/working
+    # paths are still pre-created in the image.
     echo "Test 5: Checking directory structure..."
-    DIR_CHECK=$(docker run --rm --entrypoint /bin/bash mrva:latest -c "ls -d /data/input/bic /data/input/iquam /data/input/landice /data/output /data/cache /data/logs 2>&1")
+    DIR_CHECK=$(docker run --rm --entrypoint /bin/bash mur-mrva:latest -c "ls -d /data/output /data/cache /data/logs 2>&1")
     if echo "$DIR_CHECK" | grep -q "No such file"; then
         echo "  ✗ Some required directories missing"
         echo "$DIR_CHECK"
@@ -98,6 +102,22 @@ test_basic() {
 
 # Function to run full processing test
 test_full() {
+    echo "========================================="
+    echo "test_full is out of date"
+    echo "========================================="
+    echo "MRVA now takes every input as an explicit named flag (static-resource"
+    echo "files, per-day landice outputs, and a --sensor-inputs-manifest covering"
+    echo "BIC/iQuam fan-in) instead of the old bind-mounted /data/input/{bic,iquam,landice}"
+    echo "directories + positional YEAR DOY MODE args this script still builds below."
+    echo "See docs/container-mrva.html and mrva/bin/entrypoint.sh's usage() for the current"
+    echo "interface, or just use run_mur_pipeline.py, which builds all of this"
+    echo "automatically (--execute mrva)."
+    echo ""
+    echo "This function hasn't been rewritten for the new interface yet -- exiting"
+    echo "rather than running a command guaranteed to fail against the current"
+    echo "entrypoint.sh (which no longer accepts positional args at all)."
+    exit 1
+
     echo "Running full processing test with sample data..."
     echo ""
 
@@ -185,7 +205,7 @@ test_full() {
     echo "    -v $OUTPUT_DIR:/data/output \\"
     echo "    -v $CACHE_DIR:/data/cache \\"
     echo "    -v $LOGS_DIR:/data/logs \\"
-    echo "    mrva:latest 2024 221 nrt"
+    echo "    mur-mrva:latest 2024 221 nrt"
     echo ""
 
     docker run --rm \
@@ -197,7 +217,7 @@ test_full() {
         -v "$OUTPUT_DIR":/data/output \
         -v "$CACHE_DIR":/data/cache \
         -v "$LOGS_DIR":/data/logs \
-        mrva:latest 2024 221 nrt
+        mur-mrva:latest 2024 221 nrt
 
     echo ""
     echo "========================================="

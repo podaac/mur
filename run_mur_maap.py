@@ -1,0 +1,472 @@
+#!/usr/bin/env python3
+"""
+MUR SST pipeline orchestration driver for MAAP (DPS).
+
+Alongside run_mur_pipeline.py (which continues to drive local `docker run`
+execution unchanged), this module is the "different executor" for the same
+decision logic, per docs/maap.html:
+
+  - Date/mode calculation (processing window, NRT vs REA)
+  - STAC discovery of L2P granules (replaces cron downloads)
+  - S3 existence checks (replaces Path.exists() cache checks)
+  - OGC API Processes job submission per container
+  - Waiting + chaining job outputs into downstream stage inputs
+  - STAC publish of the final MUR L4 SST granule
+
+NOTE: NRT_LATENCY/REA_LATENCY/SCAN_LATENCY and the processing-window/mode
+logic below intentionally mirror MUROrchestrator in run_mur_pipeline.py
+(docs/maap.html: "the containers
+themselves barely change"). Keep the two in sync if production's latency
+windows ever change.
+
+This module is a skeleton: MAAPClient's remote-calling methods
+(stac_search, object_exists, list_objects, submit_job, wait_all,
+get_job_output, publish_stac_item) are stubs to be implemented against
+maap-py / pystac-client / boto3. MAAPOrchestrator's decision logic
+(processing window, NRT/REA mode, per-day job sequencing, BIC cache-skip)
+is real and covered by tests/test_run_mur_maap.py against a fake client.
+"""
+import datetime
+import logging
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
+
+import mur_config
+import mur_date
+import mur_window
+from iquam_date_flags import format_iquam_reference_date
+from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
+from mrva_static_files import MRVA_STATIC_RELATIVE_PATHS, seasonal_relative_path
+from mur_maap import paths
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_landice_static_hrefs(static_resources_root: str) -> Dict[str, str]:
+    """Resolve landice's six explicit static input hrefs from the static-resources S3 root."""
+    root = static_resources_root.rstrip("/")
+    return {
+        name: f"{root}/{relative}"
+        for name, relative in LANDICE_STATIC_RELATIVE_PATHS.items()
+    }
+
+
+def build_l2p_manifest_from_hrefs(granule_hrefs: List[str]) -> Dict:
+    """Build the granules manifest (docs/input-contract.html
+    section 3) for L2P from stac_search()'s already-s3://-href granule list
+    -- no path rewriting needed here, unlike the local-mode equivalent in
+    run_mur_pipeline.py's build_l2p_granules_manifest, since these hrefs are
+    already directly readable by the container via localize.sh."""
+    return {"files": [{"path": href} for href in granule_hrefs]}
+
+
+def resolve_mrva_static_hrefs(static_resources_root: str, doy: int) -> Dict[str, str]:
+    """Resolve MRVA's static input hrefs (polar cap edge, MUR25 grid, and
+    this day's seasonal climatology) from the static-resources S3 root. Not
+    yet consumed by run_day()'s mur-mrva job submission -- MRVA's own
+    explicit-args conversion hasn't happened yet; see mrva_static_files.py."""
+    root = static_resources_root.rstrip("/")
+    hrefs = {
+        name: f"{root}/{relative}"
+        for name, relative in MRVA_STATIC_RELATIVE_PATHS.items()
+    }
+    hrefs["seasonal"] = f"{root}/{seasonal_relative_path(doy)}"
+    return hrefs
+
+
+@dataclass
+class DayResult:
+    process_date: datetime.date
+    mode: str
+    mrva_job_id: str
+    netcdf_href: str
+
+
+class MAAPClient:
+    """
+    Thin wrapper around MAAP's remote services: STAC search (maap-py /
+    pystac-client), S3 existence/listing (boto3), and OGC API Processes job
+    submission/polling (maap-py). Each method is a stub — fill in against
+    the real SDKs during implementation (see plan sections 7, 8, 9).
+    """
+
+    def stac_search(
+        self,
+        collections: List[str],
+        start: datetime.date,
+        end: datetime.date,
+    ) -> List[str]:
+        """Return S3 hrefs for granules in `collections` between start/end.
+
+        TODO: pystac_client.Client.open(...).search(...) (plan section 7.1).
+        """
+        raise NotImplementedError("MAAPClient.stac_search: wire up pystac-client")
+
+    def object_exists(self, s3_uri: str) -> bool:
+        """S3 HEAD on a deterministic output prefix (plan section 7.2).
+
+        TODO: boto3 s3.head_object, or maap-py equivalent.
+        """
+        raise NotImplementedError("MAAPClient.object_exists: wire up boto3 HEAD")
+
+    def list_objects(self, prefix: str) -> List[str]:
+        """List S3 hrefs under a prefix, for fan-in inputs (plan section 9).
+
+        TODO: boto3 s3.list_objects_v2, or maap-py equivalent.
+        """
+        raise NotImplementedError("MAAPClient.list_objects: wire up boto3 listing")
+
+    def write_manifest(self, prefix: str, manifest: Dict) -> str:
+        """Write a manifest JSON (docs/input-contract.html
+        section 3) to S3 at `prefix` and return its s3:// href, for
+        fan-in inputs that can't be a repeated flag on real MAAP (section 7).
+        Scoped to one invocation only -- not written for reuse across runs.
+
+        TODO: boto3 s3.put_object, or maap-py equivalent.
+        """
+        raise NotImplementedError("MAAPClient.write_manifest: wire up boto3 put_object")
+
+    def submit_job(self, process_id: str, args: Dict[str, Any]) -> str:
+        """Submit an OGC API Processes execute request for `process_id`.
+
+        `args` keys match the container entrypoints' named-arg flags
+        (e.g. {"year": 2026, "doy": 200} -> --year 2026 --doy 200; see
+        landice/iquam/l2p/mrva bin/entrypoint.sh) so the CWL wiring layer can
+        map them 1:1 to inputBinding prefixes (plan section 8.2).
+
+        TODO: maap-py OGC job submission (plan section 8, 9).
+        """
+        raise NotImplementedError("MAAPClient.submit_job: wire up maap-py OGC execute")
+
+    def wait_all(self, job_ids: List[str]) -> None:
+        """Block until every job in `job_ids` reaches a terminal state.
+
+        TODO: maap-py job polling (plan section 9).
+        """
+        raise NotImplementedError("MAAPClient.wait_all: wire up maap-py job polling")
+
+    def get_job_output(self, job_id: str, output_name: str) -> str:
+        """Return the S3 href for a completed job's named output.
+
+        TODO: maap-py getJobResult() (plan section 6.2, 9).
+        """
+        raise NotImplementedError("MAAPClient.get_job_output: wire up maap-py getJobResult")
+
+    def publish_stac_item(
+        self,
+        netcdf_href: str,
+        process_date: datetime.date,
+        mode: str,
+    ) -> None:
+        """Publish a STAC Item for the MRVA output granule (plan section 6.2).
+
+        TODO: STAC Transaction API / maap-py STAC publish.
+        """
+        raise NotImplementedError("MAAPClient.publish_stac_item: wire up STAC publish")
+
+
+class MAAPOrchestrator:
+    """
+    Orchestrates MUR SST processing on MAAP via OGC Application Package
+    jobs, mirroring MUROrchestrator's date/mode decisions but submitting to
+    `client` (a MAAPClient) instead of shelling out to `docker run`.
+    """
+
+    # Re-exported from mur_window so both orchestrators read one definition
+    # (and so existing callers/tests reading orchestrator.REA_LATENCY still work).
+    NRT_LATENCY = mur_window.NRT_LATENCY
+    REA_LATENCY = mur_window.REA_LATENCY
+    SCAN_LATENCY = mur_window.SCAN_LATENCY
+
+    def __init__(
+        self,
+        config: Dict,
+        client: MAAPClient,
+        force_nrt: bool = False,
+        today_fn: Optional[Callable[[], datetime.date]] = None,
+    ):
+        self.config = mur_config.normalize_config(config)
+        self.client = client
+        self.force_nrt = force_nrt
+        self._today_fn = today_fn or mur_date.today
+
+    def get_reference_today(self) -> datetime.date:
+        return self._today_fn()
+
+    def calculate_processing_window(
+        self,
+        target_date: Optional[datetime.date] = None,
+    ) -> tuple:
+        """See mur_window.calculate_processing_window (shared with MUROrchestrator)."""
+        today = target_date if target_date is not None else self.get_reference_today()
+        return mur_window.calculate_processing_window(today)
+
+    def is_nrt_mode(self, process_date: datetime.date, day1: datetime.date) -> bool:
+        """See mur_window.is_nrt_mode (shared with MUROrchestrator)."""
+        return mur_window.is_nrt_mode(process_date, day1, force_nrt=self.force_nrt)
+
+    @property
+    def workspace_root(self) -> str:
+        """S3 root this run reads cached intermediates from and writes to.
+
+        e.g. "s3://maap-ops-workspace/<username>". Discovered at runtime from
+        maap.aws.workspace_bucket_credentials()["authorized_s3_paths"][0]["uri"]
+        rather than hardcoded; the config key is the override.
+        """
+        return self.config.get("maap", {}).get("workspace_root", "")
+
+    def _find_cached_bic(
+        self,
+        sensor: str,
+        data_day: datetime.date,
+    ) -> Optional[str]:
+        """Href of an already-produced BIC for this sensor/day, or None.
+
+        Probes compressed then plain: l2p's writebic.m emits an uncompressed
+        `.bic`, while production archives are `.bic.gz` and makebiq.m accepts
+        either. Returning the href of whichever actually exists (rather than
+        assuming `.bic.gz`) is what lets the manifest's relative_path carry the
+        real filename -- a `.bic` materialized under a guessed `.bic.gz` name
+        would be missed by mrva4com_container.m's per-sensor scan.
+        """
+        for candidate in paths.bic_candidate_hrefs(self.workspace_root, sensor, data_day):
+            if self.client.object_exists(candidate):
+                return candidate
+        return None
+
+    def _build_sensor_inputs_manifest(
+        self,
+        process_date: datetime.date,
+        bic_results: Dict,
+        iquam_job: str,
+        reference_today: datetime.date,
+    ) -> List[Dict]:
+        """MRVA's unified BIC + IQUAM0 fan-in manifest.
+
+        The window here comes from the `mrva` config section, NOT the `l2p`
+        one. They are different numbers by design: l2p.sensors[X].day_range is
+        which BICs to *produce*, mrva.sensors[X].day_range is which ones the
+        analysis *consumes*, and IQUAM0 has an mrva entry with no l2p
+        counterpart at all. Reading the l2p window here (as this did
+        previously) handed MRVA a short BIC window and exactly one IQUAM0 day
+        instead of its configured +/- 3 -- a silently degraded analysis rather
+        than a failure. Mirrors run_mur_pipeline.py's build_mrva_sensor_manifest.
+        """
+        mrva_config = self.config.get("mrva", {})
+        sensors_config = mrva_config.get("sensors", {})
+        active = mrva_config.get("active_sensors") or list(sensors_config)
+
+        files = []
+        for sensor in active:
+            day_range = sensors_config.get(sensor, {}).get("day_range", 2)
+            for data_day in mur_window.day_range_dates(
+                process_date, day_range, reference_today=reference_today
+            ):
+                if sensor == "IQUAM0":
+                    # iquam writes its whole +/- window in one job, so every
+                    # day resolves against that job's single output directory.
+                    entry_href = (
+                        f"{self.client.get_job_output(iquam_job, 'output').rstrip('/')}"
+                        f"/{data_day.year}/{paths.iquam_filename(data_day)}"
+                    )
+                    files.append({
+                        "path": entry_href,
+                        "sensor": sensor,
+                        "relative_path": paths.iquam_relative_path(data_day),
+                    })
+                    continue
+
+                cached_href, job = bic_results.get((sensor, data_day), (None, None))
+                if job is not None:
+                    entry_href = self.client.get_job_output(job, "bic")
+                elif cached_href is not None:
+                    entry_href = cached_href
+                else:
+                    # MRVA's window reaches a day this run's L2P window didn't
+                    # cover; fall back to whatever is already in the bucket.
+                    entry_href = self._find_cached_bic(sensor, data_day)
+                    if entry_href is None:
+                        logger.warning(
+                            "No BIC available for %s %s -- omitting from MRVA manifest",
+                            sensor, data_day,
+                        )
+                        continue
+
+                files.append({
+                    "path": entry_href,
+                    "sensor": sensor,
+                    "relative_path": paths.bic_relative_path(
+                        sensor, data_day, entry_href.rsplit("/", 1)[-1]
+                    ),
+                })
+        return files
+
+    def run_day(self, process_date: datetime.date, mode: str) -> DayResult:
+        """Submit and chain the four container jobs for one analysis day."""
+        year = process_date.year
+        doy = process_date.timetuple().tm_yday
+
+        landice_hrefs = resolve_landice_static_hrefs(self.config["landice"]["static_resources_dir"])
+        landice_job = self.client.submit_job("mur-landice", {
+            "year": year,
+            "doy": doy,
+            "landmask_p011_file": landice_hrefs["landmask_p011"],
+            "gridindex_north_p011_file": landice_hrefs["gridindex_north_p011"],
+            "gridindex_south_p011_file": landice_hrefs["gridindex_south_p011"],
+            "landmask_p01_file": landice_hrefs["landmask_p01"],
+            "gridindex_north_p01_file": landice_hrefs["gridindex_north_p01"],
+            "gridindex_south_p01_file": landice_hrefs["gridindex_south_p01"],
+        })
+        iquam_config = self.config["iquam"]
+        iquam_job = self.client.submit_job("mur-iquam", {
+            "year": year,
+            "doy": doy,
+            "mode": mode,
+            "reference_date": format_iquam_reference_date(self.get_reference_today()),
+            "buoy_day_range": iquam_config["buoy_dayrange"],
+            "stability_latency": iquam_config["stable_latency"],
+        })
+
+        l2p_jobs = []
+        # Maps (sensor, data_day) -> (cached_href_or_None, job_or_None) for
+        # every BIC this run touched, so the sensor-inputs manifest below can
+        # be built from either this run's fresh job outputs or an already-
+        # confirmed cached object. Landice and iquam are always resubmitted
+        # fresh (design doc section 5: case 1, no STAC lookup needed), but
+        # L2P's per-sensor skip-if-cached logic means some entries have no
+        # job this run. Keyed rather than a flat list because MRVA's fan-in
+        # window (mrva.sensors[X].day_range) is a *different* window from
+        # L2P's production window (l2p.sensors[X].day_range) and has to look
+        # entries up by day rather than consume them in submission order.
+        bic_results = {}
+        reference_today = self.get_reference_today()
+        l2p_config = self.config["l2p"]
+        for sensor in l2p_config["active_sensors"]:
+            sensor_config = l2p_config["sensors"][sensor]
+            stable = sensor_config.get("stable", 2)
+            # skip_future matters: a T-1 analysis day with a forward range of
+            # 2 reaches T+1, which has no granules to find.
+            for data_day in mur_window.day_range_dates(
+                process_date,
+                sensor_config["day_range"],
+                reference_today=reference_today,
+            ):
+                rewrite = mur_window.is_rewrite(reference_today, data_day, stable)
+
+                cached_href = None
+                if not rewrite:
+                    cached_href = self._find_cached_bic(sensor, data_day)
+                if cached_href is not None:
+                    bic_results[(sensor, data_day)] = (cached_href, None)
+                    continue
+
+                granules = self.client.stac_search(
+                    collections=sensor_config["collection_name"],
+                    start=data_day,
+                    end=data_day,
+                )
+                # A variable-count input can't be a repeated flag or a CWL
+                # array (docs/input-contract.html section 3, and arrays
+                # are unconfirmed in MAAP's app-package generator) -- write the
+                # granule list out as a manifest and submit its href instead.
+                # localize_manifest then materializes every entry before MATLAB
+                # runs, so the container's own scan logic needs no changes.
+                granules_manifest_href = self.client.write_manifest(
+                    paths.l2p_manifest_key(sensor, data_day),
+                    build_l2p_manifest_from_hrefs(granules),
+                )
+                job = self.client.submit_job("mur-l2p", {
+                    "sensor": sensor,
+                    "region": sensor_config["region"],
+                    "year": data_day.year,
+                    "doy": data_day.timetuple().tm_yday,
+                    "rewrite": 1 if rewrite else 0,
+                    "granules_manifest": granules_manifest_href,
+                })
+                l2p_jobs.append(job)
+                bic_results[(sensor, data_day)] = (None, job)
+
+        self.client.wait_all([landice_job, iquam_job, *l2p_jobs])
+
+        # Sensor-inputs manifest (BIC + IQUAM0 unified -- IQUAM0 has the
+        # identical fan-in shape as the satellite sensors in
+        # mrva4com_container.m's sensor table).
+        sensor_manifest_files = self._build_sensor_inputs_manifest(
+            process_date, bic_results, iquam_job, reference_today
+        )
+        sensor_inputs_manifest_href = self.client.write_manifest(
+            paths.mrva_manifest_key(process_date), {"files": sensor_manifest_files}
+        )
+
+        mrva_static_hrefs = resolve_mrva_static_hrefs(
+            self.config["mrva"]["static_resources_dir"], doy
+        )
+        # Landice's own output naming isn't confirmed against a real
+        # registered algorithm yet (MAAPClient.get_job_output is still a
+        # stub); confirm all three names against one real landice job before
+        # relying on them. The files themselves are real -- icefiles_YYYY_DDD.txt
+        # is written by landice/src/readosisafice.m's write_file() -- but which
+        # output directory each lands in on DPS is not yet established.
+        landice_ice_p011_href = self.client.get_job_output(landice_job, "landice_ice_p011")
+        landice_grid_p01_href = self.client.get_job_output(landice_job, "landice_grid_p01")
+        landice_icefiles_p011_href = self.client.get_job_output(landice_job, "landice_icefiles_p011")
+
+        mrva_args = {
+            "year": year,
+            "doy": doy,
+            "mode": mode,
+            "polar_cap_edge_file": mrva_static_hrefs["polar_cap_edge"],
+            "seasonal_file": mrva_static_hrefs["seasonal"],
+            "landice_ice_p011_file": landice_ice_p011_href,
+            "landice_grid_p01_file": landice_grid_p01_href,
+            "landice_icefiles_p011_file": landice_icefiles_p011_href,
+            "sensor_inputs_manifest": sensor_inputs_manifest_href,
+            # --l4-reference-root is deliberately omitted. It names a DIRECTORY
+            # tree, and localize.sh's `aws s3 cp` has no --recursive, so an
+            # s3:// value passes through unfetched and mrva's
+            # verify_inputs_exist rejects it as a missing directory -- i.e.
+            # passing it would break the job, not enable a fallback. It is a
+            # bootstrap-only path (mrva4com_container.m falls back to
+            # bootstrapping when no prior coefficient exists), so omitting it
+            # is safe. Closing this needs an `aws s3 sync` branch in
+            # localize_input for prefix-shaped values.
+            #
+            # --prior-csp-file is likewise omitted: its cross-run lookup needs
+            # the STAC intermediate-artifact cataloging that hasn't been built
+            # yet, so MRVA bootstraps each day rather than chaining from the
+            # previous one (matches the documented "absent -> bootstrap"
+            # behavior) rather than guessing a DPS-controlled path.
+        }
+        # Conditional exactly as the local executor does it: absent means
+        # "skip MUR25 product generation", so only pass it when it's really there.
+        if self.client.object_exists(mrva_static_hrefs["mur25_grid"]):
+            mrva_args["mur25_grid_file"] = mrva_static_hrefs["mur25_grid"]
+        if active_sensors := self.config.get("mrva", {}).get("active_sensors"):
+            mrva_args["sensors"] = ",".join(active_sensors)
+
+        mrva_job = self.client.submit_job("mur-mrva", mrva_args)
+        self.client.wait_all([mrva_job])
+
+        netcdf_href = self.client.get_job_output(mrva_job, "netcdf")
+        self.client.publish_stac_item(netcdf_href, process_date, mode)
+
+        return DayResult(
+            process_date=process_date,
+            mode=mode,
+            mrva_job_id=mrva_job,
+            netcdf_href=netcdf_href,
+        )
+
+    def run(self, target_date: Optional[datetime.date] = None) -> List[DayResult]:
+        """Process the full window (day0..day2) sequentially, oldest first."""
+        day0, day1, day2 = self.calculate_processing_window(target_date)
+
+        results = []
+        num_days = (day2 - day0).days + 1
+        for offset in range(num_days):
+            process_date = day0 + datetime.timedelta(days=offset)
+            mode = mur_window.mode_for(process_date, day1, force_nrt=self.force_nrt)
+            logger.info(f"Processing {process_date} ({mode})")
+            results.append(self.run_day(process_date, mode))
+
+        return results

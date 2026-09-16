@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The MRVA algorithm — MUR SST</title>
+<meta name="description" content="How multi-resolution variational analysis fits a gap-free SST field: the B-spline basis, the variational problem, scale bands, weighting and the solver.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav>
+    <div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html" aria-current="page">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <a href="mrva-internals.html">MRVA internals</a>
+    <div class="nav-group">Operating it</div>
+    <a href="configuration.html">Configuration</a>
+    <a href="static-data.html">Static input data</a>
+    <a href="input-contract.html">Input contract</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a>
+    <div class="nav-group">Containers</div>
+    <a href="container-landice.html">Land/ice</a>
+    <a href="container-l2p.html">L2P</a>
+    <a href="container-iquam.html">iQUAM</a>
+    <a href="container-mrva.html">MRVA</a>
+    <div class="nav-group">Reference</div>
+    <a href="landice-encoding.html">Land/ice encoding</a>
+    <a href="future.html">Future enhancements</a>
+    <div class="nav-group">Project</div>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>The MRVA algorithm</h1>
+    <p class="lede">Multi-scale variational analysis: one field fitted from the basin scale down to a few kilometres, on a B-spline basis.</p>
+    <nav class="toc" aria-label="On this page">
+    <b>On this page</b>
+    <ul>
+      <li><a href="#the-idea">The idea</a></li>
+      <li><a href="#algorithm-overview">Algorithm overview</a></li>
+      <li><a href="#b-spline-basis-functions">B-spline basis functions</a></li>
+      <li><a href="#mathematical-formulation">Mathematical formulation</a></li>
+      <li><a href="#multi-scale-processing-flow">Multi-scale processing flow</a></li>
+      <li><a href="#scale-parameter-interpretation">What the scales mean</a></li>
+      <li><a href="#data-incorporation-strategy">How observations enter</a></li>
+      <li><a href="#outlier-and-bias-handling">Outlier and bias handling</a></li>
+      <li><a href="#temporal-weighting">Temporal weighting</a></li>
+      <li><a href="#solver-details">The solver</a></li>
+      <li><a href="#output-products">What the analysis writes</a></li>
+      <li><a href="#further-reading">Further reading</a></li>
+    </ul>
+    </nav>
+    <h2 id="the-idea">The idea</h2>
+    <p>Rather than interpolating observations directly, MRVA solves for the
+    coefficients of a smooth field that best fits every observation at once,
+    subject to a smoothness penalty. It does this repeatedly at a ladder of
+    resolutions &mdash; coarse first, then progressively finer &mdash; with
+    each scale correcting the residual left by the one above it.</p>
+
+    <p>This matters because the observing system is heterogeneous. A
+    microwave radiometer sees through cloud at roughly 25&nbsp;km; an
+    infrared imager resolves a kilometre but only in clear sky; a buoy is a
+    single exact point. Fitting them all at a single resolution would either
+    throw away the fine detail or over-fit the sparse instruments. Solving
+    scale by scale lets each instrument contribute only at the scales it can
+    actually resolve.</p>
+    <h2 id="algorithm-overview">Algorithm overview</h2>
+    <h3 id="conceptual-framework">Conceptual Framework</h3>
+    <p>MRVA solves the SST analysis problem as a <strong>constrained optimization</strong> that balances two competing objectives:</p>
+    <pre><code>Minimize: J = J_data + J_smooth
+
+    Where:
+      J_data   = weighted sum of squared residuals against observations
+      J_smooth = smoothness penalty (thin-plate regularization)</code></pre>
+    <p>The solution is represented using <strong>cubic B-spline basis functions</strong>:</p>
+    <pre><code>SST(x,y) = Σ c_ij * B_i(x) * B_j(y)</code></pre>
+    <p>Where:</p>
+    <ul>
+    <li><code>c_ij</code> are coefficient values (the unknowns to solve for)</li>
+    <li><code>B_i(x), B_j(y)</code> are cubic B-spline basis functions</li>
+    <li>The summation is over all grid points at a given scale</li>
+    </ul>
+    <h3 id="key-features">Key Features</h3>
+    <ol>
+    <li><strong>Multi-scale hierarchy:</strong> Process from coarse (L=2, ~1250km) to fine scales (L=11, ~2.5km)</li>
+    <li><strong>Variational formulation:</strong> Optimal balance between data fidelity and smoothness</li>
+    <li><strong>Spline representation:</strong> Continuous field with local support (smooth interpolation)</li>
+    <li><strong>Adaptive weighting:</strong> Scale-dependent data influence prevents aliasing</li>
+    <li><strong>Temporal decay:</strong> Recent observations weighted more heavily</li>
+    <li><strong>Latitude correction:</strong> Accounts for spherical geometry (anisotropic smoothing)</li>
+    <li><strong>Multi-sensor fusion:</strong> Combines satellite, in-situ, and ice data</li>
+    </ol>
+    <h3 id="why-multi-scale">Why Multi-Scale?</h3>
+    <p>Processing in a coarse-to-fine hierarchy provides several advantages:</p>
+    <ul>
+    <li><strong>Computational efficiency:</strong> Solve on coarse grids first (fewer unknowns)</li>
+    <li><strong>Convergence:</strong> Initialize fine scales with coarse-scale solution</li>
+    <li><strong>Physical consistency:</strong> Large-scale features constrain small-scale details</li>
+    <li><strong>Data fusion:</strong> Use coarse sensors at large scales, high-res sensors at fine scales</li>
+    <li><strong>Gap filling:</strong> Coarse scales provide background where fine-scale data is sparse</li>
+    </ul>
+    <h2 id="b-spline-basis-functions">B-spline basis functions</h2>
+    <h3 id="what-are-b-splines">What are B-splines?</h3>
+    <p>B-splines are <strong>purely mathematical basis functions</strong>—they have no inherent connection to temperature or ocean physics. They provide a smooth, local "building block" for representing continuous fields.</p>
+    <p>Unlike Fourier analysis (which uses many different basis shapes—sin(x), sin(2x), sin(3x), etc.), MRVA uses <strong>a single basis function shape</strong>: the cubic B-spline. Copies of this one function are placed at each point on a <strong>coefficient grid</strong>, and the SST field is reconstructed as their weighted sum:</p>
+    <pre><code>SST(x,y) = Σ c_ij · B(x - x_i) · B(y - y_j)</code></pre>
+    <p>Where:</p>
+    <ul>
+    <li><code>c_ij</code> are the coefficient values at coefficient grid point (i,j) — <strong>the unknowns we solve for</strong></li>
+    <li><code>B(t)</code> is the single cubic B-spline function, evaluated at distance t from the center</li>
+    <li><code>x_i, y_j</code> are the coefficient grid positions where B-splines are centered</li>
+    </ul>
+    <h3 id="key-properties">Key Properties</h3>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Property</th><th>Description</th><th>Benefit for MRVA</th></tr></thead>
+    <tbody>
+    <tr><td><strong>Local support</strong></td><td>Non-zero only within 2 grid spacings of its center</td><td>Sparse matrices, O(N) computation</td></tr>
+    <tr><td><strong>Smoothness</strong></td><td>C² continuous (continuous 2nd derivative)</td><td>No artificial discontinuities in SST</td></tr>
+    <tr><td><strong>Partition of unity</strong></td><td>At any point, the nearby B-splines sum to 1</td><td>Unbiased interpolation between grid points</td></tr>
+    <tr><td><strong>Symmetric</strong></td><td>B(t) = B(-t)</td><td>Distance is all that matters, not direction</td></tr>
+    <tr><td><strong>Non-negative</strong></td><td>Always ≥ 0</td><td>Numerically stable</td></tr>
+    <tr><td><strong>Tensor product</strong></td><td>2D evaluation = B(dx) · B(dy)</td><td>Separable, efficient computation</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="the-b-spline-function">The B-spline Function</h3>
+    <p>There is <strong>one function</strong>, the cubic B-spline, evaluated at a distance <code>t</code> from its center:</p>
+    <pre><code>B(t) = (4 - 6|t|² + 3|t|³) / 6    for |t| &lt; 1
+    B(t) = (2 - |t|)³ / 6              for 1 ≤ |t| &lt; 2
+    B(t) = 0                           for |t| ≥ 2</code></pre>
+    <figure class="figure">
+    <img src="assets/figures/bspline_single.png" alt="Single B-spline basis function">
+    <figcaption>The cubic B-spline: smooth, symmetric, and zero beyond 2 grid spacings from its center.</figcaption>
+    </figure>
+    <p>The input <code>t</code> is the <strong>distance</strong> (in coefficient grid spacings) from the evaluation point to the B-spline center. This is the only function needed—every B-spline in the system is just this function evaluated at a different distance.</p>
+    <h3 id="coefficient-grid-vs-output-grid">Coefficient Grid vs Output Grid</h3>
+    <p>An important distinction: the B-spline centers sit on the <strong>coefficient grid</strong>, which is much coarser than the 0.01° output grid:</p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Scale</th><th>Coefficient grid spacing</th><th>Output grid (0.01°)</th><th>Ratio</th></tr></thead>
+    <tbody>
+    <tr><td>L=6</td><td>~0.70°</td><td>0.01°</td><td>~70x coarser</td></tr>
+    <tr><td>L=8</td><td>~0.17°</td><td>0.01°</td><td>~17x coarser</td></tr>
+    <tr><td>L=10</td><td>~0.045°</td><td>0.01°</td><td>~4.5x coarser</td></tr>
+    <tr><td>L=11</td><td>~0.022°</td><td>0.01°</td><td>~2.2x coarser</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p>Observations from satellites and buoys fall at arbitrary lat/lon positions that are almost never aligned with the coefficient grid. Likewise, the 0.01° output grid points sit between coefficient grid centers. This is why the partition of unity property matters.</p>
+    <h3 id="partition-of-unity">Partition of Unity</h3>
+    <p>At any arbitrary position on the domain, the B-splines from the nearest coefficient grid points sum to exactly 1. This is visualized by drawing a vertical line anywhere on the family plot—it intersects at most 4 non-zero B-splines, and their values always sum to 1:</p>
+    <figure class="figure">
+    <img src="assets/figures/bspline_family.png" alt="Family of B-splines showing partition of unity">
+    <figcaption>B-splines centered at coefficient grid points (integers). The red vertical line shows an observation at position 3.7—it intersects 4 B-splines whose values sum to 1. This ensures unbiased interpolation at any position between grid centers.</figcaption>
+    </figure>
+    <p>This property guarantees:</p>
+    <ul>
+    <li><strong>No information is lost or invented</strong> when projecting observations onto the coefficient grid</li>
+    <li><strong>Constant fields are exact</strong>: if all coefficients equal 20°C, the field evaluates to exactly 20°C everywhere</li>
+    <li><strong>No systematic bias</strong> at positions between coefficient grid centers</li>
+    </ul>
+    <h3 id="how-observations-enter-the-system">How Observations Enter the System</h3>
+    <p>When an observation at position <code>x_obs</code> is projected onto the coefficient grid, there is no "assignment" to a single grid point. Instead:</p>
+    <ol>
+    <li>Compute <code>floor(x_obs)</code> to identify the 4 nearby coefficient grid points: <code>floor(x_obs) + {-1, 0, 1, 2}</code></li>
+    <li>Compute the <strong>distance</strong> from <code>x_obs</code> to each of those 4 grid points</li>
+    <li>Evaluate the B-spline function <code>B(distance)</code> for each — these are the weights</li>
+    <li>The observation contributes to all 4 grid points simultaneously, proportional to these weights</li>
+    </ol>
+    <pre><code>Example: observation at coefficient grid position 3.7
+
+      Grid point:  2       3       4       5
+      Distance:    1.7     0.7     0.3     1.3
+      B(distance): 0.005   0.348   0.590   0.057    (sum = 1.0)
+                                     ↑
+                              closest grid point gets
+                              the largest weight</code></pre>
+    <p>Due to the B-spline's <strong>symmetry</strong>, this is mathematically equivalent to centering a B-spline at the observation and evaluating it at each grid point. The <code>floor</code> operation is just bookkeeping to identify which 4 grid points are nearby—the B-spline function and distances do all the actual work.</p>
+    <p>In 2D, the same process applies independently in x and y (tensor product), affecting a 4×4 = 16-point neighborhood.</p>
+    <h3 id="field-reconstruction">Field Reconstruction</h3>
+    <p>The coefficients c_ij determine the SST field. Each coefficient multiplies its associated basis function, and the sum produces the continuous field:</p>
+    <figure class="figure">
+    <img src="assets/figures/bspline_reconstruction.png" alt="How coefficients combine with B-splines to reconstruct a field">
+    <figcaption>Top-left: Individual weighted basis functions c_i·B_i(x). Top-right: Progressive summation. Bottom-left: Final reconstructed field (blue) from coefficient values (red points). Because B-splines partition unity, the coefficients approximate the field values at each grid point.</figcaption>
+    </figure>
+    <h3 id="multi-scale-b-splines">Multi-Scale B-splines</h3>
+    <p>At each scale L, the coefficient grid spacing halves and the number of basis functions doubles:</p>
+    <figure class="figure">
+    <img src="assets/figures/bspline_multiscale.png" alt="Multi-scale B-spline grids">
+    <figcaption>Coefficient grids at different scales. Finer scales have more, narrower basis functions to capture smaller features.</figcaption>
+    </figure>
+    <p>This is the "wavelet-like" aspect of MRVA—the hierarchical multi-resolution structure—though the B-splines themselves are <strong>not wavelets</strong> (they don't have zero mean or the strict frequency localization properties of wavelets). The multi-resolution comes from the grid density, not from different basis function shapes.</p>
+    <h3 id="why-b-splines-not-wavelets">Why B-splines (not wavelets)?</h3>
+    <p>While MRVA's multi-resolution approach is inspired by wavelet analysis, it uses B-splines rather than true wavelets because:</p>
+    <ol>
+    <li><strong>Non-negativity</strong>: B-splines are always ≥ 0, simplifying physical interpretation</li>
+    <li><strong>Interpolation</strong>: B-splines naturally interpolate between grid points</li>
+    <li><strong>Simplicity</strong>: The tensor-product structure B(dx)·B(dy) is straightforward</li>
+    <li><strong>Smoothness</strong>: Cubic B-splines provide C² continuity without oscillations</li>
+    </ol>
+    <p>Wavelets (which oscillate and have zero mean) would require more complex handling for a physical field like SST that is inherently positive and smooth.</p>
+    <h2 id="mathematical-formulation">Mathematical formulation</h2>
+    <h3 id="variational-problem">Variational Problem</h3>
+    <p>At each scale L, MRVA solves:</p>
+    <pre><code>(A + R) c = b
+
+    Where:
+      A = Gram matrix of basis functions evaluated at observation locations
+          (contains NO actual SST values—only geometric information about
+           where observations constrain the solution)
+      R = regularization term matrix (thin-plate smoothness penalty)
+      c = coefficient vector (the unknowns we solve for)
+      b = right-hand side vector (actual SST observations projected onto
+          the basis functions—this is where measured values enter)</code></pre>
+    <p>This is the <strong>Euler-Lagrange equation</strong> (normal equations) derived from minimizing the cost function J.</p>
+    <p><strong>Important clarification:</strong> The matrix A does NOT contain observation values. It encodes the <em>geometry</em> of the observation configuration in coefficient space—specifically, products of basis functions evaluated at observation locations. The actual measured SST values appear <strong>only</strong> in the right-hand side vector b.</p>
+    <h3 id="data-term">Data Term</h3>
+    <p>For each observation (latitude, longitude, SST_obs, error, time):</p>
+    <ol>
+    <li><strong>Identify</strong> the 4×4 coefficient grid neighborhood around the observation</li>
+    <li><strong>Compute distances</strong> from the observation to each of the 16 nearby coefficient grid points</li>
+    <li><strong>Evaluate B(distance)</strong> for each — these are the basis weights</li>
+    <li><strong>Accumulate contributions</strong> to the system matrix and right-hand side:</li>
+    </ol>
+    <pre><code>For each observation:
+
+      combined_weight = (1/rms²) × exp(-(t/decay)²) × density_scaling
+                        ├─────┘    ├───────────────┘   ├──────────────┘
+                        error      temporal decay       rho (prevents dense
+                        confidence (recent obs count     clusters from
+                                   more)                dominating)
+
+      For each of the 16 nearby coefficient grid points (i,j) and (k,l):
+
+        dx_i = distance from obs to grid point i (in x)
+        dy_j = distance from obs to grid point j (in y)
+
+        b_ij   += B(dx_i) · B(dy_j) · SST_obs · combined_weight
+                                       ↑
+                                       ACTUAL MEASUREMENT
+                                       (only place SST values appear)
+
+        A_ij,kl += B(dx_i) · B(dy_j) · B(dx_k) · B(dy_l) · combined_weight
+                   ↑                                ↑
+                   products of B-spline distances   (NO SST values)</code></pre>
+    <p><strong>Multiple observations in the same grid cell are accumulated (summed), not averaged.</strong> The rho density scaling factor prevents clusters from having disproportionate influence:</p>
+    <pre><code>density_scaling(i,j) = 1 / (rho × (count(i,j) - 1) + 1)</code></pre>
+    <p>Where <code>count(i,j)</code> is the number of observations in that coefficient grid cell.</p>
+    <p><strong>Key insight:</strong> The matrix A does NOT contain observation values. It encodes the <em>geometry</em> of the observation configuration—specifically, products of B-spline values based on distances to coefficient grid points. The actual measured SST values appear <strong>only</strong> in the right-hand side vector b.</p>
+    <h3 id="three-phases-of-the-algorithm">Three Phases of the Algorithm</h3>
+    <p>The full process has three distinct phases:</p>
+    <p><strong>Phase 1 — Build the system</strong> (subroutine <code>spmDataScale</code> in <code>spmm.f</code>):</p>
+    <pre><code>For each observation:
+      compute distances to 4×4 coefficient grid neighborhood
+      evaluate B(distance) for each grid point
+      accumulate into A (basis products × weight) and b (basis × SST_obs × weight)</code></pre>
+    <p><strong>Phase 2 — Solve</strong> (PCG/SOR iterative solver):</p>
+    <pre><code>(A + R) c = b  →  find optimal coefficients c</code></pre>
+    <p><strong>Phase 3 — Evaluate</strong> (output generation):</p>
+    <pre><code>For each output grid point (0.01° spacing):
+      compute distances to 4×4 coefficient grid neighborhood
+      SST = Σ c_ij × B(dx_i) × B(dy_j)
+      (No scaling factors — just coefficients × basis values)</code></pre>
+    <p>The scaling factors (error weight, temporal decay, density correction) only exist in Phase 1. Phase 3 is purely coefficients multiplied by B-spline distance values.</p>
+    <h3 id="smoothness-regularization">Smoothness Regularization</h3>
+    <p>The regularization term penalizes non-smooth solutions using thin-plate splines:</p>
+    <pre><code>R = wx*S11⊗S00 + wy*S00⊗S11 + wxx*S22⊗S00 + wyy*S00⊗S22 + wxy*S11⊗S11
+
+    Where:
+      S00 = B-spline inner products (0th derivative)
+      S11 = B-spline inner products (1st derivative)
+      S22 = B-spline inner products (2nd derivative)
+      ⊗   = tensor product (separable x,y application)
+
+    Weights:
+      wx, wy   = first derivative penalties (gradient smoothness)
+      wxx, wyy = second derivative penalties (curvature smoothness)
+      wxy      = cross-derivative penalty (prevent oscillations)</code></pre>
+    <p><strong>Latitude correction</strong> accounts for spherical geometry:</p>
+    <pre><code>w_longitude(lat) = 1 / max(cos²(lat), 0.03)
+    w_curvature(lat) = 1 / max(cos⁴(lat), 0.03)</code></pre>
+    <p>This ensures isotropic smoothness in physical space despite lat-lon grid distortion near poles.</p>
+    <p><strong>Scale-dependent regularization strength:</strong></p>
+    <pre><code>Regularization coefficient:
+      c = 20  (L ≤ 8)   - Coarse/medium scales, moderate smoothing
+      c = 40  (L ≥ 9)   - Fine scales, stronger smoothing to prevent overfitting</code></pre>
+    <h3 id="spatial-density-weighting-rho">Spatial Density Weighting (Rho)</h3>
+    <p>The <strong>rho weighting</strong> prevents dense data clusters from dominating:</p>
+    <pre><code>rho = 0.8 * exp(-(45/2^L)/4.0)
+    scaling(i,j) = 1 / (rho * (count(i,j) - 1) + 1)
+
+    Where:
+      count(i,j) = number of observations in grid cell (i,j)</code></pre>
+    <p><strong>Effect:</strong></p>
+    <ul>
+    <li>Single observation in cell: <code>scaling = 1.0</code> (full weight)</li>
+    <li>N observations in cell: weight is shared, preventing over-influence</li>
+    <li>As L increases (finer scales), rho → 0, reducing downweighting effect</li>
+    </ul>
+    <p><strong>Purpose:</strong> Ensure sparse regions aren't overwhelmed by data-rich areas.</p>
+    <h2 id="multi-scale-processing-flow">Multi-scale processing flow</h2>
+    <h3 id="detailed-algorithm">Detailed Algorithm</h3>
+    <figure class="diagram">
+    <pre class="mermaid">
+    flowchart TD
+        START([Initialize MRVA]) --&gt; CONFIG[Read configuration&lt;br/&gt;scales, sensors, parameters]
+        CONFIG --&gt; CHECKMODE{NRT or&lt;br/&gt;REA mode?}
+
+        CHECKMODE --&gt;|NRT| LOADBG[Load L=6 coefficients&lt;br/&gt;from previous day]
+        CHECKMODE --&gt;|REA| ZEROBG[Start from zero&lt;br/&gt;L0=2]
+
+        LOADBG --&gt; LOOPSTART{For L = L0 to LF}
+        ZEROBG --&gt; LOOPSTART
+
+        LOOPSTART --&gt;|L = L0| INITGRID[Initialize grid&lt;br/&gt;mx, my at L0]
+        LOOPSTART --&gt;|L &gt; L0| DOUBLEGRID[Double resolution&lt;br/&gt;mx *= 2, my *= 2&lt;br/&gt;Upsample coefficients]
+
+        INITGRID --&gt; BUILDMAT[Build regularization matrix&lt;br/&gt;Thin-plate operator R]
+        DOUBLEGRID --&gt; BUILDMAT
+
+        BUILDMAT --&gt; CHECKBG{L == L0 and&lt;br/&gt;background?}
+        CHECKBG --&gt;|Yes| ADDBG[Add background field&lt;br/&gt;to system]
+        CHECKBG --&gt;|No| ADDOBS
+        ADDBG --&gt; ADDOBS
+
+        ADDOBS[Incorporate observations&lt;br/&gt;Filter by La ≤ L ≤ Lb] --&gt; WEIGHT[Apply weights:&lt;br/&gt;- Temporal decay&lt;br/&gt;- Rho scaling&lt;br/&gt;- Error weighting]
+
+        WEIGHT --&gt; PROJECT[Project to B-spline basis&lt;br/&gt;Build system matrix A, vector b]
+
+        PROJECT --&gt; SOLVE[Solve PCG:&lt;br/&gt;A + R c = b&lt;br/&gt;Tolerance: 1e-8 or 1e-3]
+
+        SOLVE --&gt; RESIDUAL[Compute residuals&lt;br/&gt;obs - analysis]
+
+        RESIDUAL --&gt; ACCUMULATE[Accumulate coefficients&lt;br/&gt;csp = dsp + csp]
+
+        ACCUMULATE --&gt; WRITECOEF[Write outputs:&lt;br/&gt;- mrva.cXX&lt;br/&gt;- mrva.uXX&lt;br/&gt;- map file]
+
+        WRITECOEF --&gt; NEXTSCALE[dsp := csp&lt;br/&gt;Prepare for next scale]
+
+        NEXTSCALE --&gt; CHECKLAST{L &lt; LF?}
+        CHECKLAST --&gt;|Yes, L++| LOOPSTART
+        CHECKLAST --&gt;|No| SAMPLE[Sample at L=10&lt;br/&gt;~1km resolution]
+
+        SAMPLE --&gt; NETCDF[Generate NetCDF&lt;br/&gt;SST, error, mask]
+
+        NETCDF --&gt; END([Complete])
+
+        style START fill:#90ee90
+        style END fill:#90ee90
+        style SOLVE fill:#ffb6c1
+        style NETCDF fill:#87ceeb
+    </pre>
+    </figure>
+    <h3 id="incremental-refinement">Incremental Refinement</h3>
+    <p>The algorithm operates in <strong>residual mode</strong> after the first scale:</p>
+    <figure class="diagram">
+    <pre class="mermaid">
+    timeline
+        title Multi-Scale Refinement Process
+        section Coarse Scales (Basin-scale)
+            L=2 (1250 km) : Fit large-scale features
+                          : Basin-scale circulation
+                          : All sensors contribute
+            L=3 (625 km)  : Add gyre-scale details
+                          : Major ocean currents
+            L=4 (312 km)  : Add large eddies
+                          : Mesoscale features
+        section Medium Scales (Fronts)
+            L=5 (156 km)  : Medium eddies
+            L=6 (78 km)   : Thermal fronts
+                          : NRT background field
+            L=7 (39 km)   : Small fronts
+            L=8 (19 km)   : Coastal features
+                          : Buoys excluded (L&gt;8)
+        section Fine Scales (High-res)
+            L=9 (10 km)   : Nearshore details
+                          : Only high-res sensors
+            L=10 (5 km)   : Product output
+                          : 1km MUR SST
+            L=11 (2.5 km) : Maximum detail
+                          : Coefficient storage
+    </pre>
+    </figure>
+    <p><strong>Progression:</strong></p>
+    <pre><code>Scale L=2:  csp_2 ≈ SST observations (large-scale fit)
+    Scale L=3:  csp_3 = csp_2 + corrections_3 (add medium-scale)
+    Scale L=4:  csp_4 = csp_3 + corrections_4 (add mesoscale)
+    ...
+    Scale L=11: csp_11 = csp_10 + corrections_11 (finest details)</code></pre>
+    <p>Each scale corrects the previous representation by adding finer-scale details.</p>
+    <h2 id="scale-parameter-interpretation">What the scales mean</h2>
+    <h3 id="scale-to-resolution-mapping">Scale-to-Resolution Mapping</h3>
+    <p>The scale parameter L determines the grid spacing and effective resolution:</p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Scale L</th><th>Grid Spacing</th><th>Effective Resolution</th><th>Feature Size</th><th>Typical Use</th></tr></thead>
+    <tbody>
+    <tr><td>2</td><td>~11.25°</td><td>~1250 km</td><td>Basin-scale</td><td>Major ocean basins</td></tr>
+    <tr><td>3</td><td>~5.6°</td><td>~625 km</td><td>Gyre-scale</td><td>Subtropical gyres</td></tr>
+    <tr><td>4</td><td>~2.8°</td><td>~312 km</td><td>Large mesoscale</td><td>Major eddies</td></tr>
+    <tr><td>5</td><td>~1.4°</td><td>~156 km</td><td>Mesoscale</td><td>Medium eddies</td></tr>
+    <tr><td>6</td><td>~0.7°</td><td>~78 km</td><td>Sub-mesoscale</td><td>Thermal fronts</td></tr>
+    <tr><td>7</td><td>~0.35°</td><td>~39 km</td><td>High resolution</td><td>Small fronts</td></tr>
+    <tr><td>8</td><td>~0.17°</td><td>~19 km</td><td>Very high res</td><td>Coastal features</td></tr>
+    <tr><td>9</td><td>~0.09°</td><td>~10 km</td><td>Ultra high res</td><td>Nearshore details</td></tr>
+    <tr><td>10</td><td>~0.045°</td><td>~5 km</td><td>Product output</td><td>1km MUR product</td></tr>
+    <tr><td>11</td><td>~0.022°</td><td>~2.5 km</td><td>Maximum detail</td><td>Coefficient storage</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Grid doubling formula:</strong></p>
+    <pre><code>grid_spacing(L) = 45° / 2^L
+    mx(L) = mx0 * 2^(L-L0)
+    my(L) = my0 * 2^(L-L0)</code></pre>
+    <h3 id="processing-range">Processing Range</h3>
+    <p><strong>Reanalysis (REA) mode:</strong></p>
+    <ul>
+    <li>L0 = 2 (start from coarse scale, build from scratch)</li>
+    <li>LF = 11 (compute to finest scale)</li>
+    <li>Output at L = 10 (~1km product)</li>
+    </ul>
+    <p><strong>Near Real-Time (NRT) mode:</strong></p>
+    <ul>
+    <li>L0 = 6 (initialize from previous day's L=6 coefficients)</li>
+    <li>LF = 11 (refine to finest scale)</li>
+    <li>Output at L = 10 (~1km product)</li>
+    </ul>
+    <p><strong>Why compute to L=11 but output at L=10?</strong></p>
+    <ul>
+    <li>L=11 captures highest-frequency information</li>
+    <li>L=10 provides optimal balance of resolution and noise</li>
+    <li>L=11 coefficients stored for next day's NRT bootstrap</li>
+    </ul>
+    <h2 id="data-incorporation-strategy">How observations enter</h2>
+    <h3 id="scale-dependent-sensor-usage-lalb-parameters">Scale-Dependent Sensor Usage (La/Lb Parameters)</h3>
+    <p>Different sensors contribute at different scales based on their resolution:</p>
+    <figure class="diagram">
+    <pre class="mermaid">
+    gantt
+        title Sensor Usage Across Scales (La to Lb)
+        dateFormat X
+        axisFormat %L
+
+        section Buoys (In-situ)
+        IQUAM Buoys (La=2, Lb=8)    :buoy, 2, 7
+
+        section Microwave
+        AMSR2R ~25km (La=2, Lb=8)   :amsr, 2, 7
+
+        section Infrared (High-res)
+        MODISA ~1km (La=2, Lb=12)   :modisa, 2, 11
+        MODIST ~1km (La=2, Lb=12)   :modist, 2, 11
+
+        section Infrared (Medium-res)
+        AVMTBG ~1-4km (La=2, Lb=9)  :avhrr, 2, 8
+
+        section Ice Model
+        Ice SST ~10km (La=2, Lb=9)  :ice, 2, 8
+    </pre>
+    </figure>
+    <p><strong>Sensor Parameters:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Sensor</th><th>Type</th><th>Resolution</th><th>La</th><th>Lb</th><th>Scales Used</th><th>Rationale</th></tr></thead>
+    <tbody>
+    <tr><td><strong>IQUAM Buoys</strong></td><td>In-situ</td><td>Point</td><td>2</td><td>8</td><td>2-8</td><td>Point measurements, medium-scale influence</td></tr>
+    <tr><td><strong>AMSR2R</strong></td><td>Microwave</td><td>~25 km</td><td>2</td><td>8</td><td>2-8</td><td>All-weather, coarse resolution</td></tr>
+    <tr><td><strong>MODISA</strong></td><td>Infrared</td><td>~1 km</td><td>2</td><td>12</td><td>2-12</td><td>High resolution, all scales</td></tr>
+    <tr><td><strong>MODIST</strong></td><td>Infrared</td><td>~1 km</td><td>2</td><td>12</td><td>2-12</td><td>High resolution, morning pass</td></tr>
+    <tr><td><strong>AVMTBG</strong></td><td>Infrared</td><td>~1-4 km</td><td>2</td><td>9</td><td>2-9</td><td>Medium resolution</td></tr>
+    <tr><td><strong>Ice SST</strong></td><td>Ice model</td><td>~10 km</td><td>2</td><td>9</td><td>2-9</td><td>High confidence in ice regions</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Design principles:</strong></p>
+    <ol>
+    <li><strong>Prevent aliasing:</strong> Exclude coarse-resolution sensors at fine scales
+    <ul>
+    <li>AMSR2 (25km) not used at L&gt;8 (19km grid spacing)</li>
+    <li>Prevents under-resolved features from degrading analysis</li>
+    </ul>
+    </li>
+    <li><strong>Multi-scale fusion:</strong> High-res sensors contribute across all scales
+    <ul>
+    <li>MODIS (1km) used from L=2 to L=12</li>
+    <li>Provides both large-scale and fine-scale information</li>
+    </ul>
+    </li>
+    <li><strong>Complementary coverage:</strong>
+    <ul>
+    <li>Microwave (AMSR2): all-weather, coarse resolution</li>
+    <li>Infrared (MODIS, AVHRR): cloud-limited, high resolution</li>
+    <li>In-situ (buoys): sparse, high accuracy</li>
+    <li>Ice: critical in polar regions</li>
+    </ul>
+    </li>
+    </ol>
+    <h3 id="multi-sensor-advantages">Multi-Sensor Advantages</h3>
+    <p>By combining multiple sensors at appropriate scales:</p>
+    <ul>
+    <li><strong>Gap filling:</strong> Infrared gaps (clouds) filled by microwave and buoys</li>
+    <li><strong>Consistency:</strong> Large-scale features constrained by all sensors</li>
+    <li><strong>Resolution:</strong> Fine-scale details from high-res sensors where available</li>
+    <li><strong>Validation:</strong> Cross-sensor consistency checks</li>
+    <li><strong>Robustness:</strong> No single sensor failure breaks the analysis</li>
+    </ul>
+    <h2 id="outlier-and-bias-handling">Outlier and bias handling</h2>
+    <p>Before the final solve, observations are screened against a reference
+    field built from the coarse scales, and a per-sensor bias correction is
+    applied to the infrared instruments. The reference field is normally the
+    analysis's own coarse-scale solution; a separate L4 product can serve as
+    a bootstrap background when no prior coefficient exists at all.</p>
+    <h2 id="temporal-weighting">Temporal weighting</h2>
+    <h3 id="decay-parameters">Decay Parameters</h3>
+    <p>Observations are weighted by their age relative to the analysis time:</p>
+    <pre><code>weight = error * exp(-(t/decay)²)
+
+    Where:
+      t     = time offset from analysis time (hours)
+      decay = temporal decay parameter (scale-dependent)</code></pre>
+    <p><strong>Scale-dependent decay times:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Scale Range</th><th>Decay (hours)</th><th>Physical Interpretation</th></tr></thead>
+    <tbody>
+    <tr><td>L = 2-5</td><td>48</td><td>Large ocean features evolve slowly</td></tr>
+    <tr><td>L = 6</td><td>42</td><td>Mesoscale features begin to move</td></tr>
+    <tr><td>L = 7</td><td>36</td><td>Thermal fronts migrate</td></tr>
+    <tr><td>L = 8</td><td>30</td><td>Small features more ephemeral</td></tr>
+    <tr><td>L = 9</td><td>24</td><td>Fine details change rapidly</td></tr>
+    <tr><td>L = 10</td><td>18</td><td>Ultra-high-res features transient</td></tr>
+    <tr><td>L = 11</td><td>12</td><td>Maximum temporal localization</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Example weight decay:</strong></p>
+    <p>At L=11 (decay=12 hours):</p>
+    <ul>
+    <li>0 hours old: weight = 1.00 (100%)</li>
+    <li>6 hours old: weight = 0.78 (78%)</li>
+    <li>12 hours old: weight = 0.37 (37%)</li>
+    <li>24 hours old: weight = 0.02 (2%)</li>
+    </ul>
+    <p><strong>Rationale:</strong></p>
+    <ul>
+    <li>Coarse scales: Basin-scale features persist for days, use ±2 day window</li>
+    <li>Fine scales: Small eddies and fronts evolve hourly, demand recent data</li>
+    </ul>
+    <h3 id="temporal-window">Temporal Window</h3>
+    <p>Preprocessing components collect data over temporal windows:</p>
+    <ul>
+    <li><strong>L2P satellites:</strong> ±2 days (5-day total)</li>
+    <li><strong>iQUAM buoys:</strong> ±3 days (7-day total)</li>
+    <li><strong>Ice concentration:</strong> Single day (analysis day)</li>
+    </ul>
+    <p>Temporal decay weighting effectively narrows these windows at fine scales.</p>
+    <h2 id="solver-details">The solver</h2>
+    <h3 id="preconditioned-conjugate-gradient-pcg">Preconditioned Conjugate Gradient (PCG)</h3>
+    <p>The linear system <code>(A + R)c = b</code> is solved iteratively using PCG:</p>
+    <p><strong>Algorithm:</strong></p>
+    <pre><code>1. Initialize: c = initial guess (upsampled from previous scale)
+    2. Compute residual: r = b - (A + R)c
+    3. Apply preconditioner: z = M^(-1) r
+    4. Iterate until convergence:
+       - Compute search direction
+       - Line search for optimal step size
+       - Update solution and residuals
+       - Check convergence: ||r|| &lt; tolerance</code></pre>
+    <p><strong>Preconditioner:</strong> Diagonal (Jacobi) scaling</p>
+    <pre><code>M = diag(A + R)</code></pre>
+    <p>Improves convergence by equilibrating the system.</p>
+    <p><strong>Convergence tolerance:</strong></p>
+    <ul>
+    <li>Coarse/medium scales (L &lt; 9): <code>ε = 1e-8</code> (strict convergence)</li>
+    <li>Fine scales (L ≥ 9): <code>ε = 1e-3</code> (relaxed, large system size)</li>
+    </ul>
+    <p><strong>Parallelization:</strong></p>
+    <ul>
+    <li>Matrix-vector products: Parallel over grid points</li>
+    <li>Reductions: Parallel summation with thread-safe accumulation</li>
+    <li>Thread count: Typically 64 threads (configurable)</li>
+    </ul>
+    <h3 id="computational-complexity">Computational Complexity</h3>
+    <p>Grid size doubles at each scale:</p>
+    <pre><code>L=2:  ~100 × 100     = ~10^4 unknowns
+    L=5:  ~800 × 800     = ~6×10^5 unknowns
+    L=8:  ~6,400 × 6,400 = ~4×10^7 unknowns
+    L=11: ~51,200 × 51,200 = ~2.6×10^9 unknowns</code></pre>
+    <p><strong>Processing time scales roughly as:</strong></p>
+    <ul>
+    <li>Grid size: O(N) where N = mx × my</li>
+    <li>Iterations: Typically 10-50 iterations per scale</li>
+    <li>Total: O(N × iterations) per scale</li>
+    </ul>
+    <p>Most computational cost is at finest scales (L=9-11).</p>
+    <h2 id="output-products">What the analysis writes</h2>
+    <h3 id="coefficient-files-mrvacxx">Coefficient Files (mrva.cXX)</h3>
+    <p><strong>Format:</strong> Binary, direct-access Fortran unformatted</p>
+    <p><strong>Contents:</strong></p>
+    <pre><code>Record 1: mx, my, mz, nv  (grid dimensions, levels, variables)
+    Record 2: xmin, xmax, ymin, ymax  (domain bounds)
+    Record 3: csp(coeffSize)  (coefficient array)
+
+    Where:
+      coeffSize = (mx+3-cix) * (my+3) * mz * nv
+      cix = 3 (cyclic boundary in longitude)</code></pre>
+    <p><strong>Coefficient array:</strong></p>
+    <ul>
+    <li>Extended grid: Includes ghost cells for B-spline support</li>
+    <li>Cyclic longitude: Enables wrap-around at date line</li>
+    <li>Stored for scales L=2 through L=11</li>
+    </ul>
+    <p><strong>Usage:</strong></p>
+    <ul>
+    <li>NRT mode: L=6 coefficients initialize next day's analysis</li>
+    <li>REA mode: All scales stored for archival</li>
+    <li>Output generation: L=10 sampled for 1km product</li>
+    </ul>
+    <h3 id="uncertainty-files-mrvauxx">Uncertainty Files (mrva.uXX)</h3>
+    <p><strong>Format:</strong> Same structure as coefficient files</p>
+    <p><strong>Contents:</strong> Approximation of posterior variance</p>
+    <pre><code>u(i,j) ≈ 1 / diagonal(Hessian)</code></pre>
+    <p><strong>Physical meaning:</strong></p>
+    <ul>
+    <li>Smaller values: High confidence (many observations, strong constraints)</li>
+    <li>Larger values: Low confidence (sparse data, weak constraints)</li>
+    </ul>
+    <p><strong>Usage in final product:</strong></p>
+    <ul>
+    <li>Read at scale L=8 (medium resolution for smoothness)</li>
+    <li>Scaled to target range (e.g., min=0.3°C, mean=0.5°C)</li>
+    <li>Output as <code>analysis_error</code> field in NetCDF</li>
+    </ul>
+    <h3 id="netcdf-output">NetCDF Output</h3>
+    <p><strong>File:</strong> <code>&lt;DATE&gt;090000-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-v02.0-fv04.1.nc</code></p>
+    <p><strong>Key variables:</strong></p>
+    <ul>
+    <li><code>analysed_sst</code>: Sea surface temperature (K)</li>
+    <li><code>analysis_error</code>: Estimated error (K)</li>
+    <li><code>mask</code>: Land/ice/sea classification</li>
+    <li><code>sea_ice_fraction</code>: From OSI-SAF (0-1)</li>
+    <li><code>dt_1km_data</code>: Distance to nearest high-res observation (km)</li>
+    </ul>
+    <p><strong>Metadata:</strong></p>
+    <ul>
+    <li>GHRSST L4 compliant</li>
+    <li>CF-1.6 conventions</li>
+    <li>Comprehensive global attributes (processing parameters, references)</li>
+    </ul>
+    <p><strong>Grid:</strong> 0.01° × 0.01° (approximately 1km at equator)</p>
+    <h2 id="further-reading">Further reading</h2>
+    <p>The published description of the method:</p>
+    <ul>
+    <li>Chin, T. M., Vazquez-Cuervo, J., and Armstrong, E. M. (2017). &ldquo;A multi-scale high-resolution analysis of global sea surface temperature.&rdquo; <em>Remote Sensing of Environment</em>, 200, 154&ndash;169.</li>
+    </ul>
+    <p>The MATLAB and Fortran that implement it are described in
+    <a href="mrva-internals.html">MRVA internals</a>.</p>
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. This site is
+      the documentation &mdash; there is no separate Markdown copy to fall out of date.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -16,7 +16,21 @@ This significantly reduces:
 
 ## Building the Base Image
 
-### Manual Build
+### Automated Build (Recommended)
+
+You normally never build this image directly: `./build_module.sh <module>` (in the `mur/`
+directory) builds it automatically if it's missing. To build or rebuild it on its own:
+
+```bash
+cd /path/to/mur
+cp network.lic.example network.lic  # Edit with your license server details
+./build_matlab_base.sh              # add --force to rebuild an existing image
+```
+
+### Manual Build (Advanced)
+
+Only for a custom tag, external CI, or debugging this Dockerfile. The build context must be
+the parent `mur` directory so `network.lic` is reachable:
 
 ```bash
 cd /path/to/mur
@@ -24,11 +38,6 @@ cp network.lic.example network.lic  # Edit with your license server details
 cd matlab-base
 docker build --platform linux/amd64 -t mur-matlab-base:r2024b -f Dockerfile ..
 ```
-
-### Automated Build
-
-The base image will be built automatically when you build any module if it doesn't exist.
-See the `build_module.sh` script in each module directory.
 
 ## Usage
 

@@ -1,0 +1,77 @@
+# OGC Application Package description for the MUR l2p module.
+# See maap/README.md for the generate -> validate -> deploy sequence.
+algorithm_description: >
+  MUR L2P-to-BIC conversion for one sensor and one data day. Reads the granule
+  list from a manifest JSON, localizes every listed granule, bins the
+  quality-screened observations onto the MUR grid, and emits
+  Global_<SENSOR>_<YEAR>_<DOY>.bic plus its L2Plist text file.
+algorithm_name: mur-l2p
+algorithm_version: "1.0.0"
+algorithm_container_url: ghcr.io/podaac/mur/l2p-dps:1.0.0
+
+keywords: MUR, SST, L2P, GHRSST, binning
+code_repository: https://github.com/podaac/mur
+citation: >
+  Chin, T.M., Vazquez-Cuervo, J., Armstrong, E.M. (2017). A multi-scale
+  high-resolution analysis of global sea surface temperature. Remote Sensing
+  of Environment, 200, 154-169.
+author: JPL PO.DAAC MUR Team
+contributor: JPL PO.DAAC MUR Team
+license: https://github.com/podaac/mur/blob/main/LICENSE
+release_notes: >
+  First MAAP OGC application package for l2p. Granule fan-in arrives as a
+  single manifest href rather than a CWL array or Directory -- see
+  docs/input-contract.html section 3.
+
+run_command: /opt/l2p/bin/entrypoint.sh
+
+# 8 GiB / 2 cores. The heaviest of the three light modules: it materializes
+# and bins up to ~288 granules for a MODIS day.
+ram_min: 8192
+cores_min: 2
+outdir_max: 2048   # measured BIC files run ~12-54 MB
+
+# SCRATCH DISK IS THE RISK HERE, AND outdir_max DOES NOT COVER IT.
+# localize_manifest materializes every granule into ${TMP_DIR:-/tmp/l2p_tmp}
+# before MATLAB runs. A MODIS day is roughly 288 granules x ~20 MB (~6 GB), and
+# the worst sensor-day can exceed 20 GB. That is scratch, not outdir. Confirm
+# the DPS worker's ephemeral disk allowance before the first real submission;
+# if CWL tmpdirMin is honoured, hand-add it to the generated CWL's
+# ResourceRequirement (the generator README anticipates such hand-edits).
+
+inputs:
+  - name: sensor
+    label: Sensor
+    doc: "One of AMSR2R, MODISA, MODIST, AVMTAG, AVMTBG."
+    type: string
+  - name: region
+    label: Region
+    doc: "Always 'Global' today."
+    type: string
+  - name: year
+    label: Year
+    doc: >
+      Four-digit year of the DATA day, which is not necessarily the analysis
+      day -- each analysis day reprocesses a window of surrounding data days.
+    type: string
+  - name: doy
+    label: Day of year
+    doc: Day of year of the data day, 1-366.
+    type: string
+  - name: rewrite
+    label: Rewrite flag
+    doc: "0 = keep an existing BIC, 1 = overwrite it."
+    type: string
+  - name: granules-manifest
+    label: Granules manifest
+    doc: >
+      s3:// href to a manifest JSON of the form
+      {"files": [{"path": "s3://..."}]} listing exactly this invocation's L2P
+      granules. Written per-invocation by run_mur_maap.py; the entries point at
+      the workspace bucket rather than PO.DAAC, because localize.sh's plain
+      `aws s3 cp` cannot authenticate to a DAAC.
+    type: string
+
+outputs:
+  - name: output
+    type: Directory

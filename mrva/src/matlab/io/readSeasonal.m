@@ -1,11 +1,15 @@
-function [sst,lon,lat,dev]=readSeasonal(doy,vfv);
-% [sst,lon,lat,dev]=readSeasonal(doy,vfv);
+function [sst,lon,lat,dev]=readSeasonal(seasonal_file,vfv);
+% [sst,lon,lat,dev]=readSeasonal(seasonal_file,vfv);
 %
-% Read MUR seasonal climatology for specified day of year.
+% Read MUR seasonal climatology from an already-resolved file.
 %
 % INPUTS:
-%   doy - Day of year (1-366, 366 maps to 365)
-%   vfv - Fill value for bad pixels (default: NaN)
+%   seasonal_file - Path to the seasonal climatology NetCDF file for the
+%                   day of year this run needs (resolved by the caller --
+%                   mrva_static_files.py's seasonal_relative_path() handles
+%                   the day-366-maps-to-365 convention on the Python side,
+%                   so this function no longer needs a doy argument at all)
+%   vfv           - Fill value for bad pixels (default: NaN)
 %
 % OUTPUTS:
 %   sst - Sea surface temperature climatology [lon x lat]
@@ -13,11 +17,7 @@ function [sst,lon,lat,dev]=readSeasonal(doy,vfv);
 %   lat - Latitude coordinates
 %   dev - Standard deviation
 
-% Container path for seasonal climatology data
-seasonal_root = '/data/static-resources/seasonal';
-
-if doy==366, doy=365; end;
-ncfile = sprintf('%s/mur_%03d.nc', seasonal_root, doy);
+ncfile = seasonal_file;
 
 % default fill value:
 if nargin<2, vfv=NaN; end;
@@ -25,7 +25,7 @@ if nargin<2, vfv=NaN; end;
 % Check file exists before attempting to open
 if ~exist(ncfile, 'file')
     error('readSeasonal:FileNotFound', ...
-          'Seasonal climatology file not found: %s\nVerify static_resources_dir mount contains seasonal/ directory with mur_###.nc files.', ...
+          'Seasonal climatology file not found: %s\nVerify the --seasonal-file flag was localized correctly.', ...
           ncfile);
 end
 

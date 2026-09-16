@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adding a sensor — MUR SST</title>
+<meta name="description" content="Integrating a new satellite sensor into the MUR L2P pipeline: input requirements, scale and quality parameters, and the full integration workflow.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav>
+    <div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <a href="mrva-internals.html">MRVA internals</a>
+    <div class="nav-group">Operating it</div>
+    <a href="configuration.html">Configuration</a>
+    <a href="static-data.html">Static input data</a>
+    <a href="input-contract.html">Input contract</a>
+    <a href="sensors.html" aria-current="page">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a>
+    <div class="nav-group">Containers</div>
+    <a href="container-landice.html">Land/ice</a>
+    <a href="container-l2p.html">L2P</a>
+    <a href="container-iquam.html">iQUAM</a>
+    <a href="container-mrva.html">MRVA</a>
+    <div class="nav-group">Reference</div>
+    <a href="landice-encoding.html">Land/ice encoding</a>
+    <a href="future.html">Future enhancements</a>
+    <div class="nav-group">Project</div>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>Adding a sensor</h1>
+    <p class="lede">What a new L2P instrument needs in order to contribute to the analysis.</p>
+    <nav class="toc" aria-label="On this page">
+    <b>On this page</b>
+    <ul>
+      <li><a href="#current-sensors">Current sensors</a></li>
+      <li><a href="#the-four-parameters-that-matter">The four parameters that matter</a></li>
+      <li><a href="#l2p-input-requirements">L2P input requirements</a></li>
+      <li><a href="#l2p-output-specifications">L2P output specifications</a></li>
+      <li><a href="#sensor-configuration-parameters">Sensor configuration parameters</a></li>
+      <li><a href="#integration-workflow">Integration workflow</a></li>
+      <li><a href="#testing-and-validation">Testing and validation</a></li>
+      <li><a href="#examples">Worked examples</a></li>
+    </ul>
+    </nav>
+    <h2 id="current-sensors">Current sensors</h2>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Sensor</th><th>Instrument</th><th>La&ndash;Lb</th><th>Window</th><th>Stability</th></tr></thead>
+      <tbody>
+        <tr><td><code>AMSR2R</code></td><td>AMSR2 microwave (GCOM-W1)</td><td>2&ndash;8</td><td>&plusmn;2 d</td><td>2 d</td></tr>
+        <tr><td><code>MODISA</code></td><td>MODIS Aqua infrared</td><td>2&ndash;12</td><td>&plusmn;2 d</td><td>2 d</td></tr>
+        <tr><td><code>MODIST</code></td><td>MODIS Terra infrared</td><td>2&ndash;12</td><td>&plusmn;2 d</td><td>3 d</td></tr>
+        <tr><td><code>AVMTAG</code></td><td>AVHRR MetOp-A infrared</td><td>2&ndash;9</td><td>&plusmn;2 d</td><td>2 d</td></tr>
+        <tr><td><code>AVMTBG</code></td><td>AVHRR MetOp-B infrared</td><td>2&ndash;9</td><td>&plusmn;2 d</td><td>2 d</td></tr>
+        <tr><td><code>IQUAM0</code></td><td>In-situ buoys</td><td>0&ndash;6</td><td>&plusmn;3 d</td><td>2 d</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <h2 id="the-four-parameters-that-matter">The four parameters that matter</h2>
+    <dl>
+      <dt><strong><code>La</code> and <code>Lb</code></strong></dt>
+      <dd>The scale band the sensor contributes to. <code>Lb</code> should
+      reflect what the instrument can genuinely resolve &mdash; a 25&nbsp;km
+      microwave footprint stops around L=8, a 1&nbsp;km infrared imager can
+      run to L=12. Setting <code>Lb</code> too high injects noise into fine
+      scales as though it were signal.</dd>
+
+      <dt><strong><code>day_range</code></strong></dt>
+      <dd>How many days either side of the analysis day are pulled in. Wider
+      windows help sparse or heavily cloud-affected sensors and cost
+      processing time.</dd>
+
+      <dt><strong><code>stable</code></strong></dt>
+      <dd>Days after which that sensor's data for a given day is considered
+      settled and will no longer be reprocessed. Set it from the provider's
+      actual latency, not optimistically &mdash; too low and the pipeline
+      freezes an incomplete day.</dd>
+    </dl>
+    <h2 id="l2p-input-requirements">L2P input requirements</h2>
+    <h3 id="data-format">Data Format</h3>
+    <p><strong>Required:</strong> GHRSST Level 2P (L2P) NetCDF files</p>
+    <p><strong>Standard:</strong> Group for High Resolution SST (GHRSST) Data Processing Specification v2.0</p>
+    <p><strong>Key NetCDF Variables (Required):</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Variable</th><th>Units</th><th>Description</th><th>Typical Range</th></tr></thead>
+    <tbody>
+    <tr><td><code>sea_surface_temperature</code></td><td>Kelvin</td><td>SST observations</td><td>270-320 K</td></tr>
+    <tr><td><code>lat</code></td><td>degrees_north</td><td>Latitude</td><td>-90 to +90</td></tr>
+    <tr><td><code>lon</code></td><td>degrees_east</td><td>Longitude</td><td>-180 to +180</td></tr>
+    <tr><td><code>time</code></td><td>seconds since 1981-01-01</td><td>Observation time</td><td>Unix timestamp</td></tr>
+    <tr><td><code>quality_level</code> or <code>l2p_flags</code></td><td>flag</td><td>Data quality indicator</td><td>Integer flags</td></tr>
+    <tr><td><code>sst_dtime</code></td><td>seconds</td><td>Time offset from reference</td><td>-43200 to +43200</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Optional but Recommended:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Variable</th><th>Purpose</th><th>Fallback</th></tr></thead>
+    <tbody>
+    <tr><td><code>sses_bias</code></td><td>SST bias estimate</td><td>0.0 (no bias)</td></tr>
+    <tr><td><code>sses_standard_deviation</code></td><td>Error estimate</td><td>Default: 0.6 K</td></tr>
+    <tr><td><code>proximity_confidence</code></td><td>Cloud/land proximity</td><td>Use quality_level</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>File Naming Convention:</strong></p>
+    <p>GHRSST standard naming:</p>
+    <pre><code>YYYYMMDDHHMMSS-PROVIDER-L2P_GHRSST-SSTtype-SENSOR-platform-version.nc
+
+    Example:
+    20250808000000-JPL-L2P_GHRSST-SSTskin-MODIS_A-D-v02.0-fv01.0.nc</code></pre>
+    <h3 id="data-source">Data Source</h3>
+    <p><strong>NASA PO.DAAC (Physical Oceanography DAAC):</strong></p>
+    <ul>
+    <li>URL: https://podaac.jpl.nasa.gov/</li>
+    <li>Download tool: <code>podaac-data-subscriber</code></li>
+    <li>Authentication: NASA Earthdata Login required</li>
+    <li>Data format: GHRSST-compliant NetCDF</li>
+    </ul>
+    <p><strong>Collection Requirements:</strong></p>
+    <ul>
+    <li>Must be available via PO.DAAC subscription service</li>
+    <li>Regular updates (daily orbital data)</li>
+    <li>Metadata consistency (GHRSST compliance)</li>
+    </ul>
+    <h3 id="sensor-characteristics">Sensor Characteristics</h3>
+    <p><strong>Before adding a new sensor, document:</strong></p>
+    <ol>
+    <li><strong>Platform information:</strong>
+    <ul>
+    <li>Satellite name</li>
+    <li>Orbit type (polar, geostationary)</li>
+    <li>Overpass times (local time at equator)</li>
+    </ul>
+    </li>
+    <li><strong>Instrument specifications:</strong>
+    <ul>
+    <li>Sensor type (microwave, infrared, multi-spectral)</li>
+    <li>Spatial resolution (nadir and edge-of-swath)</li>
+    <li>Swath width</li>
+    <li>Measurement principle (skin vs. subskin temperature)</li>
+    </ul>
+    </li>
+    <li><strong>Data characteristics:</strong>
+    <ul>
+    <li>Typical granule count per day</li>
+    <li>Cloud impact (infrared sensors)</li>
+    <li>All-weather capability (microwave sensors)</li>
+    <li>Quality flag interpretation</li>
+    </ul>
+    </li>
+    <li><strong>Temporal characteristics:</strong>
+    <ul>
+    <li>Data latency (observation to availability)</li>
+    <li>Reprocessing schedule</li>
+    <li>Stability latency (how long until data is finalized)</li>
+    </ul>
+    </li>
+    </ol>
+    <h2 id="l2p-output-specifications">L2P output specifications</h2>
+    <h3 id="bic-file-format">BIC File Format</h3>
+    <p><strong>Output File:</strong> <code>.bic.gz</code> (Binary Input with Confidence, gzip compressed)</p>
+    <p><strong>Naming Convention:</strong></p>
+    <pre><code>{REGION}_{SENSOR}_{YEAR}_{DOY}.bic.gz
+
+    Example:
+    G10_MODISA_2025_042.bic.gz</code></pre>
+    <p><strong>Binary Structure:</strong></p>
+    <p>The <code>.bic</code> file is a Fortran-compatible unformatted binary file with the following structure:</p>
+    <pre><code class="language-fortran">! Header record
+    write(unit) nobs  ! Integer: number of observations
+
+    ! Data records (one per observation)
+    do i = 1, nobs
+        write(unit) lon(i)    ! Real*4: longitude (degrees East, -180 to +180)
+        write(unit) lat(i)    ! Real*4: latitude (degrees North, -90 to +90)
+        write(unit) sst(i)    ! Real*4: SST (degrees Celsius)
+        write(unit) hour(i)   ! Real*4: hours from analysis time (-48 to +48)
+        write(unit) bias(i)   ! Real*4: bias correction (degrees C)
+        write(unit) rms(i)    ! Real*4: RMS error estimate (degrees C)
+        write(unit) qflag(i)  ! Real*4: quality flag (sensor-specific)
+    end do</code></pre>
+    <p><strong>Data Requirements:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Field</th><th>Type</th><th>Range</th><th>Description</th></tr></thead>
+    <tbody>
+    <tr><td><code>lon</code></td><td>Real*4</td><td>-180 to +180</td><td>Longitude in degrees East</td></tr>
+    <tr><td><code>lat</code></td><td>Real*4</td><td>-90 to +90</td><td>Latitude in degrees North</td></tr>
+    <tr><td><code>sst</code></td><td>Real*4</td><td>-2 to +45</td><td>SST in degrees Celsius</td></tr>
+    <tr><td><code>hour</code></td><td>Real*4</td><td>-48 to +48</td><td>Time offset from analysis (hours)</td></tr>
+    <tr><td><code>bias</code></td><td>Real*4</td><td>-2 to +2</td><td>Bias correction (Celsius)</td></tr>
+    <tr><td><code>rms</code></td><td>Real*4</td><td>0.1 to 2.0</td><td>Error standard deviation (Celsius)</td></tr>
+    <tr><td><code>qflag</code></td><td>Real*4</td><td>sensor-specific</td><td>Quality/confidence indicator</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Quality Standards:</strong></p>
+    <ul>
+    <li>SST values must be physically realistic (-2°C to 45°C)</li>
+    <li>Missing/invalid data must be filtered out (not written to BIC)</li>
+    <li>Time offsets should be accurate (impact temporal weighting)</li>
+    <li>Bias and error estimates should be sensor-appropriate</li>
+    </ul>
+    <p><strong>Compression:</strong></p>
+    <ul>
+    <li>Files are gzip compressed (<code>.gz</code>)</li>
+    <li>Typical compression ratio: 3:1 to 5:1</li>
+    <li>Original BIC size: 150-2000 MB</li>
+    <li>Compressed size: 50-500 MB</li>
+    </ul>
+    <h3 id="companion-files">Companion Files</h3>
+    <p><strong>L2Plist File:</strong> <code>L2Plist_{REGION}_{SENSOR}_{YEAR}_{DOY}.txt</code></p>
+    <p><strong>Purpose:</strong> Track source granules used in processing</p>
+    <p><strong>Format:</strong> Plain text, one granule filename per line</p>
+    <p><strong>Example:</strong></p>
+    <pre><code>20250211000000-JPL-L2P_GHRSST-SSTskin-MODIS_A-D-v02.0-fv01.0.nc
+    20250211001500-JPL-L2P_GHRSST-SSTskin-MODIS_A-D-v02.0-fv01.0.nc
+    20250211003000-JPL-L2P_GHRSST-SSTskin-MODIS_A-D-v02.0-fv01.0.nc</code></pre>
+    <p><strong>Uses:</strong></p>
+    <ul>
+    <li>Quality assurance (verify input granules)</li>
+    <li>Reprocessing traceability</li>
+    <li>Data provenance documentation</li>
+    </ul>
+    <h2 id="sensor-configuration-parameters">Sensor configuration parameters</h2>
+    <h3 id="scale-parameters-lalb">Scale Parameters (La/Lb)</h3>
+    <p><strong>Definition:</strong></p>
+    <ul>
+    <li><code>La</code> (Lower scale): Minimum scale at which sensor contributes to MRVA</li>
+    <li><code>Lb</code> (Upper scale): Maximum scale at which sensor contributes to MRVA</li>
+    </ul>
+    <p><strong>Scale-to-Resolution Mapping:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Scale</th><th>Grid Spacing</th><th>Effective Resolution</th><th>Typical Sensors</th></tr></thead>
+    <tbody>
+    <tr><td>L=2</td><td>~11.25°</td><td>~1250 km</td><td>All sensors</td></tr>
+    <tr><td>L=3-5</td><td>~5.6° to ~1.4°</td><td>~625 to ~156 km</td><td>All sensors</td></tr>
+    <tr><td>L=6-8</td><td>~0.7° to ~0.17°</td><td>~78 to ~19 km</td><td>Medium+ res sensors</td></tr>
+    <tr><td>L=9</td><td>~0.09°</td><td>~10 km</td><td>High-res sensors only</td></tr>
+    <tr><td>L=10-12</td><td>~0.045° to ~0.022°</td><td>~5 to ~2.5 km</td><td>Highest-res sensors</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Guideline for Setting La/Lb:</strong></p>
+    <pre><code>1. Determine sensor pixel size at nadir (in km)
+
+    2. Set Lb based on resolution:
+       - If pixel_size &gt; 20 km:      Lb = 8  (exclude from fine scales)
+       - If 10 km &lt; pixel_size ≤ 20: Lb = 9
+       - If 5 km &lt; pixel_size ≤ 10:  Lb = 10
+       - If pixel_size ≤ 5 km:       Lb = 11 or 12 (highest res)
+
+    3. Set La = 2 (all sensors contribute to large scales)
+
+    4. Rationale: Prevent aliasing by excluding sensors at scales
+       finer than their native resolution</code></pre>
+    <p><strong>Current Sensor Configurations:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Sensor</th><th>Type</th><th>Resolution</th><th>La</th><th>Lb</th><th>Scales Used</th></tr></thead>
+    <tbody>
+    <tr><td>IQUAM0 (buoys)</td><td>In-situ</td><td>Point</td><td>2</td><td>8</td><td>2-8</td></tr>
+    <tr><td>AMSR2R</td><td>Microwave</td><td>~25 km</td><td>2</td><td>8</td><td>2-8</td></tr>
+    <tr><td>MODISA</td><td>Infrared</td><td>~1 km</td><td>2</td><td>12</td><td>2-12</td></tr>
+    <tr><td>MODIST</td><td>Infrared</td><td>~1 km</td><td>2</td><td>12</td><td>2-12</td></tr>
+    <tr><td>AVMTBG</td><td>Infrared</td><td>~1-4 km</td><td>2</td><td>9</td><td>2-9</td></tr>
+    <tr><td>Ice SST</td><td>Model</td><td>~10 km</td><td>2</td><td>9</td><td>2-9</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Example: Adding a new 5km sensor:</strong></p>
+    <pre><code>Sensor: VIIRS (Visible Infrared Imaging Radiometer Suite)
+    Resolution: ~750m nadir, ~1.5km edge-of-swath (average ~1 km)
+    Recommended: La=2, Lb=12 (same as MODIS)
+    Rationale: High resolution, suitable for all scales</code></pre>
+    <p><strong>Example: Adding a coarse sensor:</strong></p>
+    <pre><code>Sensor: SMAP (Soil Moisture Active Passive) SSS/SST
+    Resolution: ~40 km
+    Recommended: La=2, Lb=7
+    Rationale: Too coarse for scales &gt; L=7 (~39 km grid)</code></pre>
+    <h3 id="quality-filtering-parameters">Quality Filtering Parameters</h3>
+    <p><strong>Minimum Confidence Value:</strong></p>
+    <p>Purpose: Filter poor-quality observations</p>
+    <p><strong>Configuration in SensorTable.m:</strong></p>
+    <pre><code class="language-matlab">case 'NEWSENSOR'
+        minConfValue = 5;  % Sensor-dependent threshold</code></pre>
+    <p><strong>Guidelines:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Sensor Type</th><th>Typical Threshold</th><th>Rationale</th></tr></thead>
+    <tbody>
+    <tr><td><strong>Infrared</strong></td><td>4-5</td><td>Strict (cloud contamination risk)</td></tr>
+    <tr><td><strong>Microwave</strong></td><td>3-4</td><td>Moderate (all-weather)</td></tr>
+    <tr><td><strong>Multi-spectral</strong></td><td>5</td><td>Strict (complex QC)</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Quality Flag Interpretation:</strong></p>
+    <p>GHRSST standard quality levels:</p>
+    <ul>
+    <li><strong>0:</strong> No data</li>
+    <li><strong>1:</strong> Bad data (failed QC)</li>
+    <li><strong>2:</strong> Worst quality</li>
+    <li><strong>3:</strong> Low quality</li>
+    <li><strong>4:</strong> Acceptable quality</li>
+    <li><strong>5:</strong> Best quality</li>
+    </ul>
+    <p><strong>Proximity Confidence (if available):</strong></p>
+    <ul>
+    <li>Additional filtering for cloud/land proximity</li>
+    <li>Typically used in conjunction with quality_level</li>
+    </ul>
+    <h3 id="stability-latency">Stability Latency</h3>
+    <p><strong>Definition:</strong> Time period (in days) before sensor data is considered "stable" and no longer needs reprocessing in NRT mode</p>
+    <p><strong>Purpose:</strong></p>
+    <ul>
+    <li>Account for data provider reprocessing</li>
+    <li>Handle delayed quality control updates</li>
+    <li>Ensure final product uses mature data</li>
+    </ul>
+    <p><strong>Current Values:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Sensor</th><th>Stability (days)</th><th>Rationale</th></tr></thead>
+    <tbody>
+    <tr><td>MODISA</td><td>2</td><td>Standard product, 2-day finalization</td></tr>
+    <tr><td>MODIST</td><td>3</td><td>Additional Terra-specific processing</td></tr>
+    <tr><td>AMSR2R</td><td>2</td><td>Microwave product, fast turnaround</td></tr>
+    <tr><td>AVMTBG</td><td>2</td><td>Standard NAVO processing</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>How to Determine for New Sensor:</strong></p>
+    <ol>
+    <li><strong>Consult provider documentation:</strong>
+    <ul>
+    <li>PO.DAAC dataset landing page</li>
+    <li>Processing algorithm description</li>
+    <li>Reprocessing schedule</li>
+    </ul>
+    </li>
+    <li><strong>Empirical testing:</strong>
+    <ul>
+    <li>Download data for same day over 7 days</li>
+    <li>Compare file hashes or observation counts</li>
+    <li>Determine when changes stabilize</li>
+    </ul>
+    </li>
+    <li><strong>Conservative estimate:</strong>
+    <ul>
+    <li>If uncertain, use 3 days (safe default)</li>
+    <li>Can reduce after operational experience</li>
+    </ul>
+    </li>
+    </ol>
+    <p><strong>Impact:</strong></p>
+    <pre><code>Stability = 2 days:
+      Processing day 042:
+        Day 042: Age 0 → Reprocess (fresh)
+        Day 041: Age 1 → Reprocess (age &lt; 2)
+        Day 040: Age 2 → Use cache (stable)
+
+    Stability = 3 days:
+      Processing day 042:
+        Day 042: Age 0 → Reprocess (fresh)
+        Day 041: Age 1 → Reprocess (age &lt; 3)
+        Day 040: Age 2 → Reprocess (age &lt; 3)
+        Day 039: Age 3 → Use cache (stable)</code></pre>
+    <p>Higher stability latency = more reprocessing = slower NRT but better quality</p>
+    <h3 id="bias-and-error-estimates">Bias and Error Estimates</h3>
+    <p><strong>Default Error (if not in L2P file):</strong></p>
+    <pre><code class="language-matlab">default_sst_error = 0.6;  % Kelvin (conservative)</code></pre>
+    <p><strong>Sensor-Specific Tuning:</strong></p>
+    <p>If available from validation studies:</p>
+    <pre><code class="language-matlab">switch upper(SensorName)
+        case 'NEWSENSOR'
+            default_error = 0.4;  % Low-error sensor
+            % Apply scaling if needed
+        otherwise
+            default_error = 0.6;  % Conservative default
+    end</code></pre>
+    <p><strong>Bias Handling:</strong></p>
+    <ul>
+    <li>Prefer sensor-provided <code>sses_bias</code> field</li>
+    <li>If unavailable, use 0.0 (no bias assumption)</li>
+    <li>For systematic bias, consider external correction tables</li>
+    </ul>
+    <h2 id="integration-workflow">Integration workflow</h2>
+    <h3 id="step-1-assess-sensor-suitability">Step 1: Assess Sensor Suitability</h3>
+    <p><strong>Checklist:</strong></p>
+    <ul>
+    <li>[ ] GHRSST L2P format available from PO.DAAC</li>
+    <li>[ ] Spatial resolution documented (≤ 25 km preferred)</li>
+    <li>[ ] Temporal coverage adequate (daily global or near-global)</li>
+    <li>[ ] Quality flags well-defined</li>
+    <li>[ ] Data latency acceptable (&lt; 12 hours for NRT)</li>
+    <li>[ ] License compatible with MUR distribution</li>
+    </ul>
+    <h3 id="step-2-update-sensortablem">Step 2: Update SensorTable.m</h3>
+    <p><strong>Location:</strong> <code>mur/l2p/src/SensorTable.m</code></p>
+    <p><strong>Add new case:</strong></p>
+    <pre><code class="language-matlab">function [l2pnames,minConfValue,cmd,subdir]=SensorTable(SensorName)
+
+    % Existing sensors...
+
+      case 'NEWSENSOR',  % e.g., 'VIIRS'
+        % File pattern to match L2P granules
+        l2pnames   = {'*.nc'};
+
+        % Minimum quality level (GHRSST standard: 0-5)
+        minConfValue = 5;  % Adjust based on sensor
+
+        % Decompression command ('' = no compression, 'cat' = standard)
+        cmd = 'cat';
+
+        % Subdirectory path (legacy, informational only)
+        subdir='GDS2/L2P/NEWSENSOR/PROVIDER/version';
+
+    end;  % switch</code></pre>
+    <p><strong>Parameters to configure:</strong></p>
+    <ol>
+    <li><strong>l2pnames:</strong> Filename pattern(s) to match granules
+    <ul>
+    <li>Use wildcards: <code>'*.nc'</code> (all .nc files)</li>
+    <li>Multiple patterns: <code>{'*_v8.2_*.nc','*_rt_*.nc'}</code> (AMSR2R example)</li>
+    </ul>
+    </li>
+    <li><strong>minConfValue:</strong> Quality threshold
+    <ul>
+    <li>Higher = stricter filtering</li>
+    <li>Recommend 4-5 for infrared, 3-4 for microwave</li>
+    </ul>
+    </li>
+    <li><strong>cmd:</strong> Decompression command
+    <ul>
+    <li><code>''</code> for uncompressed files</li>
+    <li><code>'cat'</code> for standard compression</li>
+    <li>Special handling if needed</li>
+    </ul>
+    </li>
+    <li><strong>subdir:</strong> Legacy path structure (not used in containerized version)</li>
+    </ol>
+    <h3 id="step-3-configure-mrva-parameters">Step 3: Configure MRVA Parameters</h3>
+    <p><strong>Location:</strong> <code>cyc4/mrva4com.m</code> (MRVA configuration file)</p>
+    <p><strong>Add sensor to bipfile array:</strong></p>
+    <pre><code class="language-matlab">% Existing configuration
+    % bipfile(1,m) = La (minimum scale)
+    % bipfile(2,m) = Lb (maximum scale)
+
+    % Sensor indices
+    IQUAM0_idx  = 1;
+    AMSR2R_idx  = 2;
+    MODISA_idx  = 3;
+    MODIST_idx  = 4;
+    AVMTBG_idx  = 5;
+    NEWSENSOR_idx = 6;  % New sensor index
+
+    % Scale limits
+    bipfile(1, NEWSENSOR_idx) = 2;   % La (start scale)
+    bipfile(2, NEWSENSOR_idx) = 10;  % Lb (end scale)
+
+    % Sensor names (for file lookup)
+    sensor_names{NEWSENSOR_idx} = 'NEWSENSOR';</code></pre>
+    <p><strong>Update temporal decay if needed:</strong></p>
+    <pre><code class="language-matlab">% Default decay parameters (hours) - one per scale
+    decay = [48, 48, 48, 48, 48, 48, 42, 36, 30, 24, 18, 12];
+    %        L2  L3  L4  L5  L6  L7  L8  L9 L10 L11 L12 L13
+
+    % Sensor-specific decay (if different from default)
+    % Usually not needed unless sensor has unique temporal characteristics</code></pre>
+    <h3 id="step-4-declare-the-sensor-in-configjson">Step 4: Declare the sensor in config.json</h3>
+    <p><strong>Location:</strong> <code>config.json</code> &mdash; the orchestrator reads its
+    sensor table from configuration, so adding one takes no Python change.</p>
+    <p>The sensor needs an entry in two places. Under <code>l2p</code>, which drives
+    download and BIC conversion:</p>
+    <pre><code class="language-json">"l2p": {
+      "active_sensors": ["AMSR2R", "MODISA", "MODIST", "AVMTAG", "AVMTBG", "NEWSENSOR"],
+      "sensors": {
+        "NEWSENSOR": {
+          "collection_name": ["NEWSENSOR-PROVIDER-L2P-vX.Y"],
+          "start_date": "2026-01-01T00:00:00Z",
+          "region": "Global",
+          "La": 2,
+          "Lb": 9,
+          "day_range": [2, 2],
+          "stable": 2,
+          "description": "Instrument, platform"
+        }
+      }
+    }</code></pre>
+    <p>And under <code>mrva</code>, which decides how the resulting observations enter
+    the analysis:</p>
+    <pre><code class="language-json">"mrva": {
+      "active_sensors": ["IQUAM0", "AMSR2R", "MODISA", "MODIST", "AVMTAG", "AVMTBG", "NEWSENSOR"],
+      "sensors": {
+        "NEWSENSOR": {
+          "directory": "NEWSENSOR",
+          "region": "Global",
+          "La": 2,
+          "Lb": 9,
+          "day_range": 2,
+          "description": "Instrument, platform"
+        }
+      }
+    }</code></pre>
+    <p>A sensor listed under <code>sensors</code> but left out of
+    <code>active_sensors</code> is configured but not run &mdash; which is how a new
+    instrument is staged and tested before it starts contributing to the product.</p>
+    <h3 id="step-5-setup-download-infrastructure">Step 5: Setup Download Infrastructure</h3>
+    <p><strong>Option 1: Hourly Cron (Production Pattern)</strong></p>
+    <p>Create download script:</p>
+    <pre><code class="language-bash">#!/bin/bash
+    # download_newsensor.sh
+
+    podaac-data-subscriber \
+        -c NEWSENSOR-PROVIDER-L2P-vX.Y \
+        -d /nas2/source/podaac/NEWSENSOR \
+        --start-date $(date -u +%Y-%m-%dT00:00:00Z) \
+        --end-date $(date -u +%Y-%m-%dT23:59:59Z) \
+        --verbose</code></pre>
+    <p>Add to crontab:</p>
+    <pre><code class="language-cron"># Download NEWSENSOR data hourly
+    0 * * * * /path/to/download_newsensor.sh &gt;&gt; /var/log/newsensor_download.log 2&gt;&amp;1</code></pre>
+    <p><strong>Option 2: On-Demand Download</strong></p>
+    <p>Integrate into pipeline orchestrator:</p>
+    <pre><code class="language-python">def download_l2p_data(sensor, year, doy, dayrange):
+        """Download L2P data for processing window"""
+        collection = L2P_SENSORS[sensor]['collection']
+
+        start_doy = doy - dayrange
+        end_doy = doy + dayrange
+
+        cmd = [
+            'podaac-data-subscriber',
+            '-c', collection,
+            '-d', f'/nas2/source/podaac/{sensor}',
+            '--start-date', doy_to_date(year, start_doy),
+            '--end-date', doy_to_date(year, end_doy)
+        ]
+
+        subprocess.run(cmd, check=True)</code></pre>
+    <h3 id="step-6-rebuild-l2p-container">Step 6: Rebuild L2P Container</h3>
+    <p><strong>Rebuild to include SensorTable changes:</strong></p>
+    <pre><code class="language-bash">cd mur
+    ./build_module.sh l2p</code></pre>
+    <p>(For a manual <code>docker build</code>, see <a href="configuration.html#manual-builds-advanced">Manual Builds (Advanced)</a>.)</p>
+    <p><strong>Tag for versioning:</strong></p>
+    <pre><code class="language-bash">docker tag mur-l2p:latest mur-l2p:v1.1-newsensor</code></pre>
+    <p><strong>Push to registry (if using):</strong></p>
+    <pre><code class="language-bash">docker push ghcr.io/podaac/mur-l2p:latest</code></pre>
+    <h2 id="testing-and-validation">Testing and validation</h2>
+    <h3 id="unit-testing">Unit Testing</h3>
+    <p><strong>Test 1: Single Granule Processing</strong></p>
+    <pre><code class="language-bash"># Download single test granule
+    podaac-data-subscriber \
+        -c NEWSENSOR-PROVIDER-L2P-vX.Y \
+        -d /tmp/test_newsensor \
+        --start-date 2025-02-11T00:00:00Z \
+        --end-date 2025-02-11T00:10:00Z
+
+    # Process with container
+    docker run --rm \
+        --shm-size=512M \
+        -v /tmp/test_newsensor:/input \
+        -v /tmp/test_output:/output \
+        mur-l2p:latest \
+        NEWSENSOR Global /input /output 2025 042 1
+
+    # Verify output
+    ls -lh /tmp/test_output/
+    # Should see: Global_NEWSENSOR_2025_042.bic.gz</code></pre>
+    <p><strong>Test 2: BIC File Validation</strong></p>
+    <pre><code class="language-python">import struct
+    import gzip
+
+    def validate_bic_file(filename):
+        """Validate BIC file structure and contents"""
+        with gzip.open(filename, 'rb') as f:
+            # Read observation count
+            nobs_bytes = f.read(4)
+            nobs = struct.unpack('i', nobs_bytes)[0]
+            print(f"Number of observations: {nobs}")
+
+            # Read first observation
+            for field in ['lon', 'lat', 'sst', 'hour', 'bias', 'rms', 'qflag']:
+                value_bytes = f.read(4)
+                value = struct.unpack('f', value_bytes)[0]
+                print(f"{field}: {value}")
+
+            # Validate ranges
+            assert -180 &lt;= lon &lt;= 180, "Longitude out of range"
+            assert -90 &lt;= lat &lt;= 90, "Latitude out of range"
+            assert -2 &lt;= sst &lt;= 45, "SST out of range"
+            assert -48 &lt;= hour &lt;= 48, "Time offset out of range"
+
+    validate_bic_file('/tmp/test_output/Global_NEWSENSOR_2025_042.bic.gz')</code></pre>
+    <p><strong>Test 3: Observation Count Sanity</strong></p>
+    <pre><code class="language-python">def count_bic_observations(filename):
+        """Count observations in BIC file"""
+        with gzip.open(filename, 'rb') as f:
+            nobs_bytes = f.read(4)
+            nobs = struct.unpack('i', nobs_bytes)[0]
+        return nobs
+
+    # Expected observation counts (rough estimates)
+    EXPECTED_COUNTS = {
+        'AMSR2R': (50_000, 500_000),       # Coarse resolution, fewer obs
+        'MODISA': (1_000_000, 10_000_000), # High res, many obs
+        'NEWSENSOR': (100_000, 5_000_000)  # Adjust based on sensor
+    }
+
+    nobs = count_bic_observations('Global_NEWSENSOR_2025_042.bic.gz')
+    min_expected, max_expected = EXPECTED_COUNTS['NEWSENSOR']
+    assert min_expected &lt;= nobs &lt;= max_expected, f"Unexpected obs count: {nobs}"</code></pre>
+    <h3 id="integration-testing">Integration Testing</h3>
+    <p><strong>Test 4: Full Day Processing</strong></p>
+    <pre><code class="language-bash"># Process full day with all sensors including new sensor
+    cd mur/
+    python run_mur_pipeline.py 2025 042 G10 nrt
+
+    # Verify all BIC files created
+    ls -lh /nas2/bic/*/2025/G10_*_2025_042.bic.gz
+
+    # Check logs for errors
+    grep -i error /var/log/mur_pipeline.log</code></pre>
+    <p><strong>Test 5: Multi-Day Window</strong></p>
+    <pre><code class="language-bash"># Process with ±2 day window
+    for doy in 040 041 042 043 044; do
+        docker run --rm \
+            -v /nas2/source/podaac/NEWSENSOR:/input \
+            -v /nas2/bic/NEWSENSOR:/output \
+            mur-l2p:latest \
+            NEWSENSOR Global /input /output 2025 $doy 0
+    done
+
+    # Verify all days processed
+    ls /nas2/bic/NEWSENSOR/2025/ | grep -E '04[0-4]'</code></pre>
+    <h3 id="validation-against-existing-sensors">Validation Against Existing Sensors</h3>
+    <p><strong>Test 6: Comparison with MODIS</strong></p>
+    <p>If new sensor has similar resolution to MODIS, compare statistics:</p>
+    <pre><code class="language-python">def compare_sensors(bic_file1, bic_file2, region='global'):
+        """Compare SST statistics between two sensors"""
+        import numpy as np
+
+        def read_bic_sst(filename):
+            sst_values = []
+            with gzip.open(filename, 'rb') as f:
+                nobs = struct.unpack('i', f.read(4))[0]
+                for _ in range(nobs):
+                    lon, lat, sst = struct.unpack('fff', f.read(12))
+                    f.read(16)  # Skip hour, bias, rms, qflag
+                    sst_values.append(sst)
+            return np.array(sst_values)
+
+        sst1 = read_bic_sst(bic_file1)
+        sst2 = read_bic_sst(bic_file2)
+
+        print(f"Sensor 1: mean={sst1.mean():.2f}, std={sst1.std():.2f}")
+        print(f"Sensor 2: mean={sst2.mean():.2f}, std={sst2.std():.2f}")
+        print(f"Difference: {abs(sst1.mean() - sst2.mean()):.2f} °C")
+
+        # Should be within ~1°C for similar sensor types
+        assert abs(sst1.mean() - sst2.mean()) &lt; 1.0, "Mean SST difference too large"
+
+    compare_sensors(
+        '/nas2/bic/MODISA/2025/G10_MODISA_2025_042.bic.gz',
+        '/nas2/bic/NEWSENSOR/2025/G10_NEWSENSOR_2025_042.bic.gz'
+    )</code></pre>
+    <h3 id="quality-assurance">Quality Assurance</h3>
+    <p><strong>Test 7: Spatial Coverage</strong></p>
+    <pre><code class="language-python">def check_spatial_coverage(bic_file):
+        """Verify global coverage"""
+        lons, lats = [], []
+
+        with gzip.open(bic_file, 'rb') as f:
+            nobs = struct.unpack('i', f.read(4))[0]
+            for _ in range(nobs):
+                lon, lat = struct.unpack('ff', f.read(8))
+                lons.append(lon)
+                lats.append(lat)
+                f.read(20)  # Skip remaining fields
+
+        # Check coverage
+        lat_range = max(lats) - min(lats)
+        lon_range = max(lons) - min(lons)
+
+        print(f"Latitude range: {min(lats):.1f} to {max(lats):.1f} ({lat_range:.1f}°)")
+        print(f"Longitude range: {min(lons):.1f} to {max(lons):.1f} ({lon_range:.1f}°)")
+
+        # Global coverage should span most of -90 to +90, -180 to +180
+        assert lat_range &gt; 150, "Insufficient latitude coverage"
+        assert lon_range &gt; 300, "Insufficient longitude coverage"
+
+    check_spatial_coverage('/nas2/bic/NEWSENSOR/2025/G10_NEWSENSOR_2025_042.bic.gz')</code></pre>
+    <p><strong>Test 8: Temporal Coverage</strong></p>
+    <pre><code class="language-python">def check_temporal_distribution(bic_file):
+        """Verify observations span 24 hours"""
+        hours = []
+
+        with gzip.open(bic_file, 'rb') as f:
+            nobs = struct.unpack('i', f.read(4))[0]
+            for _ in range(nobs):
+                f.read(12)  # Skip lon, lat, sst
+                hour = struct.unpack('f', f.read(4))[0]
+                hours.append(hour)
+                f.read(12)  # Skip bias, rms, qflag
+
+        hour_range = max(hours) - min(hours)
+        print(f"Time range: {min(hours):.1f} to {max(hours):.1f} hours ({hour_range:.1f} h)")
+
+        # Should span close to 24 hours for daily data
+        assert hour_range &gt; 20, "Insufficient temporal coverage"
+
+    check_temporal_distribution('/nas2/bic/NEWSENSOR/2025/G10_NEWSENSOR_2025_042.bic.gz')</code></pre>
+    <h2 id="examples">Worked examples</h2>
+    <h3 id="example-1-viirs-high-resolution-infrared">Example 1: VIIRS (High-Resolution Infrared)</h3>
+    <p><strong>Sensor Characteristics:</strong></p>
+    <ul>
+    <li>Platform: NOAA-20, SNPP</li>
+    <li>Type: Infrared radiometer</li>
+    <li>Resolution: ~750m nadir</li>
+    <li>Coverage: Global, polar orbit</li>
+    </ul>
+    <p><strong>Configuration:</strong></p>
+    <p><strong>SensorTable.m:</strong></p>
+    <pre><code class="language-matlab">case 'VIIRS',
+        l2pnames   = {'*.nc'};
+        minConfValue = 5;  % High quality only
+        cmd = 'cat';
+        subdir='GDS2/L2P/VIIRS/NOAA/v2';</code></pre>
+    <p><strong>MRVA Configuration:</strong></p>
+    <pre><code class="language-matlab">% Scale limits (high resolution like MODIS)
+    bipfile(1, VIIRS_idx) = 2;   % La
+    bipfile(2, VIIRS_idx) = 12;  % Lb</code></pre>
+    <p><strong>Pipeline Configuration:</strong></p>
+    <pre><code class="language-python">'VIIRS': {
+        'collection': 'VIIRS_NPP-OSPO-L2P-v2.61',
+        'stability_latency': 2,
+        'dayrange': 2
+    }</code></pre>
+    <h3 id="example-2-smap-coarse-resolution-microwave">Example 2: SMAP (Coarse-Resolution Microwave)</h3>
+    <p><strong>Sensor Characteristics:</strong></p>
+    <ul>
+    <li>Platform: SMAP satellite</li>
+    <li>Type: Microwave radiometer</li>
+    <li>Resolution: ~40 km</li>
+    <li>Coverage: Global ocean, 3-day repeat</li>
+    </ul>
+    <p><strong>Configuration:</strong></p>
+    <p><strong>SensorTable.m:</strong></p>
+    <pre><code class="language-matlab">case 'SMAP',
+        l2pnames   = {'*_L2P_*.nc'};
+        minConfValue = 4;  % Microwave, relaxed threshold
+        cmd = '';
+        subdir='GDS2/L2P/SMAP/RSS/v5';</code></pre>
+    <p><strong>MRVA Configuration:</strong></p>
+    <pre><code class="language-matlab">% Scale limits (coarse resolution)
+    bipfile(1, SMAP_idx) = 2;   % La
+    bipfile(2, SMAP_idx) = 7;   % Lb (limit to ~39 km scales)</code></pre>
+    <p><strong>Pipeline Configuration:</strong></p>
+    <pre><code class="language-python">'SMAP': {
+        'collection': 'SMAP_L2B_SSS-REMSS-v5.0',
+        'stability_latency': 3,  # Longer processing time
+        'dayrange': 3  # Wider window for 3-day repeat
+    }</code></pre>
+    <h3 id="example-3-geostationary-sensor-himawari-8">Example 3: Geostationary Sensor (Himawari-8)</h3>
+    <p><strong>Sensor Characteristics:</strong></p>
+    <ul>
+    <li>Platform: Himawari-8 (geostationary)</li>
+    <li>Type: Infrared imager</li>
+    <li>Resolution: ~2 km</li>
+    <li>Coverage: Asia-Pacific region only</li>
+    </ul>
+    <p><strong>Special Considerations:</strong></p>
+    <ul>
+    <li>Regional coverage (not global)</li>
+    <li>High temporal resolution (10-min updates)</li>
+    <li>Many granules per day</li>
+    </ul>
+    <p><strong>Configuration:</strong></p>
+    <p><strong>SensorTable.m:</strong></p>
+    <pre><code class="language-matlab">case 'HIMAWARI8',
+        l2pnames   = {'*.nc'};
+        minConfValue = 5;
+        cmd = 'cat';
+        subdir='GDS2/L2P/AHI/JAXA/v2';</code></pre>
+    <p><strong>MRVA Configuration:</strong></p>
+    <pre><code class="language-matlab">% Scale limits (medium-high resolution)
+    bipfile(1, HIMAWARI8_idx) = 2;
+    bipfile(2, HIMAWARI8_idx) = 10;  % Good to ~5 km scales</code></pre>
+    <p><strong>Pipeline Configuration:</strong></p>
+    <pre><code class="language-python">'HIMAWARI8': {
+        'collection': 'AHI-JAXA-L2P-v2',
+        'stability_latency': 2,
+        'dayrange': 1  # High temporal resolution, shorter window
+    }</code></pre>
+    <p><strong>Regional Filtering (if needed):</strong></p>
+    <pre><code class="language-matlab">% In l2p2bic.m, add regional filter
+    if strcmp(sensor, 'HIMAWARI8')
+        % Only keep Asia-Pacific region
+        valid_idx = lon &gt;= 80 &amp; lon &lt;= 200 &amp; lat &gt;= -60 &amp; lat &lt;= 60;
+        lon = lon(valid_idx);
+        lat = lat(valid_idx);
+        sst = sst(valid_idx);
+        % ... filter other fields
+    end</code></pre>
+
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. This site is
+      the documentation &mdash; there is no separate Markdown copy to fall out of date.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

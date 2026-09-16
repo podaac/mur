@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Static input data — MUR SST</title>
+<meta name="description" content="Every static reference file the MUR pipeline needs staged before a run: grids, transformation matrices, climatology, and where each comes from.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav>
+    <div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <a href="mrva-internals.html">MRVA internals</a>
+    <div class="nav-group">Operating it</div>
+    <a href="configuration.html">Configuration</a>
+    <a href="static-data.html" aria-current="page">Static input data</a>
+    <a href="input-contract.html">Input contract</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a>
+    <div class="nav-group">Containers</div>
+    <a href="container-landice.html">Land/ice</a>
+    <a href="container-l2p.html">L2P</a>
+    <a href="container-iquam.html">iQUAM</a>
+    <a href="container-mrva.html">MRVA</a>
+    <div class="nav-group">Reference</div>
+    <a href="landice-encoding.html">Land/ice encoding</a>
+    <a href="future.html">Future enhancements</a>
+    <div class="nav-group">Project</div>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>Static input data</h1>
+    <p class="lede">The reference files the pipeline needs on disk before it can run, and where they come from.</p>
+
+    <p>Alongside the observations it downloads each day, the pipeline needs a
+    set of reference files that change rarely or never: land masks, grid
+    transformation matrices, and a day-of-year climatology. These are not
+    fetched automatically &mdash; they must be staged before the first run.
+    The mask bit layout itself is covered in
+    <a href="landice-encoding.html">land/ice encoding</a>.</p>
+    <nav class="toc" aria-label="On this page">
+    <b>On this page</b>
+    <ul>
+      <li><a href="#what-counts-as-static">What counts as static</a></li>
+      <li><a href="#directory-structure">Directory Structure</a></li>
+      <li><a href="#grid-mask-files">Grid Mask Files</a></li>
+      <li><a href="#osi-saf-transformation-matrices">OSI-SAF Transformation Matrices</a></li>
+      <li><a href="#seasonal-climatology">Seasonal Climatology</a></li>
+      <li><a href="#l4-reference-data">L4 Reference Data</a></li>
+      <li><a href="#polar-cap-edge-data">Polar Cap Edge Data</a></li>
+      <li><a href="#sea-ice-concentration">Sea ice concentration</a></li>
+      <li><a href="#data-sources">Data Sources</a></li>
+      <li><a href="#verification">Verification</a></li>
+    </ul>
+    </nav>
+    <p>This document describes all static data files required by the MUR processing pipeline. Static data refers to files that do not change with processing date and are used as reference inputs across all processing runs.</p>
+    <h2 id="what-counts-as-static">What counts as static</h2>
+    <p>Static data is stored in the <code>static-resources/</code> directory on disk — the layout documented below never changes. Unlike dynamic inputs (L2P, iQUAM, land/ice), these files are:</p>
+    <ul>
+    <li><strong>Immutable:</strong> Never modified during processing</li>
+    <li><strong>Resolution-specific:</strong> Different files for 0.01° vs 0.011° grids</li>
+    <li><strong>Shared across modules:</strong> Used by both landice and MRVA containers</li>
+    </ul>
+    <p><strong>Both landice and MRVA now take every static file as an individually resolved, explicitly-named flag</strong> (<code>--landmask-p01-file</code>, <code>--polar-cap-edge-file</code>, <code>--seasonal-file</code>, etc. — see the <a href="container-landice.html">land/ice container</a>, <code>mrva/bin/entrypoint.sh</code>); nothing is discovered by scanning a directory or bind-mounting a whole <code>static-resources/</code> tree. MRVA additionally takes three per-day landice-output files (<code>--landice-ice-p011-file</code>, <code>--landice-grid-p01-file</code>, <code>--landice-icefiles-p011-file</code>) and a <code>--sensor-inputs-manifest</code> covering its per-sensor BIC/iQuam fan-in (see the <a href="input-contract.html#3-manifest-file-format">input contract</a>, §3) the same way.</p>
+    <p><strong>Local paths or S3 hrefs, uniformly.</strong> Every flag value may be either a local filesystem path (bind-mounted for local <code>docker run</code>) or an <code>s3://</code> href (MAAP, or any S3-accessible environment) — <code>entrypoint.sh</code> sources a shared helper (<code>common/bin/localize.sh</code>) that fetches <code>s3://</code> values to local scratch space via <code>aws s3 cp</code> before MATLAB runs; local paths pass through unchanged. This is why the flags are described as "explicitly-named" rather than "bind-mounted": bind-mounting is how the local orchestrator (<code>run_mur_pipeline.py</code>) happens to supply a local path, not a requirement of the flag contract itself. See the <a href="input-contract.html#4-localization-getting-bytes-onto-local-disk-before-matlab-runs">input contract</a>, §4, for the full rationale (why this has to happen inside the container rather than in Python).</p>
+    <p><strong>MRVA's <code>static-resources/</code> mount is now genuinely read-only.</strong> <code>makeMUR25_container.m</code>'s seasonal climatology cache (<code>seasonal25/mur_###.mat</code>) previously wrote back into <code>static_resources_root</code> at runtime — this was fixed to write into the writable <code>cache_dir</code> instead, matching its sibling ice-cache's already-correct pattern.</p>
+    <p><strong>One directory-shaped exception:</strong> <code>--l4-reference-root</code> (the optional GHRSST L4 bootstrap reference, only used when no prior-day coefficient exists) is a directory tree, not a single file. <code>common/bin/localize.sh</code> doesn't do recursive S3 sync (<code>aws s3 cp</code> without <code>--recursive</code>), so this flag is bind-mounted/passed through as-is locally; real S3-recursive localization for this specific input is not implemented.</p>
+    <h3 id="configuration">Configuration</h3>
+    <p><code>run_mur_pipeline.py</code> resolves landice's six files from a single root path, configured in <code>config.json</code>:</p>
+    <pre><code class="language-json">{
+      "landice": {
+        "static_resources_dir": "testing/static-resources"
+      },
+      "mrva": {
+        "static_resources_dir": "testing/static-resources"
+      }
+    }</code></pre>
+    <p>(<code>landice.static_resources_dir</code> was named <code>landice.input_dir</code> before landice's explicit-input-flags conversion — the value is the same root, just the key was renamed for clarity now that it's resolved into six explicit files rather than bind-mounted whole.)</p>
+    <h2 id="directory-structure">Directory Structure</h2>
+    <pre><code>static-resources/
+    ├── grids/                    # Land/sea mask files
+    │   ├── maskGLOBp01deg.gds    # 0.01° resolution (36000×17999)
+    │   ├── maskGlob1km.gds       # 0.011° resolution (1km)
+    │   ├── Glob1km.mask          # Alternative 1km mask format
+    │   └── MUR25grid.gds         # 0.25° resolution (1440×720) - for MUR25 product
+    │
+    ├── mat/                      # MATLAB transformation matrices
+    │   ├── landindexNH.mat       # Northern hemisphere land indices
+    │   ├── landindexSH.mat       # Southern hemisphere land indices
+    │   ├── latlonOSISAFnh.mat    # OSI-SAF NH lat/lon grid
+    │   ├── latlonOSISAFsh.mat    # OSI-SAF SH lat/lon grid
+    │   ├── p01/                  # For 0.01° resolution
+    │   │   ├── saf2north.mat     # NH ice→grid mapping (~152 MB)
+    │   │   └── saf2south.mat     # SH ice→grid mapping (~127 MB)
+    │   └── p011/                 # For 0.011° resolution
+    │       ├── saf2north.mat     # NH ice→grid mapping (~126 MB)
+    │       └── saf2south.mat     # SH ice→grid mapping (~111 MB)
+    │
+    ├── seasonal/                 # MUR seasonal climatology
+    │   ├── mur_001.nc            # Day 1 climatology
+    │   ├── mur_002.nc            # Day 2 climatology
+    │   ├── ...
+    │   └── mur_365.nc            # Day 365 climatology
+    │
+    ├── L4/                       # L4 reference SST (optional)
+    │   └── GLOB/
+    │       └── NCDC/
+    │           └── AVHRR_OI/
+    │               └── {year}/{day}/*.bz2
+    │
+    └── landice/                  # Polar cap edge data
+        └── CylinderP01_edge.bip  # Polar stereographic edge (~35 MB)</code></pre>
+    <h2 id="grid-mask-files">Grid Mask Files</h2>
+    <h3 id="purpose">Purpose</h3>
+    <p>Grid mask files define the land/sea/lake classification for each pixel in the output grid. They are used by:</p>
+    <ul>
+    <li><strong>landice module:</strong> As base mask to add ice flags</li>
+    <li><strong>MRVA module:</strong> For output NetCDF generation (when ice not included)</li>
+    </ul>
+    <h3 id="files">Files</h3>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>File</th><th>Resolution</th><th>Dimensions</th><th>Size</th><th>Description</th></tr></thead>
+    <tbody>
+    <tr><td><code>maskGLOBp01deg.gds</code></td><td>0.01°</td><td>36000×17999</td><td>648 MB</td><td>Primary MUR grid</td></tr>
+    <tr><td><code>maskGlob1km.gds</code></td><td>0.011°</td><td>~32727×16363</td><td>537 MB</td><td>1km grid variant</td></tr>
+    <tr><td><code>Glob1km.mask</code></td><td>0.011°</td><td>~32727×16363</td><td>1 GB</td><td>Alternative format</td></tr>
+    <tr><td><code>MUR25grid.gds</code></td><td>0.25°</td><td>1440×720</td><td>~1 MB</td><td>MUR25 product grid</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="mur25-grid-file">MUR25 Grid File</h3>
+    <p>The <code>MUR25grid.gds</code> file is required for generating the MUR25 (0.25-degree) product. This is a lower-resolution "sibling" product that is derived from the same MRVA analysis as the full MUR SST.</p>
+    <p><strong>Product Comparison:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Product</th><th>Resolution</th><th>Grid Size</th><th>Filename Pattern</th></tr></thead>
+    <tbody>
+    <tr><td>MUR (Full)</td><td>0.01°</td><td>36000×17999</td><td><code>...-MUR-GLOB-...fv04.1.nc</code></td></tr>
+    <tr><td>MUR25</td><td>0.25°</td><td>1440×720</td><td><code>...-MUR25-GLOB-...fv04.2.nc</code></td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>To obtain the MUR25 grid file:</strong></p>
+    <ol>
+    <li>Copy from production: <code>/home/tmchin/grids/MUR25grid.gds</code></li>
+    <li>Or generate by downsampling the 0.01° mask using the <code>MURto25</code> function</li>
+    </ol>
+    <p><strong>Note:</strong> If the MUR25 grid file is not present, the container workflow will skip MUR25 generation but still produce the full-resolution MUR product.</p>
+    <h3 id="mask-value-encoding">Mask Value Encoding</h3>
+    <pre><code>BASE VALUES:
+      1 (0001b) = Open sea
+      2 (0010b) = Land
+      3 (0011b) = Coast/shore
+      5 (0101b) = Open lake
+      7 (0111b) = Lake shore
+
+    WITH ICE (bit 3 added):
+      9  (1001b) = Open sea with ice
+      11 (1011b) = Coast with ice
+      13 (1101b) = Open lake with ice</code></pre>
+    <h3 id="file-format">File Format</h3>
+    <p>Binary Fortran unformatted file with structure:</p>
+    <pre><code>Record 1: [ii, jj]           - Grid dimensions (int32)
+    Record 2: [mask, mlon, mlat] - Mask array (int8) + coordinates (float32)</code></pre>
+    <h2 id="osi-saf-transformation-matrices">OSI-SAF Transformation Matrices</h2>
+    <h3 id="purpose-1">Purpose</h3>
+    <p>These MATLAB <code>.mat</code> files contain pre-computed index mappings that transform OSI-SAF polar stereographic ice concentration data onto the MUR cylindrical grid.</p>
+    <h3 id="files-1">Files</h3>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Directory</th><th>File</th><th>Description</th></tr></thead>
+    <tbody>
+    <tr><td><code>mat/</code></td><td><code>landindexNH.mat</code></td><td>NH land pixel indices</td></tr>
+    <tr><td><code>mat/</code></td><td><code>landindexSH.mat</code></td><td>SH land pixel indices</td></tr>
+    <tr><td><code>mat/</code></td><td><code>latlonOSISAFnh.mat</code></td><td>OSI-SAF NH coordinate grid</td></tr>
+    <tr><td><code>mat/</code></td><td><code>latlonOSISAFsh.mat</code></td><td>OSI-SAF SH coordinate grid</td></tr>
+    <tr><td><code>mat/p01/</code></td><td><code>saf2north.mat</code></td><td>NH ice→0.01° grid mapping</td></tr>
+    <tr><td><code>mat/p01/</code></td><td><code>saf2south.mat</code></td><td>SH ice→0.01° grid mapping</td></tr>
+    <tr><td><code>mat/p011/</code></td><td><code>saf2north.mat</code></td><td>NH ice→0.011° grid mapping</td></tr>
+    <tr><td><code>mat/p011/</code></td><td><code>saf2south.mat</code></td><td>SH ice→0.011° grid mapping</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="used-by">Used By</h3>
+    <ul>
+    <li><code>landice/src/makeicefiles.m</code> - Ice concentration gridding</li>
+    </ul>
+    <h2 id="seasonal-climatology">Seasonal Climatology</h2>
+    <h3 id="purpose-2">Purpose</h3>
+    <p>Daily MUR SST climatology files provide seasonal reference values for quality control and anomaly computation. Each file contains the multi-year average SST for a specific day of year.</p>
+    <h3 id="files-2">Files</h3>
+    <ul>
+    <li><strong>Location:</strong> <code>seasonal/mur_###.nc</code> where <code>###</code> is day-of-year (001-365)</li>
+    <li><strong>Format:</strong> NetCDF with <code>sst</code>, <code>lon</code>, <code>lat</code> variables</li>
+    <li><strong>Coverage:</strong> Global, 0.01° resolution</li>
+    <li><strong>Count:</strong> 365 files (day 366 uses day 365)</li>
+    </ul>
+    <h3 id="used-by-1">Used By</h3>
+    <ul>
+    <li><code>mrva/src/matlab/io/readSeasonal.m</code> - Seasonal climatology lookup</li>
+    </ul>
+    <h3 id="source">Source</h3>
+    <p>Generated from multi-year MUR SST archive (typically 5+ years of data).</p>
+    <h2 id="l4-reference-data">L4 Reference Data</h2>
+    <h3 id="purpose-3">Purpose</h3>
+    <p>L4 GHRSST reference SST data is used as a background field for the "trimbip" quality control step. This step removes outliers from sensor data by comparing against a smooth reference field.</p>
+    <h3 id="when-its-needed">When It's Needed</h3>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Scenario</th><th>L4 Required?</th></tr></thead>
+    <tbody>
+    <tr><td>First day of processing</td><td><strong>Yes</strong> - No previous MUR coefficient exists</td></tr>
+    <tr><td>Consecutive daily runs</td><td><strong>No</strong> - Uses previous day's <code>.c06</code> coefficient</td></tr>
+    <tr><td>After processing gaps</td><td><strong>Only if</strong> previous day's coefficient is missing</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="how-it-works">How It Works</h3>
+    <p>The <code>trimbip3a.m</code> function checks for a previous MUR coefficient file:</p>
+    <pre><code class="language-matlab">if length(MURcsp),  %% use MUR reference:
+      refcspfile='MUR.csp';
+      eval(sprintf('!ln -sf %s %s',MURcsp,refcspfile));
+    else,  %% use L4 reference:
+      % Look for L4 GHRSST file...
+      dirname=sprintf('%s/GLOB/NCDC/AVHRR_OI/%04d/%03d/*fv02*.bz2',...</code></pre>
+    <h3 id="directory-structure-1">Directory Structure</h3>
+    <pre><code>L4/
+    └── GLOB/
+        └── NCDC/
+            └── AVHRR_OI/
+                └── 2025/           # Year
+                    └── 314/        # Day of year
+                        └── 20251110-NCEI-L4LRfnd-GLOB-...fv02.0.nc.bz2</code></pre>
+    <h3 id="data-source">Data Source</h3>
+    <p><strong>NOAA NCEI AVHRR Optimum Interpolation (OI) SST</strong></p>
+    <ul>
+    <li><strong>Product:</strong> GHRSST Level 4 AVHRR_OI Global Blended Sea Surface Temperature Analysis</li>
+    <li><strong>Short Name:</strong> <code>AVHRR_OI-NCEI-L4-GLOB-v2.0</code> or <code>AVHRR_OI-NCEI-L4-GLOB-v2.1</code></li>
+    <li><strong>Resolution:</strong> 0.25° (25 km)</li>
+    <li><strong>Provider:</strong> NOAA National Centers for Environmental Information (NCEI)</li>
+    </ul>
+    <p><strong>Download Sources:</strong></p>
+    <ol>
+    <li><strong>PO.DAAC (NASA):</strong>
+    <ul>
+    <li>https://podaac.jpl.nasa.gov/dataset/AVHRR_OI-NCEI-L4-GLOB-v2.1</li>
+    <li>Use <code>podaac-data-subscriber</code> tool</li>
+    </ul>
+    </li>
+    <li><strong>NOAA NCEI:</strong>
+    <ul>
+    <li>https://www.ncei.noaa.gov/products/optimum-interpolation-sst</li>
+    </ul>
+    </li>
+    <li><strong>GHRSST LTSRF:</strong>
+    <ul>
+    <li>https://www.ghrsst.org/</li>
+    </ul>
+    </li>
+    </ol>
+    <h3 id="alternative-l4-products">Alternative L4 Products</h3>
+    <p>The code supports other L4 products (commented out in <code>trimbip3a.m</code>):</p>
+    <pre><code class="language-matlab">L4list={  % choose only one:
+    'RV1','GLOB/NCDC/AVHRR_OI','*fv02*.bz2','bzcat'    % &lt;-- Active
+    %'RV2','GLOB/NCDC/AVHRR_AMSR_OI','*fv02*.bz2','bzcat'
+    %'OSTIA','GLOB/UKMO/OSTIA','*fv02*.bz2','bzcat'
+    %'ODYSSEA','GLOB/EUR/ODYSSEA','*fv02*.bz2','bzcat'
+    %'K10','GLOB/NAVO/K10_SST','*fv02*.bz2','bzcat'
+    %'ABOM','GLOB/ABOM/GAMSSA_28km/','*fv02*.bz2','bzcat'
+    };</code></pre>
+    <h3 id="practical-guidance">Practical Guidance</h3>
+    <p><strong>For Testing:</strong></p>
+    <p>If you have a previous coefficient file (e.g., <code>2025111009_MRVA4_Global.c06</code>), you can run subsequent days without L4 data.</p>
+    <p><strong>For Production Bootstrap:</strong></p>
+    <ol>
+    <li>Download one day of AVHRR_OI data for your start date</li>
+    <li>Run MRVA for that date (will use L4 as reference)</li>
+    <li>Subsequent days will use the previous coefficient</li>
+    </ol>
+    <p><strong>Example Download:</strong></p>
+    <pre><code class="language-bash"># Using podaac-data-subscriber
+    podaac-data-subscriber \
+      -c AVHRR_OI-NCEI-L4-GLOB-v2.1 \
+      -d ./L4/GLOB/NCDC/AVHRR_OI \
+      --start-date 2025-11-10 \
+      --end-date 2025-11-10</code></pre>
+    <h2 id="polar-cap-edge-data">Polar Cap Edge Data</h2>
+    <h3 id="purpose-4">Purpose</h3>
+    <p>The polar cap edge file (<code>CylinderP01_edge.bip</code>) defines the boundary region near the poles where cylindrical projection transitions to the polar stereographic region. This is used during MRVA analysis.</p>
+    <h3 id="file">File</h3>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>File</th><th>Size</th><th>Format</th></tr></thead>
+    <tbody>
+    <tr><td><code>landice/CylinderP01_edge.bip</code></td><td>~35 MB</td><td>Binary BIP format</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="used-by-2">Used By</h3>
+    <ul>
+    <li><code>mrva/src/matlab/preprocessing/makeref.m</code> - Reference field generation</li>
+    </ul>
+    <h2 id="sea-ice-concentration">Sea ice concentration</h2>
+    <p>Sea ice is the one input fetched at run time rather than staged. It
+    comes from OSI-SAF over HTTPS, selected by three environment variables:</p>
+
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Variable</th><th>Covers</th><th>Default</th></tr></thead>
+      <tbody>
+        <tr><td><code>OSISAF_FTP_PROD</code></td><td>Current day</td><td>OSI-SAF THREDDS <code>amsr2_conc</code> tree</td></tr>
+        <tr><td><code>OSISAF_FTP_ARCHIVE</code></td><td>Recent days</td><td>Same tree</td></tr>
+        <tr><td><code>OSISAF_FTP_REPROCESSED</code></td><td>Pre-2009 dates</td><td><em>None</em> &mdash; must be supplied explicitly</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="warn">
+      <p>The variables keep their <code>_FTP_</code> names for interface
+      compatibility, but OSI-SAF's anonymous FTP host no longer answers
+      &mdash; connections to it hang until they time out. The defaults are
+      HTTPS endpoints; an <code>ftp://</code> value still works if you supply
+      one, since the reader dispatches on the URL scheme.</p>
+    </div>
+
+    <h3 id="amsr2-and-amsr3">AMSR2 and AMSR3</h3>
+    <p>OSI-SAF replaced the AMSR2 instrument with AMSR3 inside the same
+    <code>amsr2_conc</code> tree: files are named
+    <code>ice_conc_&lt;hem&gt;_polstere-100_amsr2_&hellip;</code> through
+    2026-08-30 and <code>&hellip;_amsr3_&hellip;</code> from 2026-08-31, with no
+    overlap. The products are otherwise identical &mdash; same grid, same
+    variables, same scaling &mdash; so only the filename changes.</p>
+
+    <p>The reader selects the token by date, because reprocessing an older
+    day still needs the AMSR2 name. The cutover can be moved with
+    <code>OSISAF_AMSR3_START=YYYYMMDD</code> if the upstream naming shifts
+    again, which avoids a rebuild.</p>
+
+    <h2 id="data-sources">Data Sources</h2>
+    <h3 id="where-to-obtain-static-data">Where to Obtain Static Data</h3>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Data Type</th><th>Source</th><th>Access</th></tr></thead>
+    <tbody>
+    <tr><td>Grid masks</td><td>JPL MUR team</td><td>Internal distribution</td></tr>
+    <tr><td>OSI-SAF matrices</td><td>Pre-computed from OSI-SAF grids</td><td>Generated once</td></tr>
+    <tr><td>Seasonal climatology</td><td>Derived from MUR archive</td><td>Multi-year average</td></tr>
+    <tr><td>L4 AVHRR_OI</td><td>PO.DAAC / NOAA NCEI</td><td>Public download</td></tr>
+    <tr><td>Polar cap edge</td><td>JPL MUR team</td><td>Internal distribution</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="production-vs-testing">Production vs Testing</h3>
+    <p>In the original production environment, static data resided on shared NAS storage:</p>
+    <ul>
+    <li><code>/store/ghrsst/open/data/L4/</code> - GHRSST L4 archive</li>
+    <li><code>/home/tmchin/grids/</code> - Grid mask files</li>
+    <li><code>/home/tmchin/nas/</code> - Seasonal and other static data</li>
+    </ul>
+    <p>For containerized deployment, all static data is consolidated under <code>static-resources/</code> and mounted into containers.</p>
+    <h2 id="verification">Verification</h2>
+    <p>To verify static data is correctly installed:</p>
+    <pre><code class="language-bash"># Check grid masks
+    ls -la testing/static-resources/grids/
+    # Should show: maskGLOBp01deg.gds (~648 MB), maskGlob1km.gds (~537 MB)
+
+    # Check transformation matrices
+    ls -la testing/static-resources/mat/p01/
+    # Should show: saf2north.mat (~152 MB), saf2south.mat (~127 MB)
+
+    # Check seasonal climatology
+    ls testing/static-resources/seasonal/ | wc -l
+    # Should show: 365
+
+    # Check L4 data (if needed)
+    ls testing/static-resources/L4/GLOB/NCDC/AVHRR_OI/2025/314/
+    # Should show: *fv02*.bz2 file for your start date</code></pre>
+
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. This site is
+      the documentation &mdash; there is no separate Markdown copy to fall out of date.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

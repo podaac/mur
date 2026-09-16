@@ -1,0 +1,125 @@
+# OGC Application Package description for the MUR mrva module.
+# See maap/README.md for the generate -> validate -> deploy sequence.
+#
+# REGISTER THIS ONE LAST. It is the only module needing a large instance --
+# landice, iquam and l2p all fit on small ones -- so confirm with MAAP ops that
+# a queue exists at ram_min/cores_min below before registering. Discovering
+# otherwise after the other three are deployed is the expensive order.
+algorithm_description: >
+  MUR multi-resolution variational analysis for one day. Fuses the per-sensor
+  BIC files and iQuam in-situ observations against the seasonal climatology and
+  the land/ice mask, emitting the GHRSST L4 MUR NetCDF granule, the MUR25
+  sibling product, and the coefficient file carried into the next day.
+algorithm_name: mur-mrva
+algorithm_version: "1.0.0"
+algorithm_container_url: ghcr.io/podaac/mur/mrva-dps:1.0.0
+
+keywords: MUR, SST, GHRSST, L4, variational analysis
+code_repository: https://github.com/podaac/mur
+citation: >
+  Chin, T.M., Vazquez-Cuervo, J., Armstrong, E.M. (2017). A multi-scale
+  high-resolution analysis of global sea surface temperature. Remote Sensing
+  of Environment, 200, 154-169.
+author: JPL PO.DAAC MUR Team
+contributor: JPL PO.DAAC MUR Team
+license: https://github.com/podaac/mur/blob/main/LICENSE
+release_notes: >
+  First MAAP OGC application package for mrva. Requires the stage-out change
+  redirecting the compiled-in /data/output/{csp,netcdf} paths.
+  --l4-reference-root is deliberately omitted: it names a directory tree and
+  localize.sh has no recursive S3 fetch.
+
+run_command: /opt/mrva/bin/entrypoint.sh
+
+# 64 GiB / 16 cores. The local docker settings are 72g/32, but those are
+# ceilings rather than measurements. Note MRVA reaches L=9, which
+# mrva/docs/MEMORY_ANALYSIS_AND_MATRIX_FREE_PLAN.md puts at ~60 GB total
+# (infoMatrix alone is 53.71 GB) -- so the headroom here is real but thin.
+# If a job OOMs at the finest level, this is the first number to raise.
+ram_min: 65536
+cores_min: 16
+outdir_max: 8192   # the L4 granule alone is ~760 MB, plus MUR25 and the .c06
+
+inputs:
+  - name: year
+    label: Year
+    doc: Four-digit analysis year.
+    type: string
+  - name: doy
+    label: Day of year
+    doc: Day of year, 1-366.
+    type: string
+  - name: mode
+    label: Processing mode
+    doc: "nrt (interim) or rea (final)."
+    type: string
+  - name: polar-cap-edge-file
+    label: Polar cap edge
+    doc: s3:// href to landice/CylinderP01_edge.bip under the static-resources root.
+    type: string
+  - name: seasonal-file
+    label: Seasonal climatology
+    doc: >
+      s3:// href to seasonal/mur_<doy>.nc for THIS day only (day 366 folds onto
+      365). readSeasonal.m opens exactly one of the 365 files per run, which is
+      why this is a single file rather than a staged directory -- a Directory
+      input here would transfer the whole ~141 GB archive per job.
+    type: string
+  - name: landice-ice-p011-file
+    label: Landice ice BIP (p011)
+    doc: >
+      s3:// href to this day's Global_ice_<YYYY>_<DDD>.bip.gz, from the
+      same-run mur-landice job's output.
+    type: string
+  - name: landice-grid-p01-file
+    label: Landice grid (p01)
+    doc: s3:// href to this day's landiceP01_<YYYY>_<DDD>.gds.gz from mur-landice.
+    type: string
+  - name: landice-icefiles-p011-file
+    label: Landice icefiles listing (p011)
+    doc: >
+      s3:// href to this day's icefiles_<YYYY>_<DDD>.txt from mur-landice.
+      The file is real (written by landice/src/readosisafice.m's write_file),
+      but which output subdirectory it lands in on DPS is unconfirmed --
+      verify against one real landice job.
+    type: string
+  - name: sensor-inputs-manifest
+    label: Sensor inputs manifest
+    doc: >
+      s3:// href to the unified BIC + IQUAM0 manifest JSON. Entries carry
+      `sensor` and `relative_path` so localize_manifest reproduces the
+      <SENSOR>/<YEAR>/<file> layout mrva4com_container.m's per-sensor scan
+      expects -- a layout a staged Directory could not express.
+    type: string
+  - name: sensors
+    label: Sensor subset
+    doc: >
+      Optional comma-separated sensor list, e.g. "AMSR2R,MODISA". An empty
+      string means all configured sensors.
+    type: string?
+    default: ""
+  - name: mur25-grid-file
+    label: MUR25 grid
+    doc: >
+      Optional s3:// href to grids/MUR25grid.gds. An empty string skips MUR25
+      product generation, which the entrypoint handles explicitly.
+    type: string?
+    default: ""
+  - name: prior-csp-file
+    label: Prior-day coefficient
+    doc: >
+      Optional s3:// href to the previous day's coefficient file. An empty
+      string means bootstrap instead of chaining from the previous day.
+    type: string?
+    default: ""
+
+# --l4-reference-root is NOT an input. It names a directory tree, and
+# localize.sh's `aws s3 cp` has no --recursive, so an s3:// value would pass
+# through unfetched and mrva's verify_inputs_exist would reject it as a missing
+# directory -- passing it breaks the job rather than enabling a fallback. It is
+# bootstrap-only, so omitting it is safe. Closing this needs an `aws s3 sync`
+# branch in localize_input for prefix-shaped values.
+
+outputs:
+  - name: output
+    type: Directory

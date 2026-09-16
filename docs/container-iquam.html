@@ -1,0 +1,1425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iQUAM container — MUR SST</title>
+<meta name="description" content="Turns NOAA iQUAM in-situ buoy and ship observations into the daily binary file MRVA anchors against.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav>
+    <div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <a href="mrva-internals.html">MRVA internals</a>
+    <div class="nav-group">Operating it</div>
+    <a href="configuration.html">Configuration</a>
+    <a href="static-data.html">Static input data</a>
+    <a href="input-contract.html">Input contract</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a>
+    <div class="nav-group">Containers</div>
+    <a href="container-landice.html">Land/ice</a>
+    <a href="container-l2p.html">L2P</a>
+    <a href="container-iquam.html" aria-current="page">iQUAM</a>
+    <a href="container-mrva.html">MRVA</a>
+    <div class="nav-group">Reference</div>
+    <a href="landice-encoding.html">Land/ice encoding</a>
+    <a href="future.html">Future enhancements</a>
+    <div class="nav-group">Project</div>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>iQUAM container</h1>
+    <p class="lede">Turns NOAA iQUAM in-situ buoy and ship observations into the daily binary file MRVA anchors against.</p>
+    <nav class="toc" aria-label="On this page">
+    <b>On this page</b>
+    <ul>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#data-source">Data Source</a></li>
+      <li><a href="#platform-types">Platform Types</a></li>
+      <li><a href="#code-structure">Code Structure</a></li>
+      <li><a href="#processing-pipeline">Processing Pipeline</a></li>
+      <li><a href="#quality-control-strategy">Quality Control Strategy</a></li>
+      <li><a href="#data-flow-and-transformations">Data Flow and Transformations</a></li>
+      <li><a href="#integration-with-mur-analysis">Integration with MUR Analysis</a></li>
+      <li><a href="#configuration-and-tuning">Configuration and Tuning</a></li>
+      <li><a href="#data-quality-and-validation">Data Quality and Validation</a></li>
+      <li><a href="#operational-considerations">Operational Considerations</a></li>
+      <li><a href="#future-improvements-and-considerations">Future Improvements and Considerations</a></li>
+      <li><a href="#references-and-documentation">References and Documentation</a></li>
+      <li><a href="#container-setup">Container setup</a></li>
+    </ul>
+    </nav>
+    <h2 id="overview">Overview</h2>
+    <p>The IQUAM (in-situ SST Quality Monitor) module processes in-situ sea surface temperature observations from buoys, ships, and floats for assimilation into the Multi-scale Ultra-high Resolution (MUR) SST analysis system.</p>
+    <p><strong>Containerized Deployment:</strong> This application is containerized using Docker with a multi-stage build process. See <a href="container-iquam.html#container-setup">Container setup</a> for deployment instructions, volume mount specifications, and operational guidance.</p>
+    <h3 id="what-this-module-produces">What This Module Produces</h3>
+    <p><strong>Primary Output:</strong> Daily binary files (<code>.bii</code> format) containing quality-controlled SST observations</p>
+    <p><strong>Processing Steps:</strong></p>
+    <ol>
+    <li><strong>Download</strong> monthly IQUAM NetCDF files from NOAA (~200-500 MB/month) to an ephemeral working directory — there is no persistent cache; each run downloads fresh (see <code>makedailyiquam.m</code>'s own note on this)</li>
+    <li><strong>Filter</strong> observations by quality level (keep only <code>quality_level ≥ 5</code> - highest quality)</li>
+    <li><strong>Convert</strong> units (Kelvin → Celsius) and time format (hour + minute → decimal hours)</li>
+    <li><strong>Extract</strong> daily subsets from monthly files</li>
+    <li><strong>Reformat</strong> to compact binary format (int16, scaled ×100 for 0.01° precision)</li>
+    </ol>
+    <p><strong>Output Characteristics:</strong></p>
+    <ul>
+    <li><strong>Format:</strong> Fortran-compatible binary (<code>.bii</code>)</li>
+    <li><strong>Size:</strong> ~1-10 MB per day (varies by observation density)</li>
+    <li><strong>Content:</strong> SST, lat/lon, time, platform type for ~400k-800k observations/day (post-QC)</li>
+    <li><strong>Precision:</strong> 0.01°C temperature, 0.01° coordinates, 0.01 hour time</li>
+    <li><strong>Coverage:</strong> Global ocean, all platform types</li>
+    </ul>
+    <p><strong>Purpose:</strong> These binary files provide the "ground truth" in-situ measurements that:</p>
+    <ul>
+    <li>Anchor satellite-derived SST to physical observations</li>
+    <li>Fill gaps in regions with poor satellite coverage</li>
+    <li>Enable bias detection and correction for satellite sensors</li>
+    <li>Constrain the variational analysis solution</li>
+    </ul>
+    <p>In-situ observations provide critical validation and constraints for satellite-derived SST products. These observations serve as "ground truth" measurements that:</p>
+    <ul>
+    <li>Anchor the analysis to physical observations with known accuracy</li>
+    <li>Provide coverage in regions with poor satellite visibility (high cloud cover, high latitudes)</li>
+    <li>Help detect and correct systematic biases in satellite sensors</li>
+    <li>Contribute to uncertainty quantification and quality assurance</li>
+    </ul>
+    <h2 id="data-source">Data Source</h2>
+    <p><strong>Primary Provider:</strong> NOAA Center for Satellite Applications and Research (STAR) <strong>Product:</strong> iQUAM (in-situ SST Quality Monitor) Version 2.10 <strong>Data Portal:</strong> <a href="https://www.star.nesdis.noaa.gov/pub/socd/sst/iquam/v2.10/">https://www.star.nesdis.noaa.gov/pub/socd/sst/iquam/v2.10/</a> <strong>Format:</strong> NetCDF (GHRSST Level 2i specification) <strong>Temporal Coverage:</strong> Near real-time + historical archive <strong>Update Frequency:</strong> Monthly files updated daily</p>
+    <h3 id="what-is-iquam">What is iQUAM?</h3>
+    <p>The iQUAM system is NOAA's operational quality monitoring system for in-situ SST measurements. It:</p>
+    <ul>
+    <li>Aggregates observations from multiple global networks (buoys, ships, floats)</li>
+    <li>Applies comprehensive quality control checks (duplicate detection, track validation, spike detection, buddy checks)</li>
+    <li>Flags erroneous, noisy, or suspect observations</li>
+    <li>Provides quality metadata to enable user-defined filtering</li>
+    <li>Maintains consistency across heterogeneous observation platforms</li>
+    </ul>
+    <h2 id="platform-types">Platform Types</h2>
+    <p>The iQUAM dataset includes observations from multiple platform types, each with different characteristics and error properties:</p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Type</th><th>Platform</th><th>Example Count*</th><th>Accuracy</th><th>Spatial Coverage</th></tr></thead>
+    <tbody>
+    <tr><td>1</td><td>Ship</td><td>105,781</td><td>±0.5-2.0°C</td><td>Major shipping routes</td></tr>
+    <tr><td>2</td><td>Drifting Buoy</td><td>399,463</td><td>±0.2°C</td><td>Global ocean</td></tr>
+    <tr><td>3</td><td>Tropical Moored Buoy</td><td>10,261</td><td>±0.1°C</td><td>Equatorial Pacific/Atlantic</td></tr>
+    <tr><td>4</td><td>Coastal Moored Buoy</td><td>325,173</td><td>±0.2°C</td><td>Coastal regions</td></tr>
+    <tr><td>5</td><td>Argo Float</td><td>4,406</td><td>±0.002°C</td><td>Global deep ocean</td></tr>
+    <tr><td>6</td><td>High-Res Drifter</td><td>31,157</td><td>±0.1°C</td><td>Various regions</td></tr>
+    <tr><td>7</td><td>IMOS (Australia)</td><td>37,442</td><td>±0.1°C</td><td>Australian waters</td></tr>
+    <tr><td>8</td><td>CRW Buoy</td><td>9,047</td><td>±0.1°C</td><td>Coral reef monitoring</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>\*Note:</strong> Example counts are from a single day (October 12, 2020 - day 286) documented in platforms.txt. Actual daily counts vary significantly by season, year, network operations, and data transmission success. Current observation counts may differ from these 2020 values.</p>
+    <h2 id="code-structure">Code Structure</h2>
+    <h3 id="active-processing-pipeline-3-files">Active Processing Pipeline (3 files)</h3>
+    <ol>
+    <li><strong>buoyDataProcessing.m</strong> - Per-day processor, compiled entry point
+    <ul>
+    <li>Takes one explicit analysis day (<code>year</code>/<code>doy</code>), <code>mode</code> (<code>nrt</code>/<code>rea</code>), and <code>referenceToday</code> from the caller — it does not compute "today" or a processing window itself; the calling orchestrator (<code>run_mur_pipeline.py</code>/<code>run_mur_maap.py</code>) already owns that loop and passes each day explicitly</li>
+    <li>All parameters are individual positional arguments (not a struct)</li>
+    <li>Contains stubs for future REA temporal aggregation</li>
+    </ul>
+    </li>
+    <li><strong>makedailyiquam.m</strong> - Daily processor
+    <ul>
+    <li>Downloads and processes monthly NetCDF files</li>
+    <li>Extracts daily observations</li>
+    <li>Calls writeiquambii() for output</li>
+    </ul>
+    </li>
+    <li><strong>writeiquambii.m</strong> - Binary file writer
+    <ul>
+    <li>Writes .bii format files</li>
+    <li>Accepts configurable output directory</li>
+    </ul>
+    </li>
+    </ol>
+    <h3 id="utility-functions-available-but-not-called-in-pipeline">Utility Functions (available but not called in pipeline)</h3>
+    <ol>
+    <li><strong>readiquambii.m</strong> - Read .bii files for inspection/validation</li>
+    <li><strong>refbii2biq.m</strong> - REA temporal aggregation (needs refactoring, not yet integrated)</li>
+    </ol>
+    <h3 id="archived-files">Archived Files</h3>
+    <p>Legacy and obsolete files have been moved to the <code>archive/</code> directory, which carries its own notes on what each one was for.</p>
+    <h3 id="deployment">Deployment</h3>
+    <p>This application is deployed as a containerized service. See <a href="container-iquam.html#container-setup">Container setup</a> for complete deployment instructions.</p>
+    <h2 id="processing-pipeline">Processing Pipeline</h2>
+    <h3 id="architecture">Architecture</h3>
+    <p>The IQUAM processing module operates as a three-stage pipeline:</p>
+    <figure class="diagram">
+    <pre class="mermaid">
+    flowchart TD
+        Start([Start Processing]) --&gt; Stage1
+
+        subgraph Stage1[&quot;STAGE 1: PER-DAY PROCESSING (buoyDataProcessing)&quot;]
+            direction LR
+            S1A[Receive explicit year/doy/mode/&lt;br/&gt;referenceToday from caller]
+            S1B[Determine +/-buoyDayRange&lt;br/&gt;rewrite/stability per offset day]
+            S1C[Coordinate temporary&lt;br/&gt;working directory]
+
+            S1A --&gt; S1B --&gt; S1C
+        end
+
+        subgraph Stage2[&quot;STAGE 2: ACQUISITION &amp; QC (makedailyiquam)&quot;]
+            direction LR
+            S2A[Download monthly&lt;br/&gt;iQUAM NetCDF files]
+            S2B[Read and parse&lt;br/&gt;observation data]
+            S2C[Apply quality control&lt;br/&gt;filters qual &gt;= 5]
+            S2D[Convert units&lt;br/&gt;Kelvin → Celsius]
+            S2E[Extract daily subsets&lt;br/&gt;from monthly files]
+
+            S2A --&gt; S2B --&gt; S2C --&gt; S2D --&gt; S2E
+        end
+
+        subgraph Stage3[&quot;STAGE 3: FORMAT CONVERSION (writeiquambii)&quot;]
+            direction LR
+            S3A[Scale values to&lt;br/&gt;integer representation]
+            S3B[Write Fortran-compatible&lt;br/&gt;binary format .bii]
+            S3C[&quot;[REA STUB]&lt;br/&gt;Aggregate temporal windows&lt;br/&gt;for analysis ±3 days&quot;]
+            S3D[&quot;[REA STUB]&lt;br/&gt;Apply platform-specific&lt;br/&gt;error weighting&quot;]
+            S3E[&quot;[REA STUB]&lt;br/&gt;Generate analysis-ready&lt;br/&gt;observation files .biq&quot;]
+
+            S3A --&gt; S3B
+            S3B -.-&gt; S3C -.-&gt; S3D -.-&gt; S3E
+        end
+
+        Stage1 --&gt; Stage2 --&gt; Stage2 --&gt; |Calls writeiquambii| Stage3
+        Stage3 --&gt; Output[(Current Output:&lt;br/&gt;Global_IQUAM0_YYYY_DDD.bii)]
+        Stage3 -.-&gt; |Future REA| Output2[(&quot;Future REA Output:&lt;br/&gt;Global_IQUAM0_YYYY_DDD.biq&quot;)]
+
+        style Stage1 fill:#e1f5ff
+        style Stage2 fill:#fff4e1
+        style Stage3 fill:#e8f5e9
+        style Output fill:#c8e6c9
+        style Output2 fill:#f3e5f5,stroke-dasharray: 5 5
+    </pre>
+    </figure>
+    <p><strong>Note:</strong> Dashed lines indicate REA mode functionality (Stage 3C-E) which is <strong>stubbed but not yet implemented</strong>. Currently, only NRT mode (.bii file generation) is operational.</p>
+    <h3 id="processing-modes">Processing Modes</h3>
+    <p>The system operates in two distinct modes based on data maturity:</p>
+    <h4 id="near-real-time-nrt-mode-currently-implemented">Near Real-Time (NRT) Mode <strong>[CURRENTLY IMPLEMENTED]</strong></h4>
+    <ul>
+    <li><strong>Latency:</strong> 1 day behind current date</li>
+    <li><strong>Purpose:</strong> Provide rapid SST analysis for operational users</li>
+    <li><strong>Characteristics:</strong>
+    <ul>
+    <li>Uses most recent available data (may be incomplete)</li>
+    <li>No reprocessing of previous days (<code>mode='nrt'</code>, i.e. <code>realtime</code> true)</li>
+    <li>Faster execution (avoids re-downloads)</li>
+    <li>Outputs: Individual daily .bii files</li>
+    <li>May include provisional/uncorrected observations</li>
+    </ul>
+    </li>
+    </ul>
+    <h4 id="reanalysis-rea-mode-stubbed-not-yet-implemented">Reanalysis (REA) Mode <strong>[STUBBED - NOT YET IMPLEMENTED]</strong></h4>
+    <ul>
+    <li><strong>Latency:</strong> 4 days behind current date</li>
+    <li><strong>Purpose:</strong> Generate high-quality, stable SST records with temporal aggregation</li>
+    <li><strong>Characteristics:</strong>
+    <ul>
+    <li>Waits for data consolidation and delayed transmission</li>
+    <li>Applies 2-day stability window before reprocessing</li>
+    <li>Allows corrections from data providers to propagate</li>
+    <li><strong>[Future]</strong> Aggregates ±3 day temporal windows (refbii2biq.m)</li>
+    <li><strong>[Future]</strong> Applies platform-specific error weighting</li>
+    <li><strong>[Future]</strong> Outputs: Aggregated .biq files for analysis</li>
+    <li>Higher data completeness and quality</li>
+    </ul>
+    </li>
+    </ul>
+    <p><strong>Who decides the window and mode:</strong> the 1-day NRT latency, 4-day REA latency, and 9-day scan window above are the calling orchestrator's decisions (<code>run_mur_pipeline.py</code>/<code>run_mur_maap.py</code>), not <code>buoyDataProcessing.m</code>'s. The orchestrator iterates that 9-day window itself and invokes the container once per day, passing that day's <code>year</code>/<code>doy</code>/<code>mode</code>/<code>referenceToday</code> explicitly — <code>buoyDataProcessing.m</code> only ever processes the one day it's told about (plus its own <code>±buoyDayRange</code> sub-window around that day). REA temporal aggregation functionality is designed but not yet active (see buoyDataProcessing.m:223-247 for stub).</p>
+    <h2 id="quality-control-strategy">Quality Control Strategy</h2>
+    <h3 id="multi-layer-quality-assessment">Multi-Layer Quality Assessment</h3>
+    <p>The iQUAM data undergoes quality control at multiple stages:</p>
+    <h4 id="1-source-level-qc-noaa-star">1. Source-Level QC (NOAA STAR)</h4>
+    <p>Before data reaches this module, NOAA applies:</p>
+    <ul>
+    <li><strong>Duplicate Detection:</strong> Identifies identical observations from multiple reporting paths</li>
+    <li><strong>Track Check:</strong> Validates platform position consistency over time</li>
+    <li><strong>Geolocation Check:</strong> Ensures coordinates are physically plausible</li>
+    <li><strong>SST Spike Check:</strong> Detects unrealistic temperature jumps</li>
+    <li><strong>Buddy Check:</strong> Compares observation against 6+ nearby measurements</li>
+    <li><strong>Gross Error Probability:</strong> Statistical outlier detection</li>
+    </ul>
+    <h4 id="2-module-level-filtering-this-code">2. Module-Level Filtering (This Code)</h4>
+    <p>Current implementation applies:</p>
+    <pre><code>Primary Filter: quality_level &gt;= 5</code></pre>
+    <p>This removes:</p>
+    <ul>
+    <li>Erroneous observations (quality_level = 1)</li>
+    <li>Noisy observations (quality_level = 2)</li>
+    <li>Observations without QC metadata (quality_level = 3)</li>
+    <li>Low-confidence observations (quality_level = 4)</li>
+    </ul>
+    <h4 id="3-analysis-level-weighting-downstream">3. Analysis-Level Weighting (Downstream)</h4>
+    <p>During variational analysis, observations receive platform-specific error weights:</p>
+    <ul>
+    <li>Ships: σ = 2.0°C (higher uncertainty due to measurement methodology)</li>
+    <li>Buoys: σ = 0.5°C (typical for well-calibrated platforms)</li>
+    <li>Floats: σ = 0.2°C (high-precision instruments)</li>
+    </ul>
+    <p>These weights influence each observation's contribution to the final SST field.</p>
+    <h3 id="quality-flag-encoding">Quality Flag Encoding</h3>
+    <p>The 16-bit quality flag provides detailed diagnostic information:</p>
+    <p><strong>Bits 0-1: Overall Quality</strong></p>
+    <ul>
+    <li><code>00</code> (0) = Normal</li>
+    <li><code>01</code> (1) = Erroneous</li>
+    <li><code>10</code> (2) = Noisy</li>
+    <li><code>11</code> (3) = QC Unavailable</li>
+    </ul>
+    <p><strong>Bits 2-3: Duplicate Status</strong></p>
+    <ul>
+    <li><code>00</code> = No duplicate found</li>
+    <li><code>01</code> = Duplicate kept (this record)</li>
+    <li><code>10</code> = Duplicate removed</li>
+    </ul>
+    <p><strong>Bit 4: Track/Geolocation Check</strong></p>
+    <ul>
+    <li><code>0</code> = Passed (position consistent with platform track)</li>
+    <li><code>1</code> = Failed (suspicious position)</li>
+    </ul>
+    <p><strong>Bit 5: SST Spike Check</strong></p>
+    <ul>
+    <li><code>0</code> = Passed (temperature change within expected range)</li>
+    <li><code>1</code> = Failed (unrealistic temperature jump)</li>
+    </ul>
+    <p><strong>Bit 6: Platform ID Validity</strong></p>
+    <ul>
+    <li><code>0</code> = Valid platform identifier</li>
+    <li><code>1</code> = Invalid or unknown identifier</li>
+    </ul>
+    <p><strong>Bit 7: Buddy Check Density</strong></p>
+    <ul>
+    <li><code>0</code> = 6 or more nearby observations available for validation</li>
+    <li><code>1</code> = Fewer than 6 buddies (less confident validation)</li>
+    </ul>
+    <p><strong>Bits 8-15: Probability of Gross Error</strong></p>
+    <ul>
+    <li>Value = 0-255 (scaled from 0.0 to 1.0)</li>
+    <li>Higher values indicate greater likelihood of measurement error</li>
+    </ul>
+    <p><strong>Important:</strong> Quality control is only applied to SST measurements. Other variables (wind speed, air temperature, pressure) pass through unfiltered and should be used with caution.</p>
+    <h2 id="data-flow-and-transformations">Data Flow and Transformations</h2>
+    <h3 id="input-monthly-netcdf-files">Input: Monthly NetCDF Files</h3>
+    <pre><code>Source File: YYYYMM-STAR-L2i_GHRSST-SST-iQuam-GLOBALOCEAN-v02.0-fv01.0.nc
+    Size: ~500 MB (monthly, global)
+    Variables:
+      - time: observation timestamp (seconds since reference)
+      - lat: latitude (-90 to 90°)
+      - lon: longitude (-180 to 180°)
+      - sea_surface_temperature: SST in Kelvin
+      - quality_level: composite quality flag (1-5)
+      - platform_type: observation platform (1-8)
+      - [additional variables not currently used]</code></pre>
+    <h3 id="transformation-steps">Transformation Steps</h3>
+    <h4 id="1-monthly-to-daily-extraction">1. Monthly to Daily Extraction</h4>
+    <ul>
+    <li><strong>Why:</strong> MUR analysis runs on a daily cycle</li>
+    <li><strong>How:</strong> Filter by calendar day from monthly file</li>
+    <li><strong>Temporal Window:</strong> Extract ±3 days from analysis day (captures temporal continuity)</li>
+    </ul>
+    <h4 id="2-unit-conversion">2. Unit Conversion</h4>
+    <ul>
+    <li><strong>Temperature:</strong> Kelvin → Celsius (subtract 273.15)</li>
+    <li><strong>Rationale:</strong> Analysis algorithms work in Celsius; ice point = 0°C</li>
+    <li><strong>Validation:</strong> Check SST &gt; -2°C (below freezing point) and &lt; 40°C (maximum realistic value)</li>
+    </ul>
+    <h4 id="3-time-normalization">3. Time Normalization</h4>
+    <ul>
+    <li><strong>Original:</strong> Separate hour, minute fields</li>
+    <li><strong>Converted:</strong> Decimal hours (hour + minute/60)</li>
+    <li><strong>Purpose:</strong> Simplifies temporal weighting in analysis (distance from 09:00 UTC analysis time)</li>
+    </ul>
+    <h4 id="4-spatial-coordinate-handling">4. Spatial Coordinate Handling</h4>
+    <ul>
+    <li><strong>Longitude Convention:</strong> -180° to +180° (consistent with MUR grid)</li>
+    <li><strong>Scaling:</strong> All coordinates scaled by 100 and stored as int16 (precision: 0.01°)</li>
+    <li><strong>Reason:</strong> Reduces file size by 75% while maintaining adequate precision</li>
+    </ul>
+    <h3 id="output-daily-binary-files">Output: Daily Binary Files</h3>
+    <pre><code>Output File: /nas2/iquam/YYYY/Global_IQUAM0_YYYY_DDD.bii
+    Size: ~1-10 MB (daily, global)
+    Format: Fortran unformatted binary (int16 precision)
+    Structure:
+      Header:
+        - N: number of observations (int32)
+        - year: year (int16)
+        - day: day of year (int16)
+      Data Arrays (N elements each):
+        - sst: temperature in Celsius × 100 (int16)
+        - lon: longitude × 100 (int16)
+        - lat: latitude × 100 (int16)
+        - hour: decimal hours × 100 (int16)
+        - platform_type: platform code (int8)</code></pre>
+    <p><strong>File Naming Convention:</strong></p>
+    <ul>
+    <li><code>Global</code>: spatial domain (entire Earth)</li>
+    <li><code>IQUAM0</code>: dataset identifier (in-situ observations, version 0)</li>
+    <li><code>YYYY</code>: four-digit year</li>
+    <li><code>DDD</code>: three-digit day of year (001-366)</li>
+    <li><code>.bii</code>: Binary IQUAM Instrument format</li>
+    </ul>
+    <h3 id="aggregation-for-analysis-future-rea-mode">Aggregation for Analysis <strong>[FUTURE REA MODE]</strong></h3>
+    <p><strong>Current Implementation:</strong> Daily .bii files are processed independently with no temporal aggregation.</p>
+    <p><strong>Planned Implementation:</strong> For each analysis day, observations from a <strong>7-day window</strong> (±3 days) would be aggregated:</p>
+    <p><strong>Why a temporal window?</strong></p>
+    <ol>
+    <li><strong>Temporal Persistence:</strong> SST changes slowly (typical: 0.1-0.5°C/day)</li>
+    <li><strong>Spatial Coverage:</strong> Many ocean regions have sparse daily observations</li>
+    <li><strong>Synoptic Analysis:</strong> Capture mesoscale features that evolve over days</li>
+    <li><strong>Error Reduction:</strong> More observations → better constrained solution</li>
+    </ol>
+    <p><strong>Temporal Weighting (when implemented):</strong> Observations farther from analysis time would receive lower weight based on:</p>
+    <ul>
+    <li>Time difference (decay function)</li>
+    <li>Expected SST persistence (varies by location, season)</li>
+    <li>Platform measurement uncertainty</li>
+    </ul>
+    <p><strong>Implementation Status:</strong> The aggregation functionality (refbii2biq.m) exists but needs refactoring to accept configurable paths. See stub at buoyDataProcessing.m:238-263.</p>
+    <h2 id="integration-with-mur-analysis">Integration with MUR Analysis</h2>
+    <h3 id="role-in-multi-scale-variational-analysis-mrva">Role in Multi-Scale Variational Analysis (MRVA)</h3>
+    <p>In-situ observations serve multiple purposes in the MUR system:</p>
+    <h4 id="1-reference-field-generation">1. Reference Field Generation</h4>
+    <ul>
+    <li><strong>Purpose:</strong> Create initial SST estimate before satellite assimilation</li>
+    <li><strong>Why In-Situ First:</strong> Independent of satellite biases; direct measurement</li>
+    <li><strong>Method:</strong> Spatial interpolation of buoy network using coarse-resolution analysis (L=2-7, ~4-250 km)</li>
+    <li><strong>Coverage:</strong> Sparse but globally distributed; strong constraints near coast/islands</li>
+    </ul>
+    <h4 id="2-bias-detection-and-correction">2. Bias Detection and Correction</h4>
+    <ul>
+    <li><strong>Comparison:</strong> Satellite observations vs. collocated in-situ measurements</li>
+    <li><strong>Detection:</strong> Systematic differences indicate sensor calibration drift</li>
+    <li><strong>Application:</strong> Compute and apply bias corrections to satellite data</li>
+    <li><strong>Sensors:</strong> Primarily applied to infrared sensors (MODIS, AVHRR) which are more prone to atmospheric contamination</li>
+    </ul>
+    <h4 id="3-data-assimilation">3. Data Assimilation</h4>
+    <ul>
+    <li><strong>Framework:</strong> Observations used as constraints in variational analysis cost function</li>
+    <li><strong>Weight:</strong> Based on platform-specific error characteristics</li>
+    <li><strong>Contribution:</strong> Greatest impact in data-sparse regions and near coasts</li>
+    </ul>
+    <h4 id="4-validation-and-quality-assurance">4. Validation and Quality Assurance</h4>
+    <ul>
+    <li><strong>Independent Check:</strong> Compare final MUR SST against withheld in-situ observations</li>
+    <li><strong>Metrics:</strong> RMS error, bias, correlation</li>
+    <li><strong>Monitoring:</strong> Track analysis performance over time</li>
+    </ul>
+    <h3 id="temporal-integration">Temporal Integration</h3>
+    <p>The MRVA algorithm uses a <strong>temporal decay function</strong> to weight observations:</p>
+    <pre><code>Weight(t) = W₀ × exp(-Δt² / τ²)
+
+    Where:
+      W₀ = base weight (from platform error estimate)
+      Δt = time difference from analysis hour (09:00 UTC)
+      τ = decay time constant (varies by scale: 12-48 hours)</code></pre>
+    <p><strong>Scale-Dependent Decay:</strong></p>
+    <ul>
+    <li>Coarse scales (L=2-4, ~4-16 km): τ = 48 hours (slow SST evolution)</li>
+    <li>Medium scales (L=5-8, ~32-256 km): τ = 36-24 hours</li>
+    <li>Fine scales (L=9-11, ~512-2048 km): τ = 12-18 hours (fast evolution)</li>
+    </ul>
+    <p>This approach allows the system to:</p>
+    <ul>
+    <li>Use older observations for large-scale features (stable over days)</li>
+    <li>Rely on recent observations for small-scale features (evolve rapidly)</li>
+    <li>Gracefully handle gaps in satellite coverage</li>
+    </ul>
+    <h2 id="configuration-and-tuning">Configuration and Tuning</h2>
+    <h3 id="key-parameters">Key Parameters</h3>
+    <h4 id="date-range-control-buoydataprocessingmbuoydataprocessingm">Date Range Control (buoyDataProcessing.m)</h4>
+    <p>The function uses MATLAB's modern <code>arguments</code> block for parameter validation. <code>year</code>, <code>doy</code>, <code>mode</code>, and <code>referenceToday</code> are <strong>required</strong> (no default) — everything else has a default. Parameters are passed as individual positional arguments (not as a struct), and there is no <code>cacheDir</code> parameter — this module has never had a persistent cache directory.</p>
+    <p><strong>Parameter List (in order):</strong></p>
+    <pre><code class="language-matlab">buoyDataProcessing(year, doy, mode, referenceToday, ...
+                       workDir, logDir, outputDir, ...
+                       buoyDayRange, buoyStabilityLatency, ...
+                       sourceUrl, enableREA, testing, ...
+                       reaAggregationWindow, reaOutputDir)</code></pre>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+    <tr><td><code>year</code></td><td><em>(required)</em></td><td>Year of the one analysis day to process</td></tr>
+    <tr><td><code>doy</code></td><td><em>(required)</em></td><td>Day-of-year of the one analysis day to process</td></tr>
+    <tr><td><code>mode</code></td><td><em>(required)</em></td><td><code>'nrt'</code> or <code>'rea'</code> — decided by the caller, not computed internally</td></tr>
+    <tr><td><code>referenceToday</code></td><td><em>(required)</em></td><td><code>'YYYY-MM-DD'</code> — what the caller considers "today," used for the <code>±buoyDayRange</code> stability/rewrite decision and the skip-future-dates check</td></tr>
+    <tr><td><code>workDir</code></td><td><code>'./tmp/makebic'</code></td><td>Temporary working directory</td></tr>
+    <tr><td><code>logDir</code></td><td><code>'./logs'</code></td><td>Directory for log files</td></tr>
+    <tr><td><code>outputDir</code></td><td><code>'./output/iquam'</code></td><td>Root directory for output .bii files</td></tr>
+    <tr><td><code>buoyDayRange</code></td><td><code>'3'</code></td><td>Temporal window around the analysis day to (re)process (±days)</td></tr>
+    <tr><td><code>buoyStabilityLatency</code></td><td><code>'2'</code></td><td>Days old before a file is considered stable (no reprocessing)</td></tr>
+    <tr><td><code>sourceUrl</code></td><td><code>'https://www.star.nesdis.noaa.gov/pub/socd/sst/iquam/v2.10/'</code></td><td>URL for IQUAM NetCDF downloads</td></tr>
+    <tr><td><code>enableREA</code></td><td><code>'false'</code></td><td>Enable REA mode (string: 'true' or 'false')</td></tr>
+    <tr><td><code>testing</code></td><td><code>'0'</code></td><td>Testing mode flag (string: '0' or '1')</td></tr>
+    <tr><td><code>reaAggregationWindow</code></td><td><code>'3'</code></td><td>REA temporal aggregation window (±days)</td></tr>
+    <tr><td><code>reaOutputDir</code></td><td><code>'./output/iquam_rea'</code></td><td>Output directory for .biq files (REA mode)</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Note:</strong> When calling from command-line or Docker, all parameters must be passed as strings. The function automatically converts numeric parameters from strings.</p>
+    <p><strong>What this function does <em>not</em> do:</strong> compute "today," decide NRT vs. REA, or loop over a multi-day processing window — all of that is the calling orchestrator's job (<code>run_mur_pipeline.py</code>/<code>run_mur_maap.py</code>), which already iterates the full window and calls this function once per day. This function's only date-related work is the <code>±buoyDayRange</code> sub-window around the one day it's given.</p>
+    <p><strong>Tuning Guidance:</strong></p>
+    <ul>
+    <li>Adjust <code>buoyDayRange</code> based on data density and SST variability</li>
+    <li>Set <code>buoyStabilityLatency</code> to balance data quality vs. reprocessing frequency</li>
+    <li>Set <code>enableREA = 'true'</code> when REA aggregation is implemented</li>
+    </ul>
+    <p><strong>Usage Examples:</strong></p>
+    <pre><code class="language-matlab">% Process day 220 of 2026, NRT mode, using 2026-08-09 as "today"
+    buoyDataProcessing('2026', '220', 'nrt', '2026-08-09')
+
+    % Override the working/log/output directories too (still positional —
+    % mode/referenceToday can't be skipped since they precede these)
+    buoyDataProcessing('2026', '220', 'nrt', '2026-08-09', ...
+                       './tmp/work', './logs', '/data/output/iquam')
+
+    % From the compiled executable (command-line) — the container's
+    % entrypoint.sh translates named flags into exactly this positional order
+    % ./IquamProcessor 2026 220 nrt 2026-08-09 ./tmp/work ./logs /data/output/iquam 3 2</code></pre>
+    <p><strong>Docker Usage:</strong></p>
+    <p>The container entrypoint (<code>iquam/bin/entrypoint.sh</code>) is named-args-only — every input is an explicit flag, and there is no positional or zero-argument form:</p>
+    <pre><code class="language-bash">docker run --rm \
+      -v /host/output:/data/output/iquam \
+      -v /host/logs:/data/logs \
+      mur-iquam:latest \
+      --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+      --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+      --buoy-day-range 3 --stability-latency 2</code></pre>
+    <p><code>--source-url</code> is not exposed as a flag — it stays at <code>buoyDataProcessing.m</code>'s own default unless you're modifying the source.</p>
+    <p><strong>Important Notes:</strong></p>
+    <ul>
+    <li>All nine flags above are required — there is no "use all defaults" invocation for the container, unlike calling the MATLAB function directly</li>
+    <li><code>run_mur_pipeline.py</code>'s <code>run_iquam()</code> and <code>run_mur_maap.py</code>'s <code>run_day()</code> already construct these values for you (<code>year</code>/<code>doy</code> from the day being processed, <code>mode</code> from NRT/REA window logic, <code>reference_date</code> from <code>get_reference_today()</code>, <code>buoy_day_range</code>/<code>stability_latency</code> from <code>config.json</code>'s <code>iquam.buoy_dayrange</code>/<code>iquam.stable_latency</code>) — you only need to build the command by hand for manual testing</li>
+    </ul>
+    <h4 id="quality-thresholds-makedailyiquamm75makedailyiquamml75">Quality Thresholds (makedailyiquam.m:75)</h4>
+    <pre><code class="language-matlab">qual &gt;= 5    % Current: accept only highest quality</code></pre>
+    <p><strong>Alternative Filters:</strong></p>
+    <pre><code class="language-matlab">% Option 1: Accept Normal + Noisy (more observations, possibly noisier)
+    qual &gt;= 3
+
+    % Option 2: iQUAM recommended filter (Normal quality only)
+    mod(qual, 4) == 0
+
+    % Option 3: Combine overall quality + buddy check
+    (mod(qual, 4) == 0) &amp; (bitand(qual, 128) == 0)</code></pre>
+    <h4 id="platform-error-estimates-refbii2biqmrefbii2biqm">Platform Error Estimates (refbii2biq.m)</h4>
+    <pre><code class="language-matlab">Platform Type    Default RMS    Recommended Range
+    ---------------------------------------------------
+    Ships            2.0°C          1.5 - 3.0°C
+    Buoys/Floats     0.5°C          0.3 - 0.7°C
+    High-Precision   0.2°C          0.1 - 0.4°C</code></pre>
+    <p><strong>Tuning Guidance:</strong></p>
+    <ul>
+    <li>Decrease error for well-maintained networks (gives them more weight)</li>
+    <li>Increase error for suspect platforms or high-variability regions</li>
+    <li>Validate against independent SST analysis or satellite matchups</li>
+    </ul>
+    <h3 id="output-directories">Output Directories</h3>
+    <p><strong>Default Configuration (container-friendly relative paths):</strong></p>
+    <pre><code>./output/iquam/
+    └── YYYY/
+        ├── Global_IQUAM0_YYYY_001.bii    # Daily binary files
+        ├── Global_IQUAM0_YYYY_002.bii
+        ├── ...
+        └── Global_IQUAM0_YYYY_366.bii
+
+    ./tmp/makebic/
+    └── [temporary working files, auto-cleaned at startup — no persistent cache]
+
+    ./logs/
+    └── buoy.log                           # Processing log (appended)</code></pre>
+    <p>There is no cache directory — <code>workDir</code>, <code>outputDir</code>, and <code>logDir</code> are the only directory parameters <code>buoyDataProcessing.m</code> takes.</p>
+    <p><strong>Deployment:</strong> The application runs in a containerized environment. See <a href="container-iquam.html#container-setup">Container setup</a> for volume mount specifications and configuration options.</p>
+    <h2 id="data-quality-and-validation">Data Quality and Validation</h2>
+    <h3 id="expected-data-characteristics">Expected Data Characteristics</h3>
+    <p><strong>Typical Daily Counts:</strong></p>
+    <ul>
+    <li>Total observations: 500,000 - 900,000 globally</li>
+    <li>After QC filtering: 400,000 - 800,000 (70-90% pass rate)</li>
+    <li>Spatial distribution: Heavily weighted to Northern Hemisphere, shipping routes, coastal regions</li>
+    </ul>
+    <p><strong>Temporal Variability:</strong></p>
+    <ul>
+    <li>Higher counts in Northern Hemisphere summer (better transmission conditions)</li>
+    <li>Lower counts during major storms (buoy damage/loss)</li>
+    <li>Gradual trends due to network expansion/contraction</li>
+    </ul>
+    <p><strong>Known Gaps:</strong></p>
+    <ul>
+    <li>Southern Ocean (sparse coverage)</li>
+    <li>Remote tropical regions (few platforms)</li>
+    <li>Polar regions (ice coverage, no platforms)</li>
+    </ul>
+    <h3 id="quality-assurance-checks">Quality Assurance Checks</h3>
+    <h4 id="1-count-monitoring">1. Count Monitoring</h4>
+    <pre><code class="language-matlab">% Check daily observation count
+    if N &lt; 200000
+        warning('Low observation count - possible data availability issue')
+    end</code></pre>
+    <h4 id="2-spatial-coverage">2. Spatial Coverage</h4>
+    <pre><code class="language-matlab">% Check for data in major ocean basins
+    basins = {'North Atlantic', 'North Pacific', 'Tropical Pacific', ...};
+    for basin in basins
+        if count(basin) &lt; threshold
+            warning(['Sparse coverage in ' basin])
+        end
+    end</code></pre>
+    <h4 id="3-temperature-range-validation">3. Temperature Range Validation</h4>
+    <pre><code class="language-matlab">% Physical validity checks
+    assert(all(sst &gt;= -2.0), 'SST below freezing point')
+    assert(all(sst &lt;= 40.0), 'SST exceeds maximum realistic value')
+    assert(std(sst) &gt; 0.5 &amp; std(sst) &lt; 10, 'Unexpected SST variance')</code></pre>
+    <h4 id="4-platform-distribution">4. Platform Distribution</h4>
+    <pre><code class="language-matlab">% Ensure multiple platform types present
+    platform_counts = histcounts(platform_type, 1:9);
+    assert(sum(platform_counts &gt; 0) &gt;= 4, 'Insufficient platform diversity')</code></pre>
+    <h2 id="operational-considerations">Operational Considerations</h2>
+    <h3 id="execution-environment">Execution Environment</h3>
+    <p><strong>Software Dependencies:</strong></p>
+    <ul>
+    <li>MATLAB R2024b (NetCDF reading, binary I/O, orchestration)</li>
+    <li>wget (data download)</li>
+    <li>Network access to NOAA STAR servers</li>
+    </ul>
+    <p><strong>Computational Resources:</strong></p>
+    <ul>
+    <li>Memory: ~2 GB per daily process (monthly NetCDF in memory)</li>
+    <li>Disk: ~500 MB temporary per day, ~5 MB permanent output per day</li>
+    <li>CPU: Minimal (I/O bound, not compute intensive)</li>
+    <li>Network: ~50-200 MB download per month (NetCDF files — no cache, downloaded fresh every run that needs them)</li>
+    </ul>
+    <h3 id="performance-optimization">Performance Optimization</h3>
+    <h4 id="no-persistent-cache">No Persistent Cache</h4>
+    <p>There is no cache directory or cached <code>.mat</code> file — every invocation downloads the monthly NetCDF file(s) it needs to an ephemeral working directory and discards them afterward. This is a deliberate design choice (see <code>makedailyiquam.m</code>'s own comment) to match production behavior and avoid cache-staleness bugs, at the cost of re-downloading on every run.</p>
+    <h4 id="conditional-reprocessing">Conditional Reprocessing</h4>
+    <p>The system avoids unnecessary work by:</p>
+    <ul>
+    <li>Checking output <code>.bii</code> file existence before processing</li>
+    <li>Comparing the file's age against <code>buoyStabilityLatency</code></li>
+    <li>Only reprocessing when <code>rewrite=1</code> or the existing file is unstable</li>
+    </ul>
+    <h4 id="parallel-opportunities">Parallel Opportunities</h4>
+    <p>Currently sequential, but could parallelize:</p>
+    <ul>
+    <li>Multiple days can be processed independently</li>
+    <li>Different months can be downloaded simultaneously</li>
+    <li>Daily extraction and QC could be threaded</li>
+    </ul>
+    <p><strong>Typical Runtime:</strong></p>
+    <ul>
+    <li>Per day: ~2-5 minutes (download + process; no cache to shortcut a repeat run)</li>
+    <li>A full 9-day scan window, one container invocation per day: ~20-45 minutes total, driven by the orchestrator's per-day loop, not by <code>buoyDataProcessing.m</code> itself</li>
+    </ul>
+    <h3 id="error-handling-and-recovery">Error Handling and Recovery</h3>
+    <h4 id="common-failure-modes">Common Failure Modes</h4>
+    <p><strong>1. Network Interruption</strong></p>
+    <ul>
+    <li><strong>Symptom:</strong> wget fails, incomplete download</li>
+    <li><strong>Recovery:</strong> Script retries on next execution (wget resumes partial downloads)</li>
+    <li><strong>Prevention:</strong> Increase timeout, check network stability</li>
+    </ul>
+    <p><strong>2. Missing Monthly File</strong></p>
+    <ul>
+    <li><strong>Symptom:</strong> NetCDF file not found at source URL</li>
+    <li><strong>Cause:</strong> NOAA processing delay, server maintenance</li>
+    <li><strong>Recovery:</strong> Wait 24 hours, data typically appears with delay</li>
+    <li><strong>Mitigation:</strong> NRT mode can skip and continue; REA mode should retry</li>
+    </ul>
+    <p><strong>3. Corrupted NetCDF</strong></p>
+    <ul>
+    <li><strong>Symptom:</strong> MATLAB netcdf.open() error</li>
+    <li><strong>Recovery:</strong> Since there's no cache to clear, just re-run with <code>rewrite=1</code> for that day — the corrupt download will be discarded and re-fetched from <code>sourceUrl</code></li>
+    <li><strong>Command:</strong> <code>makedailyiquam(year, doy, 1, outputDir, sourceUrl)</code> with rewrite=1</li>
+    </ul>
+    <p><strong>4. Disk Space Exhaustion</strong></p>
+    <ul>
+    <li><strong>Symptom:</strong> Write errors, incomplete output files</li>
+    <li><strong>Prevention:</strong> Monitor <code>outputDir</code> and <code>workDir</code> usage (there is no cache directory to also monitor)</li>
+    <li><strong>Recovery:</strong> Increase quota or adjust mount sizes</li>
+    </ul>
+    <p><strong>5. Zero Observations After QC</strong></p>
+    <ul>
+    <li><strong>Symptom:</strong> Output file has N=0 header</li>
+    <li><strong>Cause:</strong> All observations failed quality filter</li>
+    <li><strong>Recovery:</strong> Lower quality threshold temporarily, investigate data quality issue</li>
+    <li><strong>Note:</strong> Rare but possible during network outages or data provider issues</li>
+    </ul>
+    <h4 id="logging-and-diagnostics">Logging and Diagnostics</h4>
+    <p>All operations logged to <code>&lt;logDir&gt;/buoy.log</code> (default: <code>./logs/buoy.log</code>). Each container invocation processes exactly one analysis day, given explicitly by the caller — the log no longer shows a multi-day window being scanned, just that one day's <code>±buoyDayRange</code> sub-window:</p>
+    <pre><code>---------- Reference today = 2026-08-09 ----------
+      ======== Interim run for Year 2026 Day 218 ========
+    Processing year=2026 day=215 rewrite=0
+    keeping old ./output/iquam/2026/Global_IQUAM0_2026_215.bii
+    Processing year=2026 day=216 rewrite=0
+    Processing year=2026 day=217 rewrite=1
+    [wget output showing YYYYMM-STAR-L2i_GHRSST-SST-iQuam-GLOBALOCEAN-v02.0-fv01.0.nc download]
+    Processing year=2026 day=218 rewrite=1
+    Processing year=2026 day=219 rewrite=1
+    Processing year=2026 day=220 rewrite=1
+    Processing year=2026 day=221 rewrite=1</code></pre>
+    <p>(This example is one call with <code>--buoy-day-range 3</code>, so days 215-221 around the target day 218 are each evaluated; a day beyond <code>referenceToday</code> would be silently skipped rather than logged as "Processing" or "keeping old.")</p>
+    <p><strong>Key Log Patterns:</strong></p>
+    <ul>
+    <li><code>Interim run</code> - NRT mode (<code>mode=nrt</code>, recent/unstable data, never rewritten)</li>
+    <li><code>Final run</code> - REA mode (<code>mode=rea</code>, older/stable data)</li>
+    <li><code>keeping old</code> - File exists, not reprocessing</li>
+    <li><code>rewrite=1</code> - Reprocessing this offset day (file missing, or younger than <code>buoyStabilityLatency</code>)</li>
+    <li><code>[REA STUB]</code> - REA aggregation point (not yet implemented)</li>
+    </ul>
+    <p><strong>Key Metrics to Monitor:</strong></p>
+    <ul>
+    <li>Download success rate</li>
+    <li>Observation count trends (check file sizes)</li>
+    <li>Processing time per day</li>
+    <li>Disk usage growth in <code>outputDir</code></li>
+    </ul>
+    <h2 id="future-improvements-and-considerations">Future Improvements and Considerations</h2>
+    <h3 id="potential-enhancements">Potential Enhancements</h3>
+    <h4 id="1-adaptive-quality-filtering">1. Adaptive Quality Filtering</h4>
+    <ul>
+    <li><strong>Current:</strong> Fixed threshold (qual &gt;= 5)</li>
+    <li><strong>Proposed:</strong> Region-dependent, season-dependent thresholds</li>
+    <li><strong>Benefit:</strong> Optimize data retention vs. quality tradeoff</li>
+    </ul>
+    <h4 id="2-platform-specific-processing">2. Platform-Specific Processing</h4>
+    <ul>
+    <li><strong>Current:</strong> Uniform processing for all platforms</li>
+    <li><strong>Proposed:</strong> Specialized handling for high-precision platforms (Argo, IMOS)</li>
+    <li><strong>Benefit:</strong> Better utilize accuracy of premium observations</li>
+    </ul>
+    <h4 id="3-real-time-monitoring-dashboard">3. Real-Time Monitoring Dashboard</h4>
+    <ul>
+    <li><strong>Proposed:</strong> Web interface showing:
+    <ul>
+    <li>Daily observation counts by platform</li>
+    <li>Spatial coverage maps</li>
+    <li>QC statistics and trends</li>
+    <li>Processing status and errors</li>
+    </ul>
+    </li>
+    <li><strong>Benefit:</strong> Faster detection and response to data issues</li>
+    </ul>
+    <h4 id="4-alternative-data-sources">4. Alternative Data Sources</h4>
+    <ul>
+    <li><strong>Current:</strong> NOAA iQUAM only</li>
+    <li><strong>Proposed:</strong> Direct feeds from:
+    <ul>
+    <li>NDBC (National Data Buoy Center) - lower latency</li>
+    <li>IMOS (Integrated Marine Observing System) - high precision</li>
+    <li>Argo GDAC (Global Data Assembly Center) - float profiles</li>
+    </ul>
+    </li>
+    <li><strong>Benefit:</strong> Increased data volume, reduced latency, enhanced quality</li>
+    </ul>
+    <h4 id="5-machine-learning-qc">5. Machine Learning QC</h4>
+    <ul>
+    <li><strong>Proposed:</strong> Train ML models to detect subtle quality issues:
+    <ul>
+    <li>Calibration drift</li>
+    <li>Sensor fouling</li>
+    <li>Position errors</li>
+    </ul>
+    </li>
+    <li><strong>Benefit:</strong> Catch errors missed by traditional QC algorithms</li>
+    </ul>
+    <h3 id="known-limitations">Known Limitations</h3>
+    <h4 id="1-month-boundary-handling">1. Month Boundary Handling</h4>
+    <ul>
+    <li><strong>Issue:</strong> Daily extraction from monthly files at month boundaries (e.g., Jan 1 needs Dec data)</li>
+    <li><strong>Current:</strong> May miss observations near midnight UTC</li>
+    <li><strong>Impact:</strong> Minimal (few observations exactly at boundary)</li>
+    <li><strong>Solution:</strong> Download and process adjacent months at boundaries</li>
+    </ul>
+    <h4 id="2-data-latency-variability">2. Data Latency Variability</h4>
+    <ul>
+    <li><strong>Issue:</strong> Different platforms have different reporting latencies:
+    <ul>
+    <li>Drifting buoys: 1-3 hours</li>
+    <li>Ships: 3-12 hours</li>
+    <li>Delayed-mode Argo: 1-6 months</li>
+    </ul>
+    </li>
+    <li><strong>Current:</strong> Fixed 2-day stability window for all platforms</li>
+    <li><strong>Impact:</strong> May reprocess unnecessarily or miss delayed corrections</li>
+    <li><strong>Solution:</strong> Platform-specific latency configuration</li>
+    </ul>
+    <h4 id="3-error-correlation">3. Error Correlation</h4>
+    <ul>
+    <li><strong>Assumption:</strong> Observation errors are independent</li>
+    <li><strong>Reality:</strong> Systematic biases can affect platform groups (e.g., ship network, regional buoy network)</li>
+    <li><strong>Impact:</strong> Analysis may underestimate uncertainty in regions dominated by one platform type</li>
+    <li><strong>Solution:</strong> Implement spatial error correlation in MRVA</li>
+    </ul>
+    <h4 id="4-no-vertical-context">4. No Vertical Context</h4>
+    <ul>
+    <li><strong>Current:</strong> Surface SST only (buoy/ship hull depth: 0.5-5 meters)</li>
+    <li><strong>Missing:</strong> Subsurface temperature structure</li>
+    <li><strong>Impact:</strong> Cannot detect shallow stratification or near-surface gradients</li>
+    <li><strong>Solution:</strong> Integrate Argo temperature profiles (available but not currently used)</li>
+    </ul>
+    <h2 id="references-and-documentation">References and Documentation</h2>
+    <h3 id="external-resources">External Resources</h3>
+    <p><strong>NOAA iQUAM Documentation:</strong></p>
+    <ul>
+    <li>Product Guide: <a href="https://www.star.nesdis.noaa.gov/sod/sst/iquam/">https://www.star.nesdis.noaa.gov/sod/sst/iquam/</a></li>
+    <li>Quality Flag Specification: <a href="https://www.star.nesdis.noaa.gov/sod/sst/iquam/iquam_qc.html">https://www.star.nesdis.noaa.gov/sod/sst/iquam/iquam_qc.html</a></li>
+    <li>Version History: <a href="https://www.star.nesdis.noaa.gov/sod/sst/iquam/versions.html">https://www.star.nesdis.noaa.gov/sod/sst/iquam/versions.html</a></li>
+    </ul>
+    <p><strong>GHRSST Specifications:</strong></p>
+    <ul>
+    <li>Data Specification v2.0: <a href="https://www.ghrsst.org/ghrsst-data-services/products/">https://www.ghrsst.org/ghrsst-data-services/products/</a></li>
+    <li>In-Situ SST Best Practices: <a href="https://www.ghrsst.org/ghrsst-science/sst-definitions/">https://www.ghrsst.org/ghrsst-science/sst-definitions/</a></li>
+    </ul>
+    <p><strong>Platform Networks:</strong></p>
+    <ul>
+    <li>Global Drifter Program: <a href="https://www.aoml.noaa.gov/phod/gdp/">https://www.aoml.noaa.gov/phod/gdp/</a></li>
+    <li>Tropical Atmosphere Ocean (TAO): <a href="https://www.pmel.noaa.gov/tao/">https://www.pmel.noaa.gov/tao/</a></li>
+    <li>Argo Float Program: <a href="https://argo.ucsd.edu/">https://argo.ucsd.edu/</a></li>
+    <li>NDBC Buoy Network: <a href="https://www.ndbc.noaa.gov/">https://www.ndbc.noaa.gov/</a></li>
+    </ul>
+    <h3 id="citation">Citation</h3>
+    <p>If using MUR SST data or this processing system in publications, please cite:</p>
+    <div class="note">
+    <p>Chin, T. M., J. Vazquez-Cuervo, and E. M. Armstrong (2017), A multi-scale high-resolution analysis of global sea surface temperature, <em>Remote Sensing of Environment</em>, 200, 154-169, doi:10.1016/j.rse.2017.07.029</p>
+    </div>
+    <p>For iQUAM data specifically:</p>
+    <div class="note">
+    <p>Xu, F., and A. Ignatov (2014), In situ SST Quality Monitor (iQuam), <em>Journal of Atmospheric and Oceanic Technology</em>, 31(1), 164-180, doi:10.1175/JTECH-D-13-00121.1</p>
+    </div>
+    <h2 id="container-setup">Container setup</h2>
+    <h3 id="overview-1">Overview</h3>
+    <p>The IQUAM processing module has been containerized using a multi-stage Docker build approach. This deployment strategy compiles the MATLAB application during the build stage (requiring a valid MATLAB license) and creates a lightweight runtime container that only requires the MATLAB Runtime (MCR).</p>
+    <p><strong>Key Benefits:</strong></p>
+    <ul>
+    <li><strong>License-free runtime:</strong> Only the build process requires a MATLAB license</li>
+    <li><strong>Reproducible builds:</strong> Consistent execution environment across systems</li>
+    <li><strong>Simplified deployment:</strong> No MATLAB installation needed on production systems</li>
+    <li><strong>Explicit inputs:</strong> Every invocation is told exactly which day, mode, and reference date to process — the container never infers "today" or a processing window itself</li>
+    </ul>
+    <h3 id="architecture-1">Architecture</h3>
+    <h4 id="multi-stage-build-process">Multi-Stage Build Process</h4>
+    <p>The container build uses two stages:</p>
+    <p><strong>Stage 1: Builder (requires MATLAB license)</strong></p>
+    <ul>
+    <li>Base image: <code>mathworks/matlab:r2024b</code></li>
+    <li>Compiles MATLAB code using MATLAB Compiler (mcc)</li>
+    <li>Requires network access to JPL license servers</li>
+    <li>Produces standalone executable (<code>IquamProcessor</code>)</li>
+    </ul>
+    <p><strong>Stage 2: Runtime (no license required)</strong></p>
+    <ul>
+    <li>Base image: <code>containers.mathworks.com/matlab-runtime:r2024b</code></li>
+    <li>Contains only the compiled application and MATLAB Runtime</li>
+    <li>Significantly smaller than full MATLAB installation</li>
+    <li>Can run anywhere without license dependencies</li>
+    </ul>
+    <h4 id="directory-structure">Directory Structure</h4>
+    <p>The container uses a fixed directory structure optimized for volume mounting. There is no cache directory — the module has never persisted downloaded NetCDF data between runs (see <code>makedailyiquam.m</code>'s own comment: "no persistent cache needed... matches production behavior and avoids cache staleness issues").</p>
+    <pre><code>/data/                          # Container working directory
+    ├── output/iquam/              # Output .bii files (REQUIRED mount)
+    │   └── YYYY/
+    │       └── Global_IQUAM0_YYYY_DDD.bii
+    ├── logs/                      # Processing logs (REQUIRED mount)
+    │   └── buoy.log
+    └── /tmp/makebic/              # Temporary workspace (ephemeral, not mounted)</code></pre>
+    <h3 id="volume-mounts">Volume Mounts</h3>
+    <h4 id="required-mounts">Required Mounts</h4>
+    <p>These directories must be mounted from the host system for the container to function correctly:</p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Container Path</th><th>Purpose</th><th>Access</th><th>Typical Host Path</th><th>Notes</th></tr></thead>
+    <tbody>
+    <tr><td><code>/data/output/iquam</code></td><td>Daily .bii output files</td><td>Read/Write</td><td><code>/data/iquam/output</code></td><td>Organized by year subdirectories</td></tr>
+    <tr><td><code>/data/logs</code></td><td>Processing logs</td><td>Read/Write</td><td><code>/data/iquam/logs</code></td><td>Contains buoy.log</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><code>/tmp/makebic</code> (the working directory) does not need a host mount — it's ephemeral scratch space inside the container, cleaned at the start of each run.</p>
+    <h4 id="volume-persistence">Volume Persistence</h4>
+    <p><strong>Storage Requirements:</strong></p>
+    <ul>
+    <li><strong>Output:</strong> ~5 MB per day, ~1.8 GB per year</li>
+    <li><strong>Logs:</strong> Grows indefinitely (rotate externally)</li>
+    <li><strong>Temporary:</strong> ~500 MB peak (ephemeral, can use tmpfs)</li>
+    </ul>
+    <h3 id="building-the-container">Building the Container</h3>
+    <h4 id="prerequisites">Prerequisites</h4>
+    <ul>
+    <li>Docker or compatible container runtime</li>
+    <li>Network access to JPL MATLAB license servers during build</li>
+    <li>Valid MATLAB and MATLAB Compiler licenses</li>
+    <li><code>network.lic</code> in the <code>mur/</code> directory (<code>cp network.lic.example network.lic</code>, then edit)</li>
+    <li>~10 GB disk space for build process</li>
+    </ul>
+    <h4 id="build-command">Build Command</h4>
+    <p>Use <code>build_module.sh</code> from the <code>mur/</code> directory:</p>
+    <pre><code class="language-bash">cd mur
+    ./build_module.sh iquam</code></pre>
+    <p>That builds the <code>mur-matlab-base:r2024b</code> image first if it's missing, verifies <code>network.lic</code>, builds <code>--platform linux/amd64</code> with the parent <code>mur/</code> directory as context, and tags the image <code>mur-iquam:latest</code> — the name the pipeline config expects.</p>
+    <h4 id="manual-build-advanced">Manual Build (Advanced)</h4>
+    <p>Only needed when <code>build_module.sh</code> doesn't fit: a custom tag, an external CI system, or debugging the Dockerfile itself.</p>
+    <p><strong>IMPORTANT:</strong> The Dockerfile references shared utilities from the <code>../common</code> folder, so the build context must include the parent <code>mur</code> directory. Build from within the iquam directory and set the context to the parent (<code>..</code>). The base image must already exist — build it with <code>./build_matlab_base.sh</code> first.</p>
+    <pre><code class="language-bash"># Navigate to the iquam directory
+    cd mur/iquam
+
+    # Build for AMD64 (most common Linux servers)
+    docker build --platform linux/amd64 -f Dockerfile -t mur-iquam:latest ..
+
+    # Or using Apple's container tools on macOS
+    container build --arch amd64 -f Dockerfile -t mur-iquam:latest ..</code></pre>
+    <p><strong>Note:</strong> The <code>..</code> at the end sets the build context to the parent <code>mur</code> directory, which allows the Dockerfile to access both <code>iquam/</code> and <code>common/</code> folders.</p>
+    <h4 id="build-process-timeline">Build Process Timeline</h4>
+    <ul>
+    <li><strong>Downloading base images:</strong> 2-5 minutes</li>
+    <li><strong>Installing dependencies:</strong> 1-2 minutes</li>
+    <li><strong>MATLAB compilation:</strong> 3-8 minutes</li>
+    <li><strong>Creating runtime image:</strong> 1-2 minutes</li>
+    <li><strong>Total:</strong> 7-17 minutes (varies by network speed and system)</li>
+    </ul>
+    <h4 id="build-troubleshooting">Build Troubleshooting</h4>
+    <p><strong>Build hangs at compilation step:</strong></p>
+    <p>Common causes:</p>
+    <ul>
+    <li>License servers unreachable (firewall/network issues)</li>
+    <li>No available licenses (all seats in use)</li>
+    <li>VPN required for license access</li>
+    <li>Incorrect license server configuration</li>
+    </ul>
+    <p><strong>Compilation timeout (&gt;10 minutes):</strong></p>
+    <p>The Dockerfile includes a 10-minute timeout for the mcc compilation. If your build consistently times out:</p>
+    <ol>
+    <li>Verify license server is responding</li>
+    <li>Check that MATLAB Compiler license is available (not just base MATLAB)</li>
+    <li>Increase timeout in Dockerfile: <code>timeout 600s</code> → <code>timeout 1200s</code></li>
+    </ol>
+    <h3 id="running-the-container">Running the Container</h3>
+    <h4 id="basic-usage">Basic Usage</h4>
+    <p>The container is <strong>named-args-only</strong> — it does not infer the date, mode, or window itself. All nine flags below are required; there is no "run with defaults" invocation:</p>
+    <pre><code class="language-bash">docker run --rm \
+      --shm-size=512M \
+      -v /local/path/output:/data/output/iquam \
+      -v /local/path/logs:/data/logs \
+      mur-iquam:latest \
+      --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+      --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+      --buoy-day-range 3 --stability-latency 2</code></pre>
+    <h4 id="what-one-invocation-does">What One Invocation Does</h4>
+    <p>Given the flags above, the container:</p>
+    <ol>
+    <li>Downloads monthly IQUAM NetCDF files from NOAA STAR for the <code>±buoy-day-range</code> window around the target day (no cache — always freshly downloaded)</li>
+    <li>Extracts and processes daily observations for each offset day in that window</li>
+    <li>Filters observations by quality level (≥5)</li>
+    <li>Writes binary .bii files to <code>/data/output/iquam/YYYY/</code> for each offset day that needs (re)processing</li>
+    <li>Logs all operations to <code>/data/logs/buoy.log</code></li>
+    </ol>
+    <p><strong>Who decides what to process:</strong> the calling orchestrator (<code>run_mur_pipeline.py</code>/<code>run_mur_maap.py</code>) decides the target day, the NRT/REA mode, and the reference date — normally by iterating a 9-day scan window (1-day NRT latency, 4-day REA latency) and invoking this container once per day in that window. The container itself only ever processes the one day (plus its own <code>±buoy-day-range</code> sub-window) it's explicitly told about via flags:</p>
+    <ul>
+    <li><strong><code>--buoy-day-range</code>:</strong> temporal window processed per invocation (±days around the target day)</li>
+    <li><strong><code>--stability-latency</code>:</strong> files older than this many days (relative to <code>--reference-date</code>) are not reprocessed unless missing</li>
+    </ul>
+    <h4 id="scheduled-execution">Scheduled Execution</h4>
+    <p>For operational NRT processing, run the container on a daily schedule. The example below uses <code>date</code> to compute the flag values for "today" — in practice, prefer driving this from <code>run_mur_pipeline.py</code> (which already computes the NRT/REA window and mode) rather than reimplementing that logic in a shell script.</p>
+    <p><strong>Using cron:</strong></p>
+    <pre><code class="language-bash"># Add to crontab (runs daily at 12:00 UTC)
+    0 12 * * * YEAR=$(date -u -d yesterday +\%Y) DOY=$(date -u -d yesterday +\%j) REF=$(date -u +\%Y-\%m-\%d) &amp;&amp; \
+      /usr/bin/docker run --rm \
+      --shm-size=512M \
+      -v /data/iquam/output:/data/output/iquam \
+      -v /data/iquam/logs:/data/logs \
+      mur-iquam:latest \
+      --year "$YEAR" --doy "$DOY" --mode nrt --reference-date "$REF" \
+      --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+      --buoy-day-range 3 --stability-latency 2 &gt;&gt; /var/log/iquam_cron.log 2&gt;&amp;1</code></pre>
+    <p><strong>Using systemd timer:</strong></p>
+    <pre><code class="language-ini"># /etc/systemd/system/iquam-processor.service
+    [Unit]
+    Description=IQUAM SST Processing
+    After=docker.service
+    Requires=docker.service
+
+    [Service]
+    Type=oneshot
+    Environment=YEAR=%Y DOY=%j
+    ExecStart=/bin/sh -c '/usr/bin/docker run --rm \
+      --shm-size=512M \
+      -v /data/iquam/output:/data/output/iquam \
+      -v /data/iquam/logs:/data/logs \
+      mur-iquam:latest \
+      --year $(date -u +%%Y) --doy $(date -u +%%j) --mode nrt --reference-date $(date -u +%%Y-%%m-%%d) \
+      --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+      --buoy-day-range 3 --stability-latency 2'
+
+    [Install]
+    WantedBy=multi-user.target</code></pre>
+    <pre><code class="language-ini"># /etc/systemd/system/iquam-processor.timer
+    [Unit]
+    Description=Run IQUAM Processing Daily
+    Requires=iquam-processor.service
+
+    [Timer]
+    OnCalendar=daily
+    Persistent=true
+    Unit=iquam-processor.service
+
+    [Install]
+    WantedBy=timers.target</code></pre>
+    <p>Enable and start:</p>
+    <pre><code class="language-bash">systemctl enable iquam-processor.timer
+    systemctl start iquam-processor.timer</code></pre>
+    <h3 id="performance-optimization-1">Performance Optimization</h3>
+    <h4 id="required-shared-memory">Required: Shared Memory</h4>
+    <p>MATLAB Runtime requires adequate shared memory. <strong>Always</strong> include <code>--shm-size=512M</code>:</p>
+    <pre><code class="language-bash">docker run --rm \
+      --shm-size=512M \
+      [other options] \
+      mur-iquam:latest \
+      --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+      --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+      --buoy-day-range 3 --stability-latency 2</code></pre>
+    <p><strong>Without this flag, the container may:</strong></p>
+    <ul>
+    <li>Fail with cryptic MCR errors</li>
+    <li>Hang indefinitely</li>
+    <li>Crash with segmentation faults</li>
+    </ul>
+    <h4 id="memory-allocation">Memory Allocation</h4>
+    <p>For processing large monthly files:</p>
+    <pre><code class="language-bash">docker run --rm \
+      --shm-size=512M \
+      --memory="4g" \
+      --memory-reservation="2g" \
+      --memory-swap="6g" \
+      --cpus="2.0" \
+      -v /data/iquam/output:/data/output/iquam \
+      -v /data/iquam/logs:/data/logs \
+      mur-iquam:latest \
+      --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+      --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+      --buoy-day-range 3 --stability-latency 2</code></pre>
+    <p><strong>Resource Guidelines:</strong></p>
+    <ul>
+    <li><strong>Minimum RAM:</strong> 2 GB</li>
+    <li><strong>Recommended RAM:</strong> 4 GB</li>
+    <li><strong>CPUs:</strong> 1-2 (processing is I/O bound, not CPU intensive)</li>
+    </ul>
+    <h4 id="mcr-cache-optimization">MCR Cache Optimization</h4>
+    <p>This is the <strong>MATLAB Runtime's own</strong> startup cache (unrelated to IQUAM data — there is no IQUAM data cache). Optimize it the same way as the other containers in this pipeline:</p>
+    <pre><code class="language-bash">docker run --rm \
+      --shm-size=512M \
+      -e MCR_CACHE_ROOT=/tmp/mcr_cache \
+      -e MCR_CACHE_SIZE=1024M \
+      -e MCR_CACHE_VERBOSE=true \
+      -v /data/iquam/output:/data/output/iquam \
+      -v /data/iquam/logs:/data/logs \
+      mur-iquam:latest \
+      --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+      --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+      --buoy-day-range 3 --stability-latency 2</code></pre>
+    <h4 id="network-optimization">Network Optimization</h4>
+    <p>The container downloads data from NOAA STAR servers on every run (there is no cache to avoid re-downloading). If multiple containers run concurrently or network bandwidth is limited:</p>
+    <ol>
+    <li><strong>Stagger scheduled runs</strong> rather than launching many containers at once</li>
+    <li><strong>Set download timeouts</strong> if using unreliable networks (requires modifying <code>makedailyiquam.m</code>)</li>
+    </ol>
+    <h3 id="data-management">Data Management</h3>
+    <h4 id="log-management">Log Management</h4>
+    <p>The <code>buoy.log</code> file grows indefinitely. Implement log rotation:</p>
+    <p><strong>Using logrotate:</strong></p>
+    <pre><code># /etc/logrotate.d/iquam
+    /data/iquam/logs/buoy.log {
+        daily
+        rotate 30
+        compress
+        missingok
+        notifempty
+        create 0644 root root
+    }</code></pre>
+    <h4 id="output-file-retention">Output File Retention</h4>
+    <p>Output <code>.bii</code> files are organized by year:</p>
+    <pre><code>/data/output/iquam/
+    ├── 2023/
+    │   ├── Global_IQUAM0_2023_001.bii
+    │   ├── Global_IQUAM0_2023_002.bii
+    │   └── ...
+    └── 2024/
+    │   ├── Global_IQUAM0_2024_001.bii
+    │   └── ...</code></pre>
+    <p><strong>Retention recommendations:</strong></p>
+    <ul>
+    <li><strong>NRT processing:</strong> Keep current year + 1 previous year</li>
+    <li><strong>Reanalysis:</strong> Archive all years (required for consistency)</li>
+    <li><strong>Backup:</strong> Consider backing up to object storage (S3, etc.)</li>
+    </ul>
+    <h3 id="monitoring-and-health-checks">Monitoring and Health Checks</h3>
+    <h4 id="container-health-check">Container Health Check</h4>
+    <p>Add a health check to ensure the container completed successfully:</p>
+    <pre><code class="language-bash"># Check exit code of last run
+    docker run --rm \
+      --shm-size=512M \
+      -v /data/iquam/output:/data/output/iquam \
+      -v /data/iquam/logs:/data/logs \
+      mur-iquam:latest \
+      --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+      --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+      --buoy-day-range 3 --stability-latency 2
+
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -ne 0 ]; then
+        echo "IQUAM processing failed with exit code $EXIT_CODE"
+        # Send alert (email, Slack, PagerDuty, etc.)
+    fi</code></pre>
+    <h4 id="log-monitoring">Log Monitoring</h4>
+    <p>Monitor the log file for errors or unexpected patterns:</p>
+    <pre><code class="language-bash"># Check for common error patterns
+    grep -i "error\|failed\|cannot" /data/iquam/logs/buoy.log | tail -20
+
+    # Check today's processing
+    TODAY=$(date +"%Y-%m-%d")
+    grep "$TODAY" /data/iquam/logs/buoy.log
+
+    # Check observation counts (should be 400k-800k daily)
+    grep "observations" /data/iquam/logs/buoy.log | tail -10</code></pre>
+    <h4 id="output-validation">Output Validation</h4>
+    <p>Verify output files were created:</p>
+    <pre><code class="language-bash"># Check if today's file exists
+    YEAR=$(date +"%Y")
+    DOY=$(date +"%j")
+    OUTPUT_FILE="/data/iquam/output/${YEAR}/Global_IQUAM0_${YEAR}_${DOY}.bii"
+
+    if [ -f "$OUTPUT_FILE" ]; then
+        FILE_SIZE=$(stat -f%z "$OUTPUT_FILE" 2&gt;/dev/null || stat -c%s "$OUTPUT_FILE")
+        if [ $FILE_SIZE -lt 100000 ]; then
+            echo "WARNING: Output file suspiciously small ($FILE_SIZE bytes)"
+        else
+            echo "Output file created successfully ($FILE_SIZE bytes)"
+        fi
+    else
+        echo "ERROR: Expected output file not found: $OUTPUT_FILE"
+    fi</code></pre>
+    <h3 id="kubernetes-deployment">Kubernetes Deployment</h3>
+    <h4 id="cronjob-example">CronJob Example</h4>
+    <p>For Kubernetes environments, deploy as a CronJob:</p>
+    <pre><code class="language-yaml">apiVersion: batch/v1
+    kind: CronJob
+    metadata:
+      name: iquam-processor
+      namespace: mur-sst
+    spec:
+      schedule: "0 12 * * *"  # Daily at 12:00 UTC
+      successfulJobsHistoryLimit: 3
+      failedJobsHistoryLimit: 3
+      concurrencyPolicy: Forbid  # Don't run concurrent jobs
+      jobTemplate:
+        spec:
+          template:
+            metadata:
+              labels:
+                app: iquam-processor
+            spec:
+              restartPolicy: OnFailure
+              containers:
+              - name: iquam
+                image: mur-iquam:latest
+                args:
+                  - "--year"
+                  - "2026"
+                  - "--doy"
+                  - "220"
+                  - "--mode"
+                  - "nrt"
+                  - "--reference-date"
+                  - "2026-08-09"
+                  - "--work-dir"
+                  - "/tmp/makebic"
+                  - "--log-dir"
+                  - "/data/logs"
+                  - "--output-dir"
+                  - "/data/output/iquam"
+                  - "--buoy-day-range"
+                  - "3"
+                  - "--stability-latency"
+                  - "2"
+                resources:
+                  requests:
+                    memory: "2Gi"
+                    cpu: "1"
+                  limits:
+                    memory: "4Gi"
+                    cpu: "2"
+                volumeMounts:
+                - name: output
+                  mountPath: /data/output/iquam
+                - name: logs
+                  mountPath: /data/logs
+                - name: shm
+                  mountPath: /dev/shm
+              volumes:
+              - name: output
+                persistentVolumeClaim:
+                  claimName: iquam-output-pvc
+              - name: logs
+                persistentVolumeClaim:
+                  claimName: iquam-logs-pvc
+              - name: shm
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 512Mi</code></pre>
+    <p>(In practice, the <code>--year</code>/<code>--doy</code>/<code>--mode</code>/<code>--reference-date</code> values need to be computed fresh per run rather than hardcoded as shown here — e.g. by templating this manifest from <code>run_mur_pipeline.py</code>'s own window/mode calculation, or by wrapping the CronJob's command in a small script that computes them at container start.)</p>
+    <h4 id="persistent-volume-claims">Persistent Volume Claims</h4>
+    <pre><code class="language-yaml">apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: iquam-output-pvc
+      namespace: mur-sst
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+    ---
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: iquam-logs-pvc
+      namespace: mur-sst
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 1Gi</code></pre>
+    <h3 id="docker-compose-deployment">Docker Compose Deployment</h3>
+    <p>For single-server deployments, use Docker Compose:</p>
+    <pre><code class="language-yaml"># docker-compose.yml
+    version: '3.8'
+
+    services:
+      iquam-processor:
+        image: mur-iquam:latest
+        shm_size: 512m
+        mem_limit: 4g
+        mem_reservation: 2g
+        cpus: 2.0
+        volumes:
+          - iquam-output:/data/output/iquam
+          - iquam-logs:/data/logs
+        environment:
+          - MCR_CACHE_ROOT=/tmp/mcr_cache
+          - MCR_CACHE_SIZE=1024M
+        command:
+          - "--year"
+          - "${YEAR}"
+          - "--doy"
+          - "${DOY}"
+          - "--mode"
+          - "${MODE}"
+          - "--reference-date"
+          - "${REFERENCE_DATE}"
+          - "--work-dir"
+          - "/tmp/makebic"
+          - "--log-dir"
+          - "/data/logs"
+          - "--output-dir"
+          - "/data/output/iquam"
+          - "--buoy-day-range"
+          - "3"
+          - "--stability-latency"
+          - "2"
+        restart: "no"  # Run once, don't restart automatically
+
+    volumes:
+      iquam-output:
+        driver: local
+        driver_opts:
+          type: none
+          o: bind
+          device: /data/iquam/output
+      iquam-logs:
+        driver: local
+        driver_opts:
+          type: none
+          o: bind
+          device: /data/iquam/logs</code></pre>
+    <p>Run manually (with <code>YEAR</code>/<code>DOY</code>/<code>MODE</code>/<code>REFERENCE_DATE</code> set in the environment or a <code>.env</code> file):</p>
+    <pre><code class="language-bash">YEAR=2026 DOY=220 MODE=nrt REFERENCE_DATE=2026-08-09 docker-compose up</code></pre>
+    <h3 id="security-considerations">Security Considerations</h3>
+    <h4 id="running-as-non-root">Running as Non-Root</h4>
+    <p>To improve security, run the container as a non-root user:</p>
+    <pre><code class="language-bash">docker run --rm \
+      --shm-size=512M \
+      --user $(id -u):$(id -g) \
+      -v /data/iquam/output:/data/output/iquam \
+      -v /data/iquam/logs:/data/logs \
+      mur-iquam:latest \
+      --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+      --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+      --buoy-day-range 3 --stability-latency 2</code></pre>
+    <p><strong>Important:</strong> Ensure mounted directories have appropriate permissions for the specified UID/GID.</p>
+    <h4 id="read-only-root-filesystem">Read-Only Root Filesystem</h4>
+    <p>For additional security, run with a read-only root filesystem:</p>
+    <pre><code class="language-bash">docker run --rm \
+      --shm-size=512M \
+      --read-only \
+      --tmpfs /tmp:size=2g \
+      -v /data/iquam/output:/data/output/iquam \
+      -v /data/iquam/logs:/data/logs \
+      mur-iquam:latest \
+      --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+      --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+      --buoy-day-range 3 --stability-latency 2</code></pre>
+    <h4 id="network-isolation">Network Isolation</h4>
+    <p>If running in a restricted environment, allow outbound connections only to NOAA STAR:</p>
+    <pre><code class="language-bash"># Using Docker network with egress filtering
+    docker network create --driver bridge iquam-net
+    docker run --rm \
+      --network iquam-net \
+      --shm-size=512M \
+      -v /data/iquam/output:/data/output/iquam \
+      -v /data/iquam/logs:/data/logs \
+      mur-iquam:latest \
+      --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+      --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+      --buoy-day-range 3 --stability-latency 2</code></pre>
+    <h3 id="troubleshooting">Troubleshooting</h3>
+    <h4 id="container-exits-immediately">Container Exits Immediately</h4>
+    <p><strong>Symptoms:</strong> Container starts and exits with code 0 or 1</p>
+    <p><strong>Check:</strong></p>
+    <pre><code class="language-bash"># Run with interactive terminal to see errors
+    docker run -it --rm \
+      --shm-size=512M \
+      -v /data/iquam/output:/data/output/iquam \
+      -v /data/iquam/logs:/data/logs \
+      --entrypoint /bin/bash \
+      mur-iquam:latest
+
+    # Manually run entrypoint to see errors (all 9 flags required)
+    /opt/iquam/bin/entrypoint.sh --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+      --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+      --buoy-day-range 3 --stability-latency 2</code></pre>
+    <p><strong>Common causes:</strong></p>
+    <ul>
+    <li>Missing or inaccessible volume mounts</li>
+    <li>Insufficient permissions on mounted directories</li>
+    <li>MCR initialization failure (check shm-size)</li>
+    <li>A required flag omitted, or an unrecognized flag passed — the entrypoint prints a usage message and exits non-zero (positional arguments are not accepted at all)</li>
+    </ul>
+    <h4 id="no-output-files-created">No Output Files Created</h4>
+    <p><strong>Symptoms:</strong> Container completes but no .bii files appear</p>
+    <p><strong>Check:</strong></p>
+    <pre><code class="language-bash"># Examine logs
+    tail -100 /data/iquam/logs/buoy.log
+
+    # Look for specific error patterns
+    grep -i "error\|cannot\|failed" /data/iquam/logs/buoy.log
+
+    # Verify output directory is writable
+    docker run --rm \
+      -v /data/iquam/output:/data/output/iquam \
+      --entrypoint /bin/sh \
+      mur-iquam:latest \
+      -c "touch /data/output/iquam/test.txt"</code></pre>
+    <p><strong>Common causes:</strong></p>
+    <ul>
+    <li>Output directory not writable</li>
+    <li>Data download failures (check network/firewall)</li>
+    <li>NOAA server unavailable</li>
+    <li><code>--reference-date</code> is in the past relative to the day being processed, so every offset day in the <code>±buoy-day-range</code> window was skipped as a future date</li>
+    </ul>
+    <h4 id="memory-errors">Memory Errors</h4>
+    <p><strong>Symptoms:</strong> Container killed by OOM killer or crashes with memory errors</p>
+    <p><strong>Solution:</strong></p>
+    <pre><code class="language-bash"># Increase memory limits
+    docker run --rm \
+      --shm-size=512M \
+      --memory="8g" \
+      --memory-swap="16g" \
+      -v /data/iquam/output:/data/output/iquam \
+      -v /data/iquam/logs:/data/logs \
+      mur-iquam:latest \
+      --year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
+      --work-dir /tmp/makebic --log-dir /data/logs --output-dir /data/output/iquam \
+      --buoy-day-range 3 --stability-latency 2</code></pre>
+    <h4 id="network-download-failures">Network Download Failures</h4>
+    <p><strong>Symptoms:</strong> wget errors in logs</p>
+    <p><strong>Check:</strong></p>
+    <pre><code class="language-bash"># Test connectivity to NOAA STAR
+    curl -I https://www.star.nesdis.noaa.gov/pub/socd/sst/iquam/v2.10/
+
+    # Check if firewall/proxy is blocking
+    docker run --rm --entrypoint wget mur-iquam:latest \
+      --spider https://www.star.nesdis.noaa.gov/pub/socd/sst/iquam/v2.10/</code></pre>
+    <p><strong>Solutions:</strong></p>
+    <ul>
+    <li>Configure proxy settings if behind corporate firewall</li>
+    <li>Add retry logic for transient failures</li>
+    <li>Use alternative download method (ftp vs https)</li>
+    </ul>
+    <h3 id="future-enhancements">Future Enhancements</h3>
+    <h4 id="rea-mode-support">REA Mode Support</h4>
+    <p>Currently, REA aggregation (<code>refbii2biq.m</code>) is stubbed, not implemented — passing <code>--mode rea</code> runs the container in REA <em>latency</em> mode (the stability-window/rewrite behavior changes) but does not produce aggregated <code>.biq</code> output yet. Future enhancements will add:</p>
+    <ul>
+    <li>Temporal aggregation (±3 day windows)</li>
+    <li>Platform-specific error weighting</li>
+    <li>Output of <code>.biq</code> files for analysis</li>
+    </ul>
+    <p>Enabling REA aggregation (when implemented) will be via <code>buoyDataProcessing.m</code>'s <code>enableREA</code> parameter, which is not exposed as a container flag today.</p>
+    <h4 id="multi-architecture-builds">Multi-Architecture Builds</h4>
+    <p>Current build targets <code>linux/amd64</code> (<code>build_module.sh</code> hard-codes it). Multi-arch support for ARM64 (AWS Graviton, Apple Silicon) would need a manual <code>buildx</code> invocation — note the parent build context, same as every other manual build:</p>
+    <pre><code class="language-bash">cd mur/iquam
+    docker buildx build \
+      --platform linux/amd64,linux/arm64 \
+      -f Dockerfile \
+      -t mur-iquam:latest \
+      --push \
+      ..</code></pre>
+    <p>This also requires an ARM64 <code>mur-matlab-base</code> image, which MathWorks does not currently publish.</p>
+    <h4 id="configuration-flexibility">Configuration Flexibility</h4>
+    <p>Every input this container needs is already an explicit named flag (<code>--year</code>, <code>--doy</code>, <code>--mode</code>, <code>--reference-date</code>, <code>--work-dir</code>, <code>--log-dir</code>, <code>--output-dir</code>, <code>--buoy-day-range</code>, <code>--stability-latency</code>) — there's no remaining case for environment-variable overrides of these values. <code>--source-url</code> remains a MATLAB-side default (<code>buoyDataProcessing.m</code>), not exposed as a flag; that would be a natural next addition if a use case for overriding it arises.</p>
+    <h3 id="additional-resources">Additional Resources</h3>
+    <ul>
+    <li><a href="container-iquam.html">IQUAM README</a> - Detailed information about data flow and processing</li>
+    <li><a href="https://www.star.nesdis.noaa.gov/sod/sst/iquam/">NOAA IQUAM Documentation</a> - Upstream data source</li>
+    <li><a href="https://www.mathworks.com/help/compiler/matlab-runtime.html">MATLAB Runtime Documentation</a> - MCR details</li>
+    <li><a href="https://docs.docker.com/develop/dev-best-practices/">Docker Best Practices</a> - Container optimization</li>
+    </ul>
+    <h3 id="support">Support</h3>
+    <p>For issues related to:</p>
+    <ul>
+    <li><strong>Container build/deployment:</strong> Contact MUR development team</li>
+    <li><strong>MATLAB licensing:</strong> Contact JPL CAE license administrators</li>
+    <li><strong>IQUAM data availability:</strong> Check NOAA STAR service status</li>
+    <li><strong>MUR SST processing:</strong> See main MUR documentation</li>
+    </ul>
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. This site is
+      the documentation &mdash; there is no separate Markdown copy to fall out of date.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

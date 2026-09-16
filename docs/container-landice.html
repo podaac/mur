@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Land/ice container — MUR SST</title>
+<meta name="description" content="Builds the daily land/ice mask from OSI-SAF sea-ice concentration, and the ice-edge SST points that go with it.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav>
+    <div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <a href="mrva-internals.html">MRVA internals</a>
+    <div class="nav-group">Operating it</div>
+    <a href="configuration.html">Configuration</a>
+    <a href="static-data.html">Static input data</a>
+    <a href="input-contract.html">Input contract</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a>
+    <div class="nav-group">Containers</div>
+    <a href="container-landice.html" aria-current="page">Land/ice</a>
+    <a href="container-l2p.html">L2P</a>
+    <a href="container-iquam.html">iQUAM</a>
+    <a href="container-mrva.html">MRVA</a>
+    <div class="nav-group">Reference</div>
+    <a href="landice-encoding.html">Land/ice encoding</a>
+    <a href="future.html">Future enhancements</a>
+    <div class="nav-group">Project</div>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>Land/ice container</h1>
+    <p class="lede">Builds the daily land/ice mask from OSI-SAF sea-ice concentration, and the ice-edge SST points that go with it.</p>
+    <nav class="toc" aria-label="On this page">
+    <b>On this page</b>
+    <ul>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#quick-start-containerized-deployment-recommended">Quick Start - Containerized Deployment (Recommended)</a></li>
+      <li><a href="#requirements">Requirements</a></li>
+      <li><a href="#usage-examples">Usage Examples</a></li>
+      <li><a href="#batch-processing">Batch Processing</a></li>
+      <li><a href="#environment-variables">Environment Variables</a></li>
+      <li><a href="#directory-structure">Directory Structure</a></li>
+      <li><a href="#documentation">Documentation</a></li>
+      <li><a href="#production-deployment">Production Deployment</a></li>
+      <li><a href="#troubleshooting">Troubleshooting</a></li>
+      <li><a href="#resolution-notes">Resolution Notes</a></li>
+      <li><a href="#general-notes">General Notes</a></li>
+      <li><a href="#building-the-image">Building the image</a></li>
+      <li><a href="#deployment">Deployment</a></li>
+      <li><a href="#reprocessing-past-dates">Reprocessing past dates</a></li>
+    </ul>
+    </nav>
+    <p>This MATLAB application automates landmask and ice operations for MUR SST input data. It processes data for two grid resolutions (<code>p01</code> at 0.01° and <code>p011</code> at 0.011°) using OSI SAF sea ice datasets and has been containerized for easy deployment.</p>
+    <h2 id="overview">Overview</h2>
+    <p>The application:</p>
+    <ul>
+    <li>Processes land ice operations for a specified year and day-of-year</li>
+    <li>Handles both P01 and P011 grid resolutions automatically in each run</li>
+    <li>Uses OSI SAF FTP endpoints for sea ice data access</li>
+    <li>Compiled as a standalone MATLAB executable for containerized deployment</li>
+    <li>No MATLAB license required to run the compiled version</li>
+    <li>Takes every static input file as an explicit named flag — no directory is bind-mounted whole and scanned; the calling orchestrator (<code>run_mur_pipeline.py</code> locally, <code>run_mur_maap.py</code> on MAAP) resolves and passes each of the six static files individually</li>
+    <li>Each <code>--*-file</code> flag value may be either a local filesystem path (local <code>docker run</code>, bind-mounted) or an <code>s3://</code> href (MAAP, or any environment with S3 access) — the container fetches <code>s3://</code> values to local scratch space itself before MATLAB runs, so the same image works unchanged in either environment (see <a href="#container-features">Container Features</a> below)</li>
+    <li>Optimized with shared memory configuration for MATLAB Runtime performance</li>
+    </ul>
+    <h2 id="quick-start-containerized-deployment-recommended">Quick Start - Containerized Deployment (Recommended)</h2>
+    <h3 id="build-and-run">Build and Run</h3>
+    <p><strong>⚠️ Important:</strong> The build process requires a valid MATLAB license server connection during compilation. If the license server is unreachable, the build may hang at the compilation step. Copy <code>network.lic.example</code> to <code>mur/network.lic</code> and point it at your license server before the first build.</p>
+    <pre><code class="language-bash"># Build with build_module.sh from the mur/ directory
+    cd mur
+    ./build_module.sh landice
+
+    # Run — every static input is an explicit flag, bind-mounted individually
+    docker run --rm --shm-size=512M \
+      -e OSISAF_FTP_ARCHIVE="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
+      -e OSISAF_FTP_PROD="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
+      -v /path/to/static-resources/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro \
+      -v /path/to/static-resources/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro \
+      -v /path/to/static-resources/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro \
+      -v /path/to/static-resources/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro \
+      -v /path/to/static-resources/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro \
+      -v /path/to/static-resources/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro \
+      -v /path/to/output/p011:/output/p011 \
+      -v /path/to/output/p01:/output/p01 \
+      mur-landice:latest \
+      --year 2024 --doy 100 \
+      --landmask-p01-file /input/landmask-p01.gds \
+      --gridindex-north-p01-file /input/gridindex-north-p01.mat \
+      --gridindex-south-p01-file /input/gridindex-south-p01.mat \
+      --landmask-p011-file /input/landmask-p011.gds \
+      --gridindex-north-p011-file /input/gridindex-north-p011.mat \
+      --gridindex-south-p011-file /input/gridindex-south-p011.mat</code></pre>
+    <p>See <a href="static-data.html">Static input data</a> for where the six static files (<code>grids/maskGLOBp01deg.gds</code>, <code>mat/p01/saf2north.mat</code>, etc.) come from and their full-tree layout.</p>
+    <h4 id="manual-build-advanced">Manual Build (Advanced)</h4>
+    <p><code>build_module.sh</code> is the supported path. Build by hand only for a custom tag, external CI, or Dockerfile debugging — the build context must be the parent <code>mur</code> directory so the Dockerfile can reach <code>common/</code>, and the <code>mur-matlab-base:r2024b</code> image must already exist (<code>./build_matlab_base.sh</code> from <code>mur/</code>):</p>
+    <pre><code class="language-bash">cd mur/landice
+    docker build --platform linux/amd64 -f Dockerfile -t mur-landice:latest ..
+
+    # Or with Apple's container tools on macOS:
+    # container build --arch amd64 -f Dockerfile -t mur-landice:latest ..</code></pre>
+    <p>See <a href="configuration.html#manual-builds-advanced">Manual Builds (Advanced)</a> and <a href="container-landice.html#building-the-image">Building the image</a> for the in-container <code>mcc</code> workflow.</p>
+    <h3 id="container-features">Container Features</h3>
+    <ul>
+    <li><strong>Explicit named inputs</strong>: every static file (landmask + grid-index files, both resolutions) is its own <code>--flag</code>; there is no directory mount to scan</li>
+    <li><strong>Named args only</strong>: <code>--year</code>/<code>--doy</code> plus the six file flags — no positional-argument form is accepted</li>
+    <li><strong>Local-path or S3-href inputs, uniformly</strong>: <code>entrypoint.sh</code> sources the shared <code>common/bin/localize.sh</code> helper and resolves each of the six file flags before MATLAB runs — a value starting with <code>s3://</code> is fetched to local scratch space (via <code>aws s3 cp</code>) and the local path substituted; any other value is assumed to already be a local path (e.g. a bind mount) and passed through unchanged. AWS credentials come from the standard AWS credential chain — environment variables (<code>AWS_ACCESS_KEY_ID</code>/<code>AWS_SECRET_ACCESS_KEY</code>/<code>AWS_SESSION_TOKEN</code>) for local dev, an IAM role automatically when running on AWS/MAAP compute — no extra flags or config needed either way.</li>
+    <li><strong>Automatic processing</strong>: Processes both P01 and P011 grids in a single run</li>
+    <li><strong>Optimized performance</strong>: Requires <code>--shm-size=512M</code> for MATLAB Runtime (mandatory)</li>
+    <li><strong>No license required</strong>: Self-contained with MATLAB Runtime R2024b</li>
+    <li><strong>Memory optimization</strong>: Supports configurable memory limits and Java heap settings</li>
+    </ul>
+    <h2 id="requirements">Requirements</h2>
+    <h3 id="for-containerized-deployment">For Containerized Deployment</h3>
+    <ul>
+    <li>Docker</li>
+    <li>The six static input files (see <a href="static-data.html">Static input data</a>)</li>
+    <li>Output directories (one per resolution: <code>p011</code>, <code>p01</code>)</li>
+    </ul>
+    <h3 id="for-development">For Development</h3>
+    <ul>
+    <li>MATLAB R2024b with MATLAB Compiler</li>
+    <li>Access to MATLAB license server</li>
+    </ul>
+    <h2 id="usage-examples">Usage Examples</h2>
+    <h3 id="basic-usage">Basic Usage</h3>
+    <pre><code class="language-bash"># Process day 150 of 2024
+    docker run --rm --shm-size=512M \
+      -v /data/static-resources/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro \
+      -v /data/static-resources/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro \
+      -v /data/static-resources/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro \
+      -v /data/static-resources/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro \
+      -v /data/static-resources/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro \
+      -v /data/static-resources/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro \
+      -v /data/output/p011:/output/p011 \
+      -v /data/output/p01:/output/p01 \
+      mur-landice:latest \
+      --year 2024 --doy 150 \
+      --landmask-p01-file /input/landmask-p01.gds \
+      --gridindex-north-p01-file /input/gridindex-north-p01.mat \
+      --gridindex-south-p01-file /input/gridindex-south-p01.mat \
+      --landmask-p011-file /input/landmask-p011.gds \
+      --gridindex-north-p011-file /input/gridindex-north-p011.mat \
+      --gridindex-south-p011-file /input/gridindex-south-p011.mat</code></pre>
+    <h3 id="with-custom-osi-saf-endpoints">With Custom OSI SAF Endpoints</h3>
+    <pre><code class="language-bash">docker run --rm --shm-size=512M \
+      -e OSISAF_FTP_REPROCESSED="ftp://your-server/reprocessed" \
+      -e OSISAF_FTP_ARCHIVE="ftp://your-server/archive" \
+      -e OSISAF_FTP_PROD="ftp://your-server/prod" \
+      -v /data/static-resources/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro \
+      -v /data/static-resources/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro \
+      -v /data/static-resources/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro \
+      -v /data/static-resources/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro \
+      -v /data/static-resources/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro \
+      -v /data/static-resources/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro \
+      -v /data/output/p011:/output/p011 \
+      -v /data/output/p01:/output/p01 \
+      mur-landice:latest \
+      --year 2024 --doy 150 \
+      --landmask-p01-file /input/landmask-p01.gds \
+      --gridindex-north-p01-file /input/gridindex-north-p01.mat \
+      --gridindex-south-p01-file /input/gridindex-south-p01.mat \
+      --landmask-p011-file /input/landmask-p011.gds \
+      --gridindex-north-p011-file /input/gridindex-north-p011.mat \
+      --gridindex-south-p011-file /input/gridindex-south-p011.mat</code></pre>
+    <h3 id="with-performance-optimization">With Performance Optimization</h3>
+    <pre><code class="language-bash">docker run --rm \
+      --memory=4g \
+      --memory-reservation=2g \
+      --memory-swap=6g \
+      --shm-size=512M \
+      --cpus="2.0" \
+      -e MCR_CACHE_ROOT=/tmp/mcr_cache \
+      -e MCR_CACHE_SIZE=1024M \
+      -e _JAVA_OPTIONS="-Xmx2048m -Xms512m -XX:+UseG1GC" \
+      -e OSISAF_FTP_ARCHIVE="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
+      -e OSISAF_FTP_PROD="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
+      -v /data/static-resources/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro \
+      -v /data/static-resources/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro \
+      -v /data/static-resources/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro \
+      -v /data/static-resources/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro \
+      -v /data/static-resources/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro \
+      -v /data/static-resources/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro \
+      -v /data/output/p011:/output/p011 \
+      -v /data/output/p01:/output/p01 \
+      mur-landice:latest \
+      --year 2024 --doy 150 \
+      --landmask-p01-file /input/landmask-p01.gds \
+      --gridindex-north-p01-file /input/gridindex-north-p01.mat \
+      --gridindex-south-p01-file /input/gridindex-south-p01.mat \
+      --landmask-p011-file /input/landmask-p011.gds \
+      --gridindex-north-p011-file /input/gridindex-north-p011.mat \
+      --gridindex-south-p011-file /input/gridindex-south-p011.mat</code></pre>
+    <h2 id="batch-processing">Batch Processing</h2>
+    <p>For processing multiple days, create a simple bash script:</p>
+    <pre><code class="language-bash">#!/bin/bash
+    YEAR=2024
+    START_DOY=1
+    END_DOY=365
+    STATIC=/data/static-resources
+
+    for DOY in $(seq $START_DOY $END_DOY); do
+        echo "Processing Year: $YEAR, DOY: $DOY"
+
+        docker run --rm --shm-size=512M \
+            -e OSISAF_FTP_ARCHIVE="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
+            -e OSISAF_FTP_PROD="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
+            -v "$STATIC/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro" \
+            -v "$STATIC/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro" \
+            -v "$STATIC/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro" \
+            -v "$STATIC/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro" \
+            -v "$STATIC/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro" \
+            -v "$STATIC/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro" \
+            -v /data/output/p011:/output/p011 \
+            -v /data/output/p01:/output/p01 \
+            mur-landice:latest \
+            --year "$YEAR" --doy "$DOY" \
+            --landmask-p01-file /input/landmask-p01.gds \
+            --gridindex-north-p01-file /input/gridindex-north-p01.mat \
+            --gridindex-south-p01-file /input/gridindex-south-p01.mat \
+            --landmask-p011-file /input/landmask-p011.gds \
+            --gridindex-north-p011-file /input/gridindex-north-p011.mat \
+            --gridindex-south-p011-file /input/gridindex-south-p011.mat
+
+        if [ $? -ne 0 ]; then
+            echo "Error processing Year: $YEAR, DOY: $DOY"
+        fi
+    done</code></pre>
+    <p>In practice, <code>run_mur_pipeline.py</code> already does this per-day looping and flag construction for you — see the main <a href="https://github.com/podaac/mur#production-style-pipeline-orchestrator">the project README</a>.</p>
+    <h2 id="environment-variables">Environment Variables</h2>
+    <p>The application uses these environment variables to locate OSI-SAF ice concentration data. OSI-SAF's anonymous FTP host is dead — connections to <code>ftp://osisaf.met.no</code> time out — so the defaults are HTTPS THREDDS endpoints. The names keep their <code>_FTP_</code> spelling because they are part of the container's published interface; <code>readosisafice.m</code> dispatches on the URL scheme, so an <code>ftp://</code> value still works if one is supplied.</p>
+    <ul>
+    <li><code>OSISAF_FTP_ARCHIVE</code>: recent days (default: <code>https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc</code>)</li>
+    <li><code>OSISAF_FTP_PROD</code>: current day (default: same as archive)</li>
+    <li><code>OSISAF_FTP_REPROCESSED</code>: pre-2009 dates — <strong>no default</strong>. The <code>polstere-100</code> "reproc" product this once pointed at has no verified HTTPS equivalent on thredds.met.no, so historical reprocessing must supply it explicitly rather than inherit a dead URL.</li>
+    </ul>
+    <div class="note">
+    <p><strong>Note on the <code>amsr2_conc</code> path:</strong> despite the name, that tree serves AMSR3 files from 2026-08-31 onward. <code>readosisafice.m</code> selects the <code>amsr2</code>/<code>amsr3</code> filename token by date; the cutover is overridable with <code>OSISAF_AMSR3_START=YYYYMMDD</code>.</p>
+    </div>
+    <h2 id="directory-structure">Directory Structure</h2>
+    <pre><code>landice/
+    ├── src/
+    │   ├── landice_wrapper.m      # Compiled entry point — accepts the six explicit static file paths
+    │   ├── makeicefiles.m         # Ice file generation (core logic)
+    │   ├── readosisafice.m        # OSI SAF data reader and downloader
+    │   └── setup_environment.m    # Environment setup
+    ├── bin/
+    │   └── entrypoint.sh          # Named-args-only container entrypoint; localizes s3:// inputs before invoking MATLAB
+    ├── tests/
+    │   ├── test_entrypoint.sh     # Entrypoint argument-parsing + localization unit tests
+    │   ├── in/, out/               # Test fixtures
+    │   └── compare_outputs.py, validate_containerized.sh, test_execute_landice.py
+    └── Dockerfile                 # Multi-stage build (MATLAB compiler → runtime-only image, includes AWS CLI)
+
+    ../common/
+    ├── bin/
+    │   └── localize.sh            # Shared s3://-or-local-path resolver, sourced by entrypoint.sh (also used by other containers as they're converted)
+    └── *.m                        # Shared MATLAB utilities (compiled into the MATLAB build stage)</code></pre>
+    <h2 id="documentation">Documentation</h2>
+    <ul>
+    <li><strong><a href="container-landice.html#building-the-image">Building the image</a></strong> - Complete build instructions for development</li>
+    <li><strong><a href="container-landice.html#deployment">Deployment</a></strong> - Production deployment guide with Docker Compose and Kubernetes examples</li>
+    <li><strong><a href="static-data.html">Static input data</a></strong> - Where the six static input files live and how they're laid out</li>
+    </ul>
+    <h2 id="production-deployment">Production Deployment</h2>
+    <h3 id="docker-compose">Docker Compose</h3>
+    <p>Create <code>docker-compose.yml</code>:</p>
+    <pre><code class="language-yaml">version: '3.8'
+
+    services:
+      landice:
+        image: mur-landice:latest
+        environment:
+          - OSISAF_FTP_REPROCESSED=${OSISAF_FTP_REPROCESSED}
+          - OSISAF_FTP_ARCHIVE=${OSISAF_FTP_ARCHIVE}
+          - OSISAF_FTP_PROD=${OSISAF_FTP_PROD}
+        volumes:
+          - ${STATIC_RESOURCES_DIR}/grids/maskGLOBp01deg.gds:/input/landmask-p01.gds:ro
+          - ${STATIC_RESOURCES_DIR}/mat/p01/saf2north.mat:/input/gridindex-north-p01.mat:ro
+          - ${STATIC_RESOURCES_DIR}/mat/p01/saf2south.mat:/input/gridindex-south-p01.mat:ro
+          - ${STATIC_RESOURCES_DIR}/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro
+          - ${STATIC_RESOURCES_DIR}/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro
+          - ${STATIC_RESOURCES_DIR}/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro
+          - ${OUTPUT_DIR_P011}:/output/p011
+          - ${OUTPUT_DIR_P01}:/output/p01
+        command:
+          - "--year"
+          - "${YEAR}"
+          - "--doy"
+          - "${DOY}"
+          - "--landmask-p01-file"
+          - "/input/landmask-p01.gds"
+          - "--gridindex-north-p01-file"
+          - "/input/gridindex-north-p01.mat"
+          - "--gridindex-south-p01-file"
+          - "/input/gridindex-south-p01.mat"
+          - "--landmask-p011-file"
+          - "/input/landmask-p011.gds"
+          - "--gridindex-north-p011-file"
+          - "/input/gridindex-north-p011.mat"
+          - "--gridindex-south-p011-file"
+          - "/input/gridindex-south-p011.mat"
+        shm_size: '512m'</code></pre>
+    <h3 id="kubernetes">Kubernetes</h3>
+    <p>Deploy as a Job:</p>
+    <pre><code class="language-yaml">apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: landice-processor
+    spec:
+      template:
+        spec:
+          containers:
+          - name: landice
+            image: mur-landice:latest
+            args:
+              - "--year"
+              - "2024"
+              - "--doy"
+              - "100"
+              - "--landmask-p01-file"
+              - "/input/landmask-p01.gds"
+              - "--gridindex-north-p01-file"
+              - "/input/gridindex-north-p01.mat"
+              - "--gridindex-south-p01-file"
+              - "/input/gridindex-south-p01.mat"
+              - "--landmask-p011-file"
+              - "/input/landmask-p011.gds"
+              - "--gridindex-north-p011-file"
+              - "/input/gridindex-north-p011.mat"
+              - "--gridindex-south-p011-file"
+              - "/input/gridindex-south-p011.mat"
+            env:
+            - name: OSISAF_FTP_ARCHIVE
+              value: "https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc"
+            - name: OSISAF_FTP_PROD
+              value: "https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc"
+            volumeMounts:
+            - name: static-resources
+              mountPath: /input
+              readOnly: true
+            - name: output-p011
+              mountPath: /output/p011
+            - name: output-p01
+              mountPath: /output/p01
+            resources:
+              requests:
+                memory: "2Gi"
+                cpu: "1"
+              limits:
+                memory: "4Gi"
+                cpu: "2"
+          restartPolicy: OnFailure</code></pre>
+    <p>(The example mounts a directory at <code>/input</code> for brevity here — in practice each <code>--*-file</code> flag should point at an individually-mounted file, matching the <code>docker run</code> examples above, so nothing inside the container ever scans a directory to find its inputs.)</p>
+    <h2 id="troubleshooting">Troubleshooting</h2>
+    <h3 id="build-issues">Build Issues</h3>
+    <p><strong>Build hangs during compilation:</strong></p>
+    <ul>
+    <li>Check MATLAB license server connectivity</li>
+    <li>Ensure valid MATLAB Compiler license is available</li>
+    <li>Verify network access to license servers (may require VPN)</li>
+    </ul>
+    <h3 id="runtime-issues">Runtime Issues</h3>
+    <p><strong>Memory errors:</strong></p>
+    <pre><code class="language-bash"># Increase memory allocation (append to any of the examples above)
+    docker run --rm \
+      --shm-size=512M \
+      --memory="8g" \
+      --memory-swap="16g" \
+      ... \
+      mur-landice:latest \
+      --year 2024 --doy 100 \
+      --landmask-p01-file /input/landmask-p01.gds \
+      --gridindex-north-p01-file /input/gridindex-north-p01.mat \
+      --gridindex-south-p01-file /input/gridindex-south-p01.mat \
+      --landmask-p011-file /input/landmask-p011.gds \
+      --gridindex-north-p011-file /input/gridindex-north-p011.mat \
+      --gridindex-south-p011-file /input/gridindex-south-p011.mat</code></pre>
+    <p><strong>Permission issues:</strong></p>
+    <pre><code class="language-bash"># Run with user permissions
+    docker run --rm \
+      --shm-size=512M \
+      --user $(id -u):$(id -g) \
+      ... \
+      mur-landice:latest \
+      --year 2024 --doy 100 \
+      --landmask-p01-file /input/landmask-p01.gds \
+      --gridindex-north-p01-file /input/gridindex-north-p01.mat \
+      --gridindex-south-p01-file /input/gridindex-south-p01.mat \
+      --landmask-p011-file /input/landmask-p011.gds \
+      --gridindex-north-p011-file /input/gridindex-north-p011.mat \
+      --gridindex-south-p011-file /input/gridindex-south-p011.mat</code></pre>
+    <p><strong>Missing/unknown-flag errors:</strong> all nine flags (<code>--year</code>, <code>--doy</code>, and the six <code>--*-file</code> flags) are required — positional arguments are no longer accepted. Run <code>docker run --rm mur-landice:latest</code> with no arguments to see the usage message.</p>
+    <h2 id="resolution-notes">Resolution Notes</h2>
+    <p>The landice container generates two grid resolutions per run:</p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Resolution</th><th>Grid</th><th>Output directory</th><th>Filename pattern</th><th>Used by</th></tr></thead>
+    <tbody>
+    <tr><td><strong>p01</strong> (0.01°)</td><td><code>maskGLOBp01deg.gds</code></td><td><code>land/p01/YYYY/</code></td><td><code>landiceP01_YYYY_DDD.gds.gz</code></td><td><strong>MUR v4</strong> (current)</td></tr>
+    <tr><td><strong>p011</strong> (0.011°/~1km)</td><td><code>maskGlob1km.gds</code></td><td><code>land/p011/YYYY/</code></td><td><code>landice_YYYY_DDD.gds.gz</code></td><td>MUR v3 (legacy, not used)</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Only p01 output is used by the current MUR v4 pipeline.</strong> The p011 resolution is a legacy artifact from MUR v3 (0.011° product). The MRVA container mounts only the <code>land/p01/</code> subdirectory and expects <code>landiceP01_</code> prefixed filenames. The p011 output is generated but not consumed by any current processing stage.</p>
+    <p>In the original production system, both resolutions were written to the same flat directory (<code>/nas2/landice/YYYY/</code>), so the <code>P01</code> filename prefix was necessary to distinguish them. In the containerized setup, they are separated into <code>land/p01/</code> and <code>land/p011/</code> subdirectories, making the prefix redundant — but it is retained for compatibility with the MRVA MATLAB code that expects it.</p>
+    <h2 id="general-notes">General Notes</h2>
+    <ul>
+    <li>Execution time is logged for monitoring purposes</li>
+    <li>Container uses MATLAB Runtime R2024b - no MATLAB license required for execution</li>
+    <li>Shared memory (<code>--shm-size=512M</code>) is mandatory for MATLAB Runtime</li>
+    <li>Every static input is passed as its own bind-mounted file and named flag — nothing is discovered by scanning a directory</li>
+    <li>Each of the two output directories (<code>p011</code>, <code>p01</code>) will contain the processed land ice files for that resolution</li>
+    </ul>
+    <h2 id="building-the-image">Building the image</h2>
+    <h3 id="quick-start-recommended">Quick Start (Recommended)</h3>
+    <p>Build with <code>build_module.sh</code> from the <code>mur/</code> directory. It builds the <code>mur-matlab-base:r2024b</code> image if missing, checks <code>network.lic</code>, sets <code>--platform linux/amd64</code>, uses the parent <code>mur/</code> directory as build context (so the Dockerfile can reach <code>common/</code>), and tags the image <code>mur-landice:latest</code>:</p>
+    <pre><code class="language-bash">cd mur
+    ./build_module.sh landice</code></pre>
+    <p>Run it (see the usage examples above for the full named-flag invocation):</p>
+    <pre><code class="language-bash">docker run --rm --shm-size=512M \
+      -v /path/to/static-resources:/input:ro \
+      -v /path/to/output:/output \
+      mur-landice:latest \
+      --year 2024 --doy 100 ...</code></pre>
+    <p>For a raw <code>docker build</code> — custom tags, external CI, Dockerfile debugging — see <a href="configuration.html#manual-builds-advanced">Manual Builds (Advanced)</a>:</p>
+    <pre><code class="language-bash">cd mur/landice
+    docker build --platform linux/amd64 -f Dockerfile -t mur-landice:latest ..</code></pre>
+    <h3 id="manual-compilation-process-advanced">Manual Compilation Process (Advanced)</h3>
+    <p>The rest of this document covers compiling the MATLAB application <strong>by hand inside a development container</strong> — useful when debugging <code>mcc</code> dependency problems or toolbox requirements, not part of the normal build path. The single <code>landice/Dockerfile</code> does all of this automatically; the <code>Dockerfile.matlab</code> / <code>Dockerfile.runtime</code> split described below is historical, so adapt the commands to the current Dockerfile's builder stage.</p>
+    <h3 id="prerequisites">Prerequisites</h3>
+    <ul>
+    <li>Docker installed on your system</li>
+    <li>Access to MATLAB license server</li>
+    <li>Network connectivity to download MATLAB toolboxes</li>
+    </ul>
+    <p>Find the required toolboxes with</p>
+    <pre><code class="language-matlab">
+    [files, products] = matlab.codetools.requiredFilesAndProducts('myScript.m');
+
+    % Display required toolboxes
+    for i = 1:length(products)
+        fprintf('Required: %s\n', products(i).Name);
+    end</code></pre>
+    <h3 id="building-the-matlab-development-container">Building the MATLAB Development Container</h3>
+    <h4 id="1-build-the-docker-image">1. Build the Docker Image</h4>
+    <p><strong>Note:</strong> <code>Dockerfile.matlab</code> no longer exists. The equivalent today is the builder stage of <code>landice/Dockerfile</code>, or the shared base image <code>mur-matlab-base:r2024b</code> built by <code>./build_matlab_base.sh</code>. Either gives you MATLAB R2024b + Compiler with <code>common/</code> available:</p>
+    <pre><code class="language-bash"># Build the shared MATLAB base image (from mur/)
+    cd mur
+    ./build_matlab_base.sh
+
+    # Or stop the landice build at its builder stage
+    cd mur/landice
+    docker build --platform linux/amd64 --target builder -t matlab-landice:r2024b -f Dockerfile ..</code></pre>
+    <p>Both build with the parent <code>mur</code> directory as context, which is what lets the Dockerfile reach <code>landice/</code> and <code>common/</code>. Substitute whichever image you built for <code>matlab-landice:r2024b</code> in the commands below.</p>
+    <h4 id="2-run-interactive-terminal-session">2. Run Interactive Terminal Session</h4>
+    <pre><code class="language-bash"># Run container with volume mounting
+    # Builds to /tmp inside container to avoid permission issues
+    docker run -it --rm \
+      -v $(pwd):/app/landice \
+      matlab-landice:r2024b</code></pre>
+    <p>Note:</p>
+    <ul>
+    <li>Container runs as the <code>matlab</code> user (not root) to comply with license server restrictions</li>
+    <li>Build process uses <code>/tmp</code> to avoid volume mount permission issues</li>
+    </ul>
+    <h4 id="3-build-the-landice-application-inside-container">3. Build the LandIce Application Inside Container</h4>
+    <p>Once inside the container terminal:</p>
+    <pre><code class="language-bash"># Navigate to the landice directory
+    cd /app/landice
+
+    # Method 1: Build to temp location and copy back (recommended)
+    # This avoids volume mount permission issues
+    # -C flag creates separate CTF file for faster runtime extraction
+    mkdir -p /tmp/landice_build
+    mcc -m src/landice_wrapper.m \
+        -a src/makeicefiles.m \
+        -a src/readosisafice.m \
+        -a src/setup_environment.m \
+        -a src/julian.m \
+        -o LandIce \
+        -d /tmp/landice_build \
+        -C \
+        -R -nodisplay \
+        -R -nosplash
+
+    # Copy the compiled files back to the mounted volume
+    cp -R /tmp/landice_build/LandIce ./build</code></pre>
+    <p>Alternative methods:</p>
+    <pre><code class="language-bash"># Method 2: Auto-detect dependencies (build to temp and copy)
+    mkdir -p /tmp/landice_build
+    mcc -m -v -d /tmp/landice_build -o LandIce src/landice_wrapper.m
+    mkdir -p ./build &amp;&amp; cp /tmp/landice_build/* ./build/
+
+    # Method 3: Interactive MATLAB (if needed for debugging)
+    matlab -nodisplay -nosplash
+    # In MATLAB:
+    # &gt;&gt; mcc -m src/landice_wrapper.m -a src/makeicefiles.m -a src/readosisafice.m -a src/setup_environment.m -a src/julian.m -o LandIce -d /tmp/landice_build
+    # &gt;&gt; exit
+    # Then copy files: cp /tmp/landice_build/* ./build/</code></pre>
+    <p><strong>Notes</strong>:</p>
+    <ul>
+    <li>Building to <code>/tmp/landice_build</code> avoids volume mount permission issues completely</li>
+    <li>The <code>-m</code> flag creates a standalone executable binary (not an installer)</li>
+    <li>The <code>-C</code> flag creates a separate CTF archive for faster runtime extraction</li>
+    <li>The <code>-n</code> flag automatically treats numeric command line arguments as MATLAB doubles (solves string conversion issues)</li>
+    <li>The resulting executable only requires MATLAB Runtime R2024b, not full MATLAB</li>
+    <li>The <code>-v</code> flag provides verbose output for troubleshooting</li>
+    <li>MATLAB R2015b+ automatically finds dependencies, so <code>-a</code> for each file may not be necessary</li>
+    <li>Files are copied back to <code>./build/</code> which is accessible from the host system</li>
+    </ul>
+    <p><strong>Output Files</strong>: The compilation will produce:</p>
+    <ul>
+    <li><code>LandIce</code> - The standalone executable binary (no installer)</li>
+    <li><code>LandIce.ctf</code> - Separate CTF (Component Technology File) archive for faster runtime extraction</li>
+    <li><code>run_LandIce.sh</code> - Shell script wrapper that sets up environment variables</li>
+    <li><code>readme.txt</code> - Runtime requirements and deployment instructions</li>
+    <li><code>requiredMCRProducts.txt</code> - List of required MATLAB Runtime components</li>
+    </ul>
+    <h3 id="running-the-compiled-executable">Running the Compiled Executable</h3>
+    <h4 id="direct-execution-with-matlab-runtime-installed">Direct Execution (with MATLAB Runtime installed)</h4>
+    <pre><code class="language-bash"># Using the wrapper script (recommended - handles environment setup)
+    # MCR path may vary by installation - check your system
+    ./build/run_LandIce.sh /usr/local/MATLAB/MATLAB_Runtime/R2024b input_dir /path/to/input output_dir /path/to/output year 2024 doy 100
+
+    # Alternative common MCR paths:
+    ./build/run_LandIce.sh /opt/mcr/R2024b input_dir /path/to/input output_dir /path/to/output year 2024 doy 100
+
+    # Or directly (requires LD_LIBRARY_PATH to be set)
+    export MCR_ROOT=/usr/local/MATLAB/MATLAB_Runtime/R2024b
+    export LD_LIBRARY_PATH=$MCR_ROOT/runtime/glnxa64:$MCR_ROOT/bin/glnxa64:$MCR_ROOT/sys/os/glnxa64:$LD_LIBRARY_PATH
+    ./build/LandIce input_dir /path/to/input output_dir /path/to/output year 2024 doy 100</code></pre>
+    <p><strong>Note</strong>: When running the compiled executable directly (not in container), you need to specify input and output paths. The container entrypoint automatically handles this by passing <code>input_dir /input output_dir /output</code> to the application.</p>
+    <p><strong>Important</strong>:</p>
+    <ul>
+    <li>The executable is a binary file, NOT an installer</li>
+    <li>It only requires MATLAB Runtime R2024b to be installed</li>
+    <li>No MATLAB license is needed to run the compiled executable</li>
+    <li>The runtime can be freely distributed</li>
+    <li>MCR installation path varies by system - check your actual installation location</li>
+    </ul>
+    <h3 id="building-runtime-only-container">Building Runtime-Only Container</h3>
+    <h4 id="1-create-runtime-dockerfile">1. Create Runtime Dockerfile</h4>
+    <p><strong>Historical:</strong> the current <code>landice/Dockerfile</code> already produces the runtime image as its final stage, so this step is not needed for a normal build. Kept as a reference for standalone runtime images. Create <code>Dockerfile.runtime</code>:</p>
+    <pre><code class="language-dockerfile">FROM containers.mathworks.com/matlab-runtime:r2024b
+
+    # Copy compiled application
+    COPY --from=matlab-landice:r2024b /app/landice/LandIce/for_testing /opt/landice
+
+    # Set environment variables
+    ENV LD_LIBRARY_PATH="/opt/mcr/v913/runtime/glnxa64:/opt/mcr/v913/bin/glnxa64:/opt/mcr/v913/sys/os/glnxa64:${LD_LIBRARY_PATH}"
+
+    # Create working directory
+    WORKDIR /data
+
+    # Set entrypoint to the application
+    ENTRYPOINT ["/opt/landice/run_LandIce.sh", "/opt/mcr/v913"]</code></pre>
+    <h4 id="2-build-runtime-container">2. Build Runtime Container</h4>
+    <pre><code class="language-bash">docker build -f Dockerfile.runtime -t landice-runtime:latest .</code></pre>
+    <h4 id="3-run-the-application">3. Run the Application</h4>
+    <pre><code class="language-bash">docker run --rm \
+      --shm-size=512M \
+      -v /path/to/input:/input:ro \
+      -v /path/to/output:/output \
+      landice-runtime:latest \
+      year 2024 \
+      doy 100</code></pre>
+    <h3 id="environment-variables-required">Environment Variables Required</h3>
+    <p>The application expects these environment variables to be set:</p>
+    <ul>
+    <li><code>OSISAF_FTP_REPROCESSED</code>: FTP path for reprocessed data</li>
+    <li><code>OSISAF_FTP_ARCHIVE</code>: FTP path for archive data</li>
+    <li><code>OSISAF_FTP_PROD</code>: FTP path for production data</li>
+    </ul>
+    <p>Set these in the Docker run command:</p>
+    <pre><code class="language-bash">docker run --rm \
+      --shm-size=512M \
+      -e OSISAF_FTP_REPROCESSED="ftp://example.com/reprocessed" \
+      -e OSISAF_FTP_ARCHIVE="ftp://example.com/archive" \
+      -e OSISAF_FTP_PROD="ftp://example.com/prod" \
+      -v /path/to/input:/input:ro \
+      -v /path/to/output:/output \
+      landice-runtime:latest \
+      year 2024 \
+      doy 100</code></pre>
+    <h3 id="troubleshooting-1">Troubleshooting</h3>
+    <h4 id="license-server-connection-issues">License Server Connection Issues</h4>
+    <p>If you get license errors, ensure:</p>
+    <ol>
+    <li>The container can reach the license server</li>
+    <li>The license server hostname is resolvable</li>
+    <li>Port 7282 is accessible</li>
+    </ol>
+    <h4 id="memory-issues">Memory Issues</h4>
+    <p>If MATLAB crashes or behaves unexpectedly, increase shared memory:</p>
+    <pre><code class="language-bash">docker run -it --rm --shm-size=4gb matlab-landice:r2024b</code></pre>
+    <h4 id="compilation-errors">Compilation Errors</h4>
+    <p>If compilation fails, check:</p>
+    <ol>
+    <li>All source files are present in the container</li>
+    <li>The project file paths are correct</li>
+    <li>Required toolboxes are installed</li>
+    </ol>
+    <p>Verify toolboxes:</p>
+    <pre><code class="language-bash">docker run --rm matlab-landice:r2024b matlab -batch "ver"</code></pre>
+    <h2 id="deployment">Deployment</h2>
+    <h3 id="overview-1">Overview</h3>
+    <p>This guide explains how to deploy the compiled LandIce MATLAB application in a lightweight runtime container that only includes the MATLAB Runtime (MCR), not the full MATLAB installation.</p>
+    <p>The container uses fixed paths:</p>
+    <ul>
+    <li><code>/input</code> - Mount your input data here (read-only)</li>
+    <li><code>/output</code> - Mount your output directory here</li>
+    <li>Only <code>year</code> and <code>doy</code> arguments are required as positional parameters - the entrypoint automatically maps <code>/input</code> and <code>/output</code> directories</li>
+    </ul>
+    <h3 id="building-containers">Building Containers</h3>
+    <p>Build with <code>build_module.sh</code> from the <code>mur/</code> directory — it handles the base image, license check, platform flag, build context, and the <code>mur-landice:latest</code> tag the pipeline config expects:</p>
+    <pre><code class="language-bash">cd mur
+    ./build_module.sh landice</code></pre>
+    <h4 id="manual-build-advanced-1">Manual Build (Advanced)</h4>
+    <p>Only for custom tags, external CI, or Dockerfile debugging.</p>
+    <p><strong>IMPORTANT:</strong> The Dockerfile references shared utilities from the <code>../common</code> folder, so the build context must include the parent <code>mur</code> directory. Build from within the landice directory and set the context to the parent (<code>..</code>). The <code>mur-matlab-base:r2024b</code> image must already exist — run <code>./build_matlab_base.sh</code> from <code>mur/</code> first.</p>
+    <pre><code class="language-bash"># Navigate to the landice directory
+    cd mur/landice
+
+    # Build with Docker specifying the platform
+    docker build --platform linux/amd64 -f Dockerfile -t mur-landice:latest ..
+
+    # Or, on macOS with Apple's container tools, build for AMD64
+    container build --arch amd64 -f Dockerfile -t mur-landice:latest ..</code></pre>
+    <p><strong>Note:</strong> The <code>..</code> at the end sets the build context to the parent <code>mur</code> directory, which allows the Dockerfile to access both <code>landice/</code> and <code>common/</code> folders. When building AMD64 containers on Apple Silicon Macs, the <code>--arch amd64</code> flag ensures the container is built for x86_64 architecture, which may be required for compatibility with production environments.</p>
+    <h3 id="deployment-options">Deployment Options</h3>
+    <h4 id="option-1-multi-stage-build-recommended">Option 1: Multi-Stage Build (Recommended)</h4>
+    <p>Build and deploy in a single Docker build process:</p>
+    <p><strong>⚠️ Important License Warning:</strong> The build process requires a valid MATLAB license server connection during compilation. If the license server is unreachable or the license cannot be obtained, the build may hang indefinitely at the compilation step. Ensure:</p>
+    <ul>
+    <li>Your network can reach the MATLAB license servers</li>
+    <li>You have valid MATLAB and MATLAB Compiler licenses</li>
+    <li>The <code>network.lic</code> file exists in the parent directory (copy from <code>network.lic.example</code>)</li>
+    </ul>
+    <pre><code class="language-bash"># Build the multi-stage container
+    cd mur
+    ./build_module.sh landice
+
+    # Run the application
+    docker run --rm \
+      --memory=4g \
+      --memory-reservation=2g \
+      --memory-swap=6g \
+      --shm-size=512M \
+      --cpus="2.0" \
+      -e MCR_CACHE_ROOT=/tmp/mcr_cache \
+      -e MCR_CACHE_SIZE=1024M \
+      -e _JAVA_OPTIONS="-Xmx2048m -Xms512m -XX:+UseG1GC -XX:+UseStringDeduplication" \
+      -e OSISAF_FTP_ARCHIVE="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
+      -e OSISAF_FTP_PROD="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
+      -v $(pwd)/tests/in:/input:ro \
+      -v $(pwd)/tests/out:/output \
+      mur-landice:latest \
+      2024 101</code></pre>
+    <h3 id="performance-optimization">Performance Optimization</h3>
+    <h4 id="shared-memory-configuration-required">Shared Memory Configuration (Required)</h4>
+    <p>MATLAB Runtime requires shared memory to be set to 512MB for optimal performance:</p>
+    <pre><code class="language-bash">docker run --rm \
+      --shm-size=512M \
+      mur-landice:latest [arguments]</code></pre>
+    <h4 id="memory-settings">Memory Settings</h4>
+    <p>For large datasets, adjust Docker memory limits:</p>
+    <pre><code class="language-bash">docker run --rm \
+      --shm-size=512M \
+      --memory="4g" \
+      --memory-swap="4g" \
+      --cpus="2" \
+      mur-landice:latest [arguments]</code></pre>
+    <h4 id="mcr-cache-settings">MCR Cache Settings</h4>
+    <p>Optimize MATLAB Runtime cache:</p>
+    <pre><code class="language-bash">docker run --rm \
+      --shm-size=512M \
+      -e MCR_CACHE_SIZE=2048M \
+      -e MCR_CACHE_ROOT=/tmp/mcr_cache \
+      -v /fast/storage/mcr_cache:/tmp/mcr_cache \
+      mur-landice:latest [arguments]</code></pre>
+    <h3 id="monitoring-and-logging">Monitoring and Logging</h3>
+    <h4 id="enable-verbose-logging">Enable Verbose Logging</h4>
+    <pre><code class="language-bash">docker run --rm \
+      --shm-size=512M \
+      -e MCR_CACHE_VERBOSE=true \
+      mur-landice:latest [arguments] 2&gt;&amp;1 | tee landice_$(date +%Y%m%d_%H%M%S).log</code></pre>
+    <h4 id="health-check-script">Health Check Script</h4>
+    <pre><code class="language-bash">#!/bin/bash
+    # healthcheck.sh
+
+    docker run --rm mur-landice:latest -? &gt; /dev/null 2&gt;&amp;1
+    if [ $? -eq 0 ]; then
+        echo "LandIce container is healthy"
+        exit 0
+    else
+        echo "LandIce container health check failed"
+        exit 1
+    fi</code></pre>
+    <h3 id="troubleshooting-2">Troubleshooting</h3>
+    <h4 id="common-issues-and-solutions">Common Issues and Solutions</h4>
+    <ol>
+    <li><strong>Build Hangs During Compilation</strong> If the Docker build appears to hang at the <code>mcc</code> compilation step:
+    <pre><code class="language-bash"># Check license server connectivity from your host
+    telnet .....
+
+    # Or test with a simpler MATLAB command first
+    docker run --rm \
+      -e MLM_LICENSE_FILE={PORT}@{SERVER} \
+      mathworks/matlab:r2024b \
+      -batch "disp('License check successful')"</code></pre>
+    <p>Common causes:</p>
+    <ul>
+    <li>License server unreachable (network/firewall issues)</li>
+    <li>No available licenses</li>
+    <li>Incorrect license server configuration</li>
+    <li>VPN required for license server access</li>
+    </ul>
+    </li>
+    <li><strong>Missing Libraries</strong>
+    <pre><code class="language-bash"># Check for missing libraries
+    docker run --rm mur-landice:latest ldd /opt/landice/bin/LandIce</code></pre></li>
+    <li><strong>Permission Issues</strong>
+    <pre><code class="language-bash"># Ensure output directory is writable
+    docker run --rm \
+      --shm-size=512M \
+      --user $(id -u):$(id -g) \
+      -v /path/to/output:/output \
+      mur-landice:latest [arguments]</code></pre></li>
+    <li><strong>Network Issues</strong>
+    <pre><code class="language-bash"># Test connectivity to the OSI-SAF THREDDS endpoint. Do NOT test
+    # ftp://osisaf.met.no — that host is dead and the probe just hangs
+    # until it times out.
+    docker run --rm mur-landice:latest \
+      bash -c "curl -sS -o /dev/null -w '%{http_code}\n' -I \
+        https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc/2026/09/ice_conc_nh_polstere-100_amsr3_202609131200.nc"</code></pre></li>
+    <li><strong>Memory Issues</strong> Increase Docker memory allocation or use swap:
+    <pre><code class="language-bash">docker run --rm \
+      --shm-size=512M \
+      --memory="8g" \
+      --memory-swap="16g" \
+      mur-landice:latest [arguments]</code></pre></li>
+    </ol>
+    <h3 id="security-considerations">Security Considerations</h3>
+    <ol>
+    <li><strong>Run as Non-Root User</strong>
+    <pre><code class="language-dockerfile"># Add to Dockerfile.runtime
+    RUN useradd -m -u 1000 landice
+    USER landice</code></pre></li>
+    <li><strong>Read-Only Root Filesystem</strong>
+    <pre><code class="language-bash">docker run --rm \
+      --read-only \
+      --tmpfs /tmp \
+      mur-landice:latest [arguments]</code></pre></li>
+    <li><strong>Network Isolation</strong> Use Docker networks to isolate containers:
+    <pre><code class="language-bash">docker network create landice-net
+    docker run --rm --network=landice-net mur-landice:latest [arguments]</code></pre></li>
+    </ol>
+    <h2 id="reprocessing-past-dates">Reprocessing past dates</h2>
+    <h3 id="summary">Summary</h3>
+    <p>Different grid resolutions (p01 at 0.01° and p011 at 0.011°) have <strong>different reprocessing cutoff dates</strong>, which means they may pull ice concentration data from different FTP sources for the same calendar date.</p>
+    <h3 id="critical-dates">Critical Dates</h3>
+    <h4 id="p011-grid-0011-1km-resolution">p011 Grid (0.011° / ~1km resolution)</h4>
+    <ul>
+    <li><strong>Cutoff Date</strong>: 2006-12-31 (MJD = 54100)</li>
+    <li>Dates ≤ 2006-12-31: Use <strong>REPROCESSED</strong> FTP source (<code>*_reproc_*.nc</code> files)</li>
+    <li>Dates &gt; 2006-12-31: Use <strong>ARCHIVE/PROD</strong> FTP source (<code>*_multi_*.nc</code> files)</li>
+    </ul>
+    <h4 id="p01-grid-001-resolution">p01 Grid (0.01° resolution)</h4>
+    <ul>
+    <li><strong>Cutoff Date</strong>: 2008-12-31 (MJD = 54831)</li>
+    <li>Dates ≤ 2008-12-31: Use <strong>REPROCESSED</strong> FTP source (<code>*_reproc_*.nc</code> files)</li>
+    <li>Dates &gt; 2008-12-31: Use <strong>ARCHIVE/PROD</strong> FTP source (<code>*_multi_*.nc</code> files)</li>
+    </ul>
+    <h3 id="date-range-analysis">Date Range Analysis</h3>
+    <h4 id="range-1-before-2006-12-31">Range 1: Before 2006-12-31</h4>
+    <ul>
+    <li><strong>p011</strong>: REPROCESSED source</li>
+    <li><strong>p01</strong>: REPROCESSED source</li>
+    <li><strong>Result</strong>: ✅ <strong>SAME files</strong> - optimization possible</li>
+    </ul>
+    <h4 id="range-2-2007-01-01-to-2008-12-31">Range 2: 2007-01-01 to 2008-12-31 ⚠️</h4>
+    <ul>
+    <li><strong>p011</strong>: ARCHIVE/PROD source</li>
+    <li><strong>p01</strong>: REPROCESSED source</li>
+    <li><strong>Result</strong>: ❌ <strong>DIFFERENT files</strong> - must download separately!</li>
+    </ul>
+    <h4 id="range-3-after-2008-12-31">Range 3: After 2008-12-31</h4>
+    <ul>
+    <li><strong>p011</strong>: ARCHIVE/PROD source</li>
+    <li><strong>p01</strong>: ARCHIVE/PROD source</li>
+    <li><strong>Result</strong>: ✅ <strong>SAME files</strong> - optimization possible</li>
+    </ul>
+    <h3 id="why-this-matters">Why This Matters</h3>
+    <p>The attempted optimization in <code>landice.m</code> (downloading ice files once and reusing for both grids) <strong>fails for dates in 2007-2008</strong> because:</p>
+    <ol>
+    <li>p011 needs <code>ice_conc_*_polstere-100_multi_YYYYMMDD1200.nc</code> (archive)</li>
+    <li>p01 needs <code>ice_conc_*_polstere-100_reproc_YYYYMMDD1200.nc</code> (reprocessed)</li>
+    <li>These are <strong>different files</strong> with potentially different data</li>
+    </ol>
+    <h3 id="solution-enhanced-makeicefilesm">Solution: Enhanced makeicefiles.m</h3>
+    <p>We've reverted to using <code>makeicefiles.m</code> with enhanced logging:</p>
+    <h4 id="changes-made">Changes Made:</h4>
+    <ol>
+    <li><strong>Clear documentation in switch statement</strong> (makeicefiles.m:48-67)
+    <ul>
+    <li>Added comments explaining cutoff dates</li>
+    <li>Shows which file type is used for each date range</li>
+    </ul>
+    </li>
+    <li><strong>Logging of reprocessing cutoff</strong> (makeicefiles.m:85-88)
+    <ul>
+    <li>Prints the cutoff date for the current resolution</li>
+    <li>Shows MJD value for debugging</li>
+    </ul>
+    </li>
+    <li><strong>Enhanced FTP source logging</strong> (readosisafice.m:24-51)
+    <ul>
+    <li>Shows current date's MJD vs cutoff MJD</li>
+    <li>Explicitly states which FTP source is selected (REPROCESSED/ARCHIVE/PROD)</li>
+    <li>Logs hemisphere being processed</li>
+    </ul>
+    </li>
+    </ol>
+    <h3 id="example-log-output">Example Log Output</h3>
+    <pre><code>makeicefiles: resolution - p01
+    makeicefiles: OSI-SAF reprocessing cutoff for p01 grid: 2008-12-31 (MJD=54831)
+
+    readOSISAF: Date 20070701 (nh, MJD=54282) &lt;= reprocessing cutoff (MJD=54831)
+    readOSISAF: Using REPROCESSED FTP source: https://thredds.met.no/thredds/fileServer/osisaf/met.no/reprocessed/ice/conc</code></pre>
+    <p>vs</p>
+    <pre><code>makeicefiles: resolution - p011
+    makeicefiles: OSI-SAF reprocessing cutoff for p011 grid: 2006-12-31 (MJD=54100)
+
+    readOSISAF: Date 20070701 (nh, MJD=54282) &gt; reprocessing cutoff (MJD=54100), &lt;= archive cutoff (MJD=Inf)
+    readOSISAF: Using ARCHIVE FTP source: https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/conc</code></pre>
+    <p>Notice how <strong>the same date (2007-07-01) triggers different FTP sources</strong> for p01 vs p011!</p>
+    <h3 id="files-modified">Files Modified</h3>
+    <ol>
+    <li><code>src/makeicefiles.m</code> - Added comments and logging for cutoff dates</li>
+    <li><code>src/readosisafice.m</code> - Enhanced FTP source selection logging</li>
+    </ol>
+    <h3 id="recommendation">Recommendation</h3>
+    <p><strong>Continue using <code>makeicefiles.m</code> for each resolution separately.</strong></p>
+    <p>While there is theoretical efficiency to be gained for ~90% of dates (outside 2007-2008 range), the added complexity of a "smart" hybrid system is not worth the risk of incorrect results. The current approach is:</p>
+    <ul>
+    <li>✅ Always correct</li>
+    <li>✅ Clear and maintainable</li>
+    <li>✅ Self-documenting via enhanced logs</li>
+    <li>✅ Easy to debug when issues arise</li>
+    </ul>
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. This site is
+      the documentation &mdash; there is no separate Markdown copy to fall out of date.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

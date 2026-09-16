@@ -1,19 +1,26 @@
-function mrva4com_container(year, day, realtime, varargin)
+function mrva4com_container(year, day, realtime, config_file)
 % MRVA4COM_CONTAINER Containerized version of mrva4com.m
 %
-% Container entry point for MRVA processing with path mapping
+% Container entry point for MRVA processing.
 %
-% Usage: mrva4com_container(year, day, realtime, [sensors], [debug])
+% Usage: mrva4com_container(year, day, realtime, config_file)
 %   year:        4-digit year (numeric or string)
 %   day:         Day of year (numeric or string, 1-366)
 %   realtime:    'nrt' or 'rea' or 0/1 (NRT=1, REA=0)
-%   sensors:     Optional sensor list (comma-separated string or cell array)
-%   debug:       Optional debug flag (1=enabled, or set MRVA_DEBUG=1 env var)
+%   config_file: Path to a JSON config file (already localized -- see
+%                common/bin/localize.sh -- containing every resolved input
+%                this run needs: polar_cap_edge_file, mur25_grid_file
+%                (optional), seasonal_file, landice_ice_p011_file,
+%                landice_grid_p01_file, landice_icefiles_p011_file,
+%                sensor_inputs_root (materialized from --sensor-inputs-manifest),
+%                prior_csp_file (optional), l4_reference_root (optional),
+%                sensors
+%                (optional JSON array), debug (optional). This is purely an
+%                internal handoff detail from entrypoint.sh -- the
+%                container's own CLI is still all named flags; see
+%                docs/input-contract.html.
 %
 % Container paths (mounted from host):
-%   /data/input/bic/     - L2P satellite data (BIC.gz files by sensor)
-%   /data/input/iquam/   - Buoy data (BII files)
-%   /data/input/landice/ - Land/ice masks (GDS files)
 %   /data/output/csp/    - Coefficient files output (CSP format)
 %   /data/output/netcdf/ - Final NetCDF4 products (GHRSST L4)
 %   /data/cache/         - Temporary working files (BIQ, intermediate)
@@ -21,8 +28,8 @@ function mrva4com_container(year, day, realtime, varargin)
 %
 % This function adapts mrva4com.m for containerized execution by:
 %   - Accepting command-line arguments instead of global variables
-%   - Using container-mapped paths instead of hardcoded /nas2, /nas4 paths
-%   - Parameterizing sensor configuration
+%   - Using explicit, already-resolved input paths (config_file) instead of
+%     hardcoded /nas2, /nas4, or /data/static-resources conventions
 %   - Simplifying directory structure for container environment
 
     %% Parse arguments
@@ -48,10 +55,12 @@ function mrva4com_container(year, day, realtime, varargin)
         error('Invalid day of year: %d', day);
     end
 
-    % Parse debug flag (from argument or environment variable)
+    config = jsondecode(fileread(config_file));
+
+    % Parse debug flag (from config or environment variable)
     debugMode = false;
-    if nargin > 4 && ~isempty(varargin{2})
-        debugMode = logical(varargin{2});
+    if isfield(config, 'debug') && ~isempty(config.debug)
+        debugMode = logical(config.debug);
     elseif ~isempty(getenv('MRVA_DEBUG'))
         debugMode = str2double(getenv('MRVA_DEBUG')) == 1;
     end
@@ -69,15 +78,11 @@ function mrva4com_container(year, day, realtime, varargin)
     % Binary paths
     fortran_bin = '/opt/mrva/bin';  % Fortran executables location
 
-    % Input paths
-    bic_root = '/data/input/bic';
-    iquam_root = '/data/input/iquam';
-    % Separate landice paths matching production's NAS layout:
-    %   p011 (1km):  /nas/ftp/mur_sst/tmchin/landice/ -> Global_ice, landice_ grid, icefiles
-    %   p01 (0.01°): /nas2/landice/                    -> landiceP01_ grid
-    landice_p011_root = '/data/input/landice-p011';
-    landice_p01_root = '/data/input/landice-p01';
-    static_resources_root = '/data/static-resources';
+    % Sensor fan-in: materialized by entrypoint.sh's localize_manifest from
+    % --sensor-inputs-manifest into <sensor>/<year>/<file> subdirectories --
+    % reproduces exactly the layout the [bic_root, '/AMSR2R']-style
+    % concatenation below already expects, so that code is unchanged.
+    sensor_inputs_root = config.sensor_inputs_root;
 
     % Output paths
     csp_basedir = '/data/output/csp';
@@ -138,63 +143,51 @@ function mrva4com_container(year, day, realtime, varargin)
 
     %% Sensor configuration
     % Reference data (for makeref.m - excludes real-time sensors)
+    % Every sensor's input directory is sensor_inputs_root/<SENSOR> uniformly
+    % -- IQUAM0 included, matching how build_mrva_sensor_manifest()
+    % (run_mur_pipeline.py) and run_mur_maap.py materialize its manifest
+    % entries under a per-sensor subdirectory, same as every satellite
+    % sensor. (Previously IQUAM0 used sensor_inputs_root directly with no
+    % subdirectory, which no longer matches the manifest's uniform layout.)
     refdata = {
-        'IQUAM0', iquam_root, 'Global', 0, 6, 3
+        'IQUAM0', [sensor_inputs_root, '/IQUAM0'], 'Global', 0, 6, 3
     };
 
     % Main sensor configuration
     % Format: {sensor_name, input_directory, region, La, Lb, dayrange}
-    if nargin > 3 && ~isempty(varargin{1})
-        % Parse sensor list from command-line argument
-        % Input: comma-separated string (e.g., "IQUAM0,AMSR2R,MODISA")
-        % Output: cell array with full sensor configuration
-        sensor_arg = varargin{1};
+    all_sensors = {
+        'IQUAM0', [sensor_inputs_root, '/IQUAM0'],   'Global', 0, 6, 3;
+        'AMSR2R', [sensor_inputs_root, '/AMSR2R'],   'Global', 2, 8, 2;
+        'MODISA', [sensor_inputs_root, '/MODISA'],   'Global', 2, 12, 2;
+        'MODIST', [sensor_inputs_root, '/MODIST'],   'Global', 2, 12, 2;
+        'AVMTAG', [sensor_inputs_root, '/AVMTAG'],   'Global', 2, 9, 2;
+        'AVMTBG', [sensor_inputs_root, '/AVMTBG'],   'Global', 2, 9, 2;
+    };
 
-        if ischar(sensor_arg)
-            % Parse comma-separated sensor names
-            sensor_names = strsplit(sensor_arg, ',');
+    if isfield(config, 'sensors') && ~isempty(config.sensors)
+        % config.sensors is a JSON array of sensor names, e.g. ["IQUAM0","AMSR2R"]
+        sensor_names = config.sensors;
+        if ischar(sensor_names)
+            sensor_names = {sensor_names};
+        end
 
-            % Build sensor configuration table
-            % Define all available sensors with their parameters
-            all_sensors = {
-                'IQUAM0', iquam_root,                'Global', 0, 6, 3;
-                'AMSR2R', [bic_root, '/AMSR2R'],   'Global', 2, 8, 2;
-                'MODISA', [bic_root, '/MODISA'],   'Global', 2, 12, 2;
-                'MODIST', [bic_root, '/MODIST'],   'Global', 2, 12, 2;
-                'AVMTAG', [bic_root, '/AVMTAG'],   'Global', 2, 9, 2;
-                'AVMTBG', [bic_root, '/AVMTBG'],   'Global', 2, 9, 2;
-            };
-
-            % Select requested sensors
-            sensors = {};
-            for i = 1:length(sensor_names)
-                name = strtrim(sensor_names{i});
-                % Find matching sensor in all_sensors
-                idx = find(strcmp(all_sensors(:,1), name));
-                if ~isempty(idx)
-                    sensors = [sensors; all_sensors(idx,:)];
-                else
-                    warning('Unknown sensor: %s (skipping)', name);
-                end
+        sensors = {};
+        for i = 1:length(sensor_names)
+            name = strtrim(sensor_names{i});
+            idx = find(strcmp(all_sensors(:,1), name));
+            if ~isempty(idx)
+                sensors = [sensors; all_sensors(idx,:)];
+            else
+                warning('Unknown sensor: %s (skipping)', name);
             end
+        end
 
-            if isempty(sensors)
-                error('No valid sensors specified in: %s', sensor_arg);
-            end
-        else
-            % Assume it's already a cell array (for direct MATLAB calls)
-            sensors = sensor_arg;
+        if isempty(sensors)
+            error('No valid sensors specified in config.sensors');
         end
     else
-        % Default sensor configuration
-        sensors = {
-            'IQUAM0', iquam_root,                'Global', 0, 6, 3;
-            'AMSR2R', [bic_root, '/AMSR2R'],   'Global', 2, 8, 2;
-            'MODISA', [bic_root, '/MODISA'],   'Global', 2, 12, 2;
-            'MODIST', [bic_root, '/MODIST'],   'Global', 2, 12, 2;
-            'AVMTAG', [bic_root, '/AVMTAG'],   'Global', 2, 9, 2;
-            'AVMTBG', [bic_root, '/AVMTBG'],   'Global', 2, 9, 2;
-        };
+        % Default: all sensors
+        sensors = all_sensors;
     end
 
     coedir = '';  % Wind data directory (optional)
@@ -283,13 +276,13 @@ function mrva4com_container(year, day, realtime, varargin)
 
     if icecapFlag
         icesstfile = sprintf('%s/icesst_%04d_%03d.bip', bipdir, year, day);
-        icefile = sprintf('%s/%04d/Global_ice_%04d_%03d.bip', landice_p011_root, year, year, day);
+        icefile = config.landice_ice_p011_file;
 
-        if exist([icefile, '.gz'], 'file')
-            system(sprintf('zcat %s.gz > %s', icefile, icesstfile));
-            iceconvert(icesstfile);
-        elseif exist(icefile, 'file')
-            system(sprintf('cp %s %s', icefile, icesstfile));
+        % zcat -f passes uncompressed input through unchanged, so this works
+        % whether icefile is gzip-compressed or not -- the caller resolves
+        % the exact file (including any .gz suffix), no pattern-guessing here.
+        if exist(icefile, 'file')
+            system(sprintf('zcat -f %s > %s', icefile, icesstfile));
             iceconvert(icesstfile);
         else
             warning('Ice file not found: %s', icefile);
@@ -298,7 +291,7 @@ function mrva4com_container(year, day, realtime, varargin)
 
         % Polar cap land mask (static reference file for polar latitudes)
         polarcap = sprintf('%s/cylindercap.bip', bipdir);
-        polarcap_source = sprintf('%s/landice/CylinderP01_edge.bip', static_resources_root);
+        polarcap_source = config.polar_cap_edge_file;
         if exist(polarcap_source, 'file')
             system(sprintf('ln -sf %s %s', polarcap_source, polarcap));
         else
@@ -322,31 +315,19 @@ function mrva4com_container(year, day, realtime, varargin)
     Lref = 7;
     Lref0 = L0;
 
-    % For NRT run, update coefile and Lref0
+    % For NRT run, update coefile and Lref0. Whether a prior-day
+    % coefficient exists is decided by the caller (Python), not by scanning
+    % csp_basedir here -- config.prior_csp_file is present only when one
+    % genuinely exists (see design doc section 8: absent is a valid,
+    % meaningful state, not an error).
     if realtime
         Lnrt0 = 6;  % Make sure to cover the buoys
-        y_ref = year;
-        d_ref = day - 1;  % Use previous day's MUR
-
-        % Adjust if date is in different year
-        if d_ref < 1
-            y_ref = y_ref - 1;
-            if mod(y_ref,4)==0 && (mod(y_ref,100)~=0 || mod(y_ref,400)==0)
-                md = 366;
-            else
-                md = 365;
-            end
-            d_ref = d_ref + md;
-        end
-
-        [d_ref, m_ref, y_ref] = julian(d_ref, y_ref);
-        name = sprintf(['%s/%04d/', cspfmt], csp_basedir, y_ref, y_ref, m_ref, d_ref, hourAna, region);
-        coefile = sprintf('%s.c%02d', name, Lnrt0);
         Lref0 = Lnrt0;
 
-        if ~exist(coefile, 'file')
-            warning('Previous day coefficient file not found: %s', coefile);
-            warning('Will create reference field from scratch (starting at L=%d)', Lref0);
+        if isfield(config, 'prior_csp_file') && ~isempty(config.prior_csp_file)
+            coefile = config.prior_csp_file;
+        else
+            warning('No prior-day coefficient file provided; will create reference field from scratch (starting at L=%d)', Lref0);
             coefile = '';
             % Keep Lref0=Lnrt0=6 - do NOT fall back to L0=2
             % Fortran handles missing coefile gracefully
@@ -385,7 +366,14 @@ function mrva4com_container(year, day, realtime, varargin)
 
     if trimbipFlag
         % Outlier removal using reference field
-        trimbip3a(sensors, year, day, bipdir, region, reffile);
+        % l4_reference_root is optional (entrypoint.sh): trimbip3a only reads
+        % it on its no-MUR-reference bootstrap branch, which this call never
+        % takes because reffile above is always a real coefficient file.
+        l4_reference_root = '';
+        if isfield(config, 'l4_reference_root') && ~isempty(config.l4_reference_root)
+            l4_reference_root = config.l4_reference_root;
+        end
+        trimbip3a(sensors, year, day, bipdir, region, reffile, l4_reference_root);
         fprintf('  ✓ Outliers removed\n');
 
         if biasbipFlag
@@ -607,8 +595,8 @@ function mrva4com_container(year, day, realtime, varargin)
             nc_config.hourAna = hourAna;
             nc_config.whichdays = {year, day:day};
             nc_config.realtime = realtime;
-            nc_config.landice_p011_root = landice_p011_root;
-            nc_config.landice_p01_root = landice_p01_root;
+            nc_config.landice_grid_p01_file = config.landice_grid_p01_file;
+            nc_config.landice_icefiles_p011_file = config.landice_icefiles_p011_file;
 
             % Add optional high-res grid file if available
             if hiresgridFlag && ~isempty(hiresgridfile)
@@ -640,13 +628,17 @@ function mrva4com_container(year, day, realtime, varargin)
 
     mur25Flag = 1;  % Set to 0 to skip MUR25 generation
 
-    % Check if MUR25 grid file exists
-    mur25_gridfile = sprintf('%s/grids/MUR25grid.gds', static_resources_root);
-    if ~exist(mur25_gridfile, 'file')
-        warning(['MUR25 grid file not found: %s\n', ...
-                 'MUR25 product will not be generated.\n', ...
-                 'To enable MUR25, add MUR25grid.gds to static-resources/grids/'], ...
-                 mur25_gridfile);
+    % MUR25 grid file is optional (design doc section 8: absent -> skip
+    % MUR25 generation, matching existing documented behavior) -- resolved
+    % by the caller, not constructed from a root here.
+    if isfield(config, 'mur25_grid_file') && ~isempty(config.mur25_grid_file)
+        mur25_gridfile = config.mur25_grid_file;
+    else
+        mur25_gridfile = '';
+    end
+    if isempty(mur25_gridfile) || ~exist(mur25_gridfile, 'file')
+        warning(['MUR25 grid file not provided or not found: %s\n', ...
+                 'MUR25 product will not be generated.'], mur25_gridfile);
         mur25Flag = 0;
     end
 
@@ -657,8 +649,9 @@ function mrva4com_container(year, day, realtime, varargin)
             mur25_config.cspdir = cspdir;
             mur25_config.cspfmt = cspfmt;
             mur25_config.netcdf_dir = netcdf_dir;
-            mur25_config.landice_root = landice_p01_root;  % MUR25 uses p01 landiceP01_ files
-            mur25_config.static_resources_root = static_resources_root;
+            mur25_config.landice_grid_p01_file = config.landice_grid_p01_file;  % MUR25 uses p01 landiceP01_ files
+            mur25_config.mur25_grid_file = mur25_gridfile;
+            mur25_config.seasonal_file = config.seasonal_file;
             mur25_config.fortran_bin = fortran_bin;
             mur25_config.cache_dir = '/data/cache';
             mur25_config.region = region;
