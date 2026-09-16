@@ -37,6 +37,16 @@ assert_fails() {
     fi
 }
 
+assert_succeeds() {
+    local name="$1"; shift
+    if bash -c "source '$ENTRYPOINT'; $*" >/dev/null 2>&1; then
+        echo "PASS: $name"
+    else
+        echo "FAIL: $name — expected exit 0, got non-zero"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
 ALL_FLAGS='--year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 \
     --work-dir /tmp/w --log-dir /tmp/l --output-dir /tmp/o \
     --buoy-day-range 3 --stability-latency 2'
@@ -61,6 +71,27 @@ assert_fails "rejects malformed reference-date" "parse_args --year 2026 --doy 22
 out=$(run_case "parse_args $ALL_FLAGS; build_command; echo \"\${CMD[@]}\"")
 assert_eq "build_command assembles all args in buoyDataProcessing's parameter order" \
     "/opt/iquam/bin/run_IquamProcessor.sh /opt/matlabruntime/R2024b 2026 220 nrt 2026-08-09 /tmp/w /tmp/l /tmp/o 3 2" \
+    "$out"
+
+# --- the three directory flags are optional ---
+#
+# On DPS the caller cannot know the right value: CWL only collects what lands
+# under $(runtime.outdir). So they default, while still being accepted so
+# run_mur_pipeline.py's invocation is unchanged.
+MIN_FLAGS='--year 2026 --doy 220 --mode nrt --reference-date 2026-08-09 --buoy-day-range 3 --stability-latency 2'
+
+assert_succeeds "accepts an invocation with no directory flags" \
+    "parse_args $MIN_FLAGS"
+
+out=$(run_case "unset MUR_OUTPUT_ROOT; cd /tmp; parse_args $MIN_FLAGS; build_command; echo \"\${CMD[@]}\"")
+assert_eq "directory flags default under \$PWD/output, and are absolute" \
+    "/opt/iquam/bin/run_IquamProcessor.sh /opt/matlabruntime/R2024b 2026 220 nrt 2026-08-09 /tmp/makebic /tmp/output/logs /tmp/output/iquam 3 2" \
+    "$out"
+
+# Scratch must NOT be under the output root or it inflates stage-out.
+out=$(run_case "export MUR_OUTPUT_ROOT=/data/output; parse_args $MIN_FLAGS; build_command; echo \"\${CMD[@]}\"")
+assert_eq "MUR_OUTPUT_ROOT redirects output and logs but not scratch" \
+    "/opt/iquam/bin/run_IquamProcessor.sh /opt/matlabruntime/R2024b 2026 220 nrt 2026-08-09 /tmp/makebic /data/output/logs /data/output/iquam 3 2" \
     "$out"
 
 echo ""

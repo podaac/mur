@@ -57,8 +57,20 @@ localize_all_inputs() {
     INDIR=$(localize_manifest granules "$GRANULES_MANIFEST" "$scratch") || return 1
 }
 
+# Where this run's BIC and L2Plist go.
+#
+# Defaults to $PWD/output: CWL runs the tool with its working directory set to
+# $(runtime.outdir) and collects `glob: ./output*` relative to it, so a
+# hardcoded absolute /data/output is never staged out and a DPS job would
+# succeed while returning nothing. run_mur_pipeline.py passes
+# MUR_OUTPUT_ROOT=/data/output so local behaviour is unchanged.
+output_root() {
+    echo "${MUR_OUTPUT_ROOT:-$(pwd)/output}"
+}
+
 build_command() {
-    local outdir="/data/output"
+    local outdir
+    outdir="$(output_root)"
     CMD=(/opt/l2p/bin/run_L2pProcessor.sh "/opt/matlabruntime/R2024b" "$SENSOR" "$REGION" "$INDIR" "$outdir" "$YEAR" "$DAY" "$REWRITE")
 }
 
@@ -71,6 +83,9 @@ main() {
     # not pre-created in the image so the sticky bit on /tmp does not block
     # the arbitrary runtime UID from managing them.
     mkdir -p "${TMP_DIR:-/tmp/l2p_tmp}" "${MATLAB_PREFDIR:-/tmp/.matlab}" "${MCR_CACHE_ROOT:-/tmp}"
+
+    # On DPS nothing pre-creates the output directory the way a bind mount does.
+    mkdir -p "$(output_root)"
 
     build_command
     exec "${CMD[@]}"

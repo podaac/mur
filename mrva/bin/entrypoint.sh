@@ -191,6 +191,54 @@ build_command() {
     CMD=(/opt/mrva/bin/run_MrvaProcessor.sh "/opt/matlabruntime/R2024b" "$YEAR" "$DOY" "$MODE" "$CONFIG_PATH")
 }
 
+# Redirect MATLAB's compiled-in output paths to the CWL job directory.
+#
+# mrva4com_container.m hardcodes '/data/output/csp' and '/data/output/netcdf'
+# (lines 88-89) and changing that needs a MATLAB recompile. CWL, meanwhile,
+# only collects `glob: ./output*` relative to $(runtime.outdir), so those
+# absolute paths are never staged out.
+#
+# Until the recompile lands (the entrypoint already hands MATLAB a JSON config,
+# so the clean fix is csp_output_dir/netcdf_output_dir keys with the current
+# literals as defaults), symlink the compiled-in paths at the real output dir.
+# MATLAB writes through the links; CWL globs a real directory holding real
+# files, and the ~800 MB granule is never copied.
+#
+# Whether this works depends on DPS's UID/GID policy: the Dockerfile
+# group-0-chmods /data, and local runs pass --group-add 0, but DPS's is
+# unknown -- so fall back to copying and say which branch fired.
+setup_output_redirect() {
+    local root="${MUR_OUTPUT_ROOT:-$(pwd)/output}"
+    MUR_STAGE_OUT_MODE="none"
+    mkdir -p "$root/csp" "$root/netcdf"
+
+    # Locally /data/output/{csp,netcdf} are bind mounts; leave them alone.
+    if [ "$root" = "/data/output" ]; then
+        MUR_STAGE_OUT_MODE="direct"
+        return 0
+    fi
+
+    if rm -rf /data/output/csp /data/output/netcdf 2>/dev/null \
+       && ln -s "$root/csp" /data/output/csp 2>/dev/null \
+       && ln -s "$root/netcdf" /data/output/netcdf 2>/dev/null; then
+        MUR_STAGE_OUT_MODE="symlink"
+        echo "stage-out: symlinked /data/output/{csp,netcdf} -> $root/{csp,netcdf}" >&2
+    else
+        MUR_STAGE_OUT_MODE="copy"
+        mkdir -p /data/output/csp /data/output/netcdf 2>/dev/null || true
+        echo "stage-out: symlink unavailable; will copy /data/output -> $root after the run" >&2
+    fi
+    return 0
+}
+
+finish_output_redirect() {
+    [ "${MUR_STAGE_OUT_MODE:-none}" = "copy" ] || return 0
+    local root="${MUR_OUTPUT_ROOT:-$(pwd)/output}"
+    echo "stage-out: copying /data/output -> $root" >&2
+    cp -a /data/output/csp/. "$root/csp/" 2>/dev/null || true
+    cp -a /data/output/netcdf/. "$root/netcdf/" 2>/dev/null || true
+}
+
 main() {
     set -e
     parse_args "$@" || exit 1
@@ -201,6 +249,8 @@ main() {
     # pre-created in the image so the sticky bit on /tmp does not block the
     # arbitrary runtime UID from managing them on subsequent runs.
     mkdir -p "${TMP_DIR:-/tmp/mrva_tmp}" "${MATLAB_PREFDIR:-/tmp/.matlab}" "${MCR_CACHE_ROOT:-/tmp}"
+
+    setup_output_redirect
 
     # The Fortran PCG solver uses large local arrays that can exceed default
     # stack; unlimited stack prevents segfaults during solver iterations.
@@ -270,6 +320,14 @@ main() {
 
     echo "Starting MATLAB runtime..."
     build_command || exit 1
+    # Not `exec` when a copy-mode stage-out still has to run afterwards;
+    # exec would replace this shell and the copy would never happen.
+    if [ "${MUR_STAGE_OUT_MODE:-none}" = "copy" ]; then
+        "${CMD[@]}"
+        local rc=$?
+        finish_output_redirect
+        exit "$rc"
+    fi
     exec "${CMD[@]}"
 }
 

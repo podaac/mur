@@ -90,9 +90,18 @@ manifest="$scratch/manifest.json"
 cat > "$manifest" <<EOF
 {"files": [{"path": "$src_dir/gran1.nc"}]}
 EOF
-out=$(TMP_DIR="$scratch/tmp" run_case "parse_args --sensor AMSR2R --region Global --year 2026 --doy 200 --rewrite 0 --granules-manifest '$manifest'; localize_all_inputs; build_command; echo \"\${CMD[@]}\"")
+# MUR_OUTPUT_ROOT set: how run_mur_pipeline.py invokes it locally, with the
+# host output dir bind-mounted at /data/output.
+out=$(TMP_DIR="$scratch/tmp" MUR_OUTPUT_ROOT=/data/output run_case "parse_args --sensor AMSR2R --region Global --year 2026 --doy 200 --rewrite 0 --granules-manifest '$manifest'; localize_all_inputs; build_command; echo \"\${CMD[@]}\"")
 assert_eq "build_command assembles all args using the localized manifest directory" \
     "/opt/l2p/bin/run_L2pProcessor.sh /opt/matlabruntime/R2024b AMSR2R Global $scratch/tmp/localized-inputs/granules /data/output 2026 200 0" \
+    "$out"
+
+# MUR_OUTPUT_ROOT unset: how CWL invokes it, cwd == $(runtime.outdir). A
+# hardcoded /data/output here means DPS stages out nothing.
+out=$(cd /tmp && TMP_DIR="$scratch/tmp" run_case "unset MUR_OUTPUT_ROOT; parse_args --sensor AMSR2R --region Global --year 2026 --doy 200 --rewrite 0 --granules-manifest '$manifest'; localize_all_inputs; build_command; echo \"\${CMD[@]}\"")
+assert_eq "build_command defaults output under \$PWD/output for CWL stage-out" \
+    "/opt/l2p/bin/run_L2pProcessor.sh /opt/matlabruntime/R2024b AMSR2R Global $scratch/tmp/localized-inputs/granules /tmp/output 2026 200 0" \
     "$out"
 rm -rf "$scratch" "$src_dir"
 

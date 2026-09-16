@@ -106,9 +106,27 @@ verify_inputs_exist() {
     done
 }
 
+# Where this run's products go.
+#
+# Defaults to $PWD/output because CWL runs the tool with its working directory
+# set to $(runtime.outdir) and collects `glob: ./output*` relative to it --
+# anything written to an absolute path outside that directory is simply not
+# staged out, so a DPS job would succeed and return nothing.
+#
+# The previous hardcoded "/output/p011" was doubly wrong: that directory does
+# not exist in the image (the Dockerfile creates /data/output/p011), and it
+# only worked locally because `docker run -v` auto-creates a mountpoint as
+# root. run_mur_pipeline.py now passes MUR_OUTPUT_ROOT=/data/output to keep
+# local behaviour byte-identical.
+output_root() {
+    echo "${MUR_OUTPUT_ROOT:-$(pwd)/output}"
+}
+
 build_command() {
-    local outdir_p011="/output/p011"
-    local outdir_p01="/output/p01"
+    local root
+    root="$(output_root)"
+    local outdir_p011="$root/p011"
+    local outdir_p01="$root/p01"
     CMD=(/opt/landice/bin/run_LandiceProcessor.sh "/opt/matlabruntime/R2024b" \
          "$LANDMASK_P01" "$GRIDINDEX_NORTH_P01" "$GRIDINDEX_SOUTH_P01" \
          "$LANDMASK_P011" "$GRIDINDEX_NORTH_P011" "$GRIDINDEX_SOUTH_P011" \
@@ -123,6 +141,11 @@ main() {
 
     # Ensure scratch dirs exist and are owned by the runtime UID.
     mkdir -p "${TMP_DIR:-/tmp/landice_tmp}" "${MATLAB_PREFDIR:-/tmp/.matlab}" "${MCR_CACHE_ROOT:-/tmp}"
+
+    # MATLAB is not guaranteed to create these, and on DPS nothing else will.
+    local root
+    root="$(output_root)"
+    mkdir -p "$root/p011" "$root/p01"
 
     build_command
     exec "${CMD[@]}"

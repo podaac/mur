@@ -60,9 +60,19 @@ assert_fails "rejects unknown flag" "parse_args $ALL_FLAGS --bogus x"
 assert_fails "rejects invalid year" "parse_args --year 1800 --doy 220 --landmask-p01-file /in/a --gridindex-north-p01-file /in/b --gridindex-south-p01-file /in/c --landmask-p011-file /in/d --gridindex-north-p011-file /in/e --gridindex-south-p011-file /in/f"
 assert_fails "rejects invalid doy" "parse_args --year 2026 --doy 400 --landmask-p01-file /in/a --gridindex-north-p01-file /in/b --gridindex-south-p01-file /in/c --landmask-p011-file /in/d --gridindex-north-p011-file /in/e --gridindex-south-p011-file /in/f"
 
-out=$(run_case "parse_args $ALL_FLAGS; build_command; echo \"\${CMD[@]}\"")
+# MUR_OUTPUT_ROOT set: how run_mur_pipeline.py invokes it locally, where the
+# host output dirs are bind-mounted at /data/output/{p01,p011}.
+out=$(run_case "export MUR_OUTPUT_ROOT=/data/output; parse_args $ALL_FLAGS; build_command; echo \"\${CMD[@]}\"")
 assert_eq "build_command assembles all args in wrapper's parameter order" \
-    "/opt/landice/bin/run_LandiceProcessor.sh /opt/matlabruntime/R2024b /in/landmask-p01.gds /in/gridindex-north-p01.mat /in/gridindex-south-p01.mat /in/landmask-p011.gds /in/gridindex-north-p011.mat /in/gridindex-south-p011.mat /output/p011 /output/p01 2026 220" \
+    "/opt/landice/bin/run_LandiceProcessor.sh /opt/matlabruntime/R2024b /in/landmask-p01.gds /in/gridindex-north-p01.mat /in/gridindex-south-p01.mat /in/landmask-p011.gds /in/gridindex-north-p011.mat /in/gridindex-south-p011.mat /data/output/p011 /data/output/p01 2026 220" \
+    "$out"
+
+# MUR_OUTPUT_ROOT unset: how CWL invokes it on DPS, where the working directory
+# IS $(runtime.outdir) and `glob: ./output*` only collects what lands under it.
+# A hardcoded absolute path here means DPS stages out nothing.
+out=$(run_case "unset MUR_OUTPUT_ROOT; cd /tmp; parse_args $ALL_FLAGS; build_command; echo \"\${CMD[@]}\"")
+assert_eq "build_command defaults output under \$PWD/output for CWL stage-out" \
+    "/opt/landice/bin/run_LandiceProcessor.sh /opt/matlabruntime/R2024b /in/landmask-p01.gds /in/gridindex-north-p01.mat /in/gridindex-south-p01.mat /in/landmask-p011.gds /in/gridindex-north-p011.mat /in/gridindex-south-p011.mat /tmp/output/p011 /tmp/output/p01 2026 220" \
     "$out"
 
 # --- localize_all_inputs: all-local-path flags is a no-op (regression check) ---

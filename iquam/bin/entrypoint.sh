@@ -47,9 +47,23 @@ parse_args() {
         esac
     done
 
-    if [[ -z "$YEAR" || -z "$DOY" || -z "$MODE" || -z "$REFERENCE_DATE" || -z "$WORKDIR" || \
-          -z "$LOGDIR" || -z "$OUTPUTDIR" || -z "$BUOY_DAY_RANGE" || -z "$STABILITY_LATENCY" ]]; then
-        echo "ERROR: --year, --doy, --mode, --reference-date, --work-dir, --log-dir, --output-dir, --buoy-day-range, and --stability-latency are all required" >&2
+    # --work-dir/--log-dir/--output-dir are optional: they are placement
+    # detail rather than science parameters, and on DPS the caller cannot know
+    # the right value -- CWL only collects what lands under $(runtime.outdir).
+    # They are still accepted, so run_mur_pipeline.py's invocation is unchanged.
+    #
+    # All three must be ABSOLUTE: buoyDataProcessing.m does cd(workDir), so a
+    # relative output path would resolve against the work dir, not the job dir.
+    local output_root="${MUR_OUTPUT_ROOT:-$(pwd)/output}"
+    OUTPUTDIR="${OUTPUTDIR:-$output_root/iquam}"
+    # Logs belong in the staged-out tree; on DPS that is the only way to read them.
+    LOGDIR="${LOGDIR:-$output_root/logs}"
+    # Scratch, deliberately NOT under the output root or it inflates stage-out.
+    WORKDIR="${WORKDIR:-/tmp/makebic}"
+
+    if [[ -z "$YEAR" || -z "$DOY" || -z "$MODE" || -z "$REFERENCE_DATE" || \
+          -z "$BUOY_DAY_RANGE" || -z "$STABILITY_LATENCY" ]]; then
+        echo "ERROR: --year, --doy, --mode, --reference-date, --buoy-day-range, and --stability-latency are all required" >&2
         usage
         return 1
     fi
@@ -85,6 +99,8 @@ build_command() {
 main() {
     set -e
     parse_args "$@" || exit 1
+    # On DPS nothing pre-creates these the way a bind mount does locally.
+    mkdir -p "$OUTPUTDIR" "$LOGDIR" "$WORKDIR"
     build_command
     exec "${CMD[@]}"
 }

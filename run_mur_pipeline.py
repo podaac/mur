@@ -77,6 +77,8 @@ os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 # Import centralized date handling for historical reprocessing support
 import mur_date  # noqa: E402
 
+import mur_config  # noqa: E402
+import mur_window  # noqa: E402
 from iquam_date_flags import format_iquam_mode, format_iquam_reference_date
 from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
 from mrva_static_files import MRVA_STATIC_RELATIVE_PATHS, seasonal_relative_path
@@ -104,7 +106,7 @@ def resolve_mrva_static_files(static_resources_dir: pathlib.Path, doy: int) -> D
 
 
 def build_l2p_granules_manifest(granule_files: List[pathlib.Path], container_input_dir: str) -> Dict:
-    """Build the granules manifest (documentation/INPUT_CONTRACT.md
+    """Build the granules manifest (docs/input-contract.html
     section 3) for L2P, using container-side paths into container_input_dir
     (wherever the caller bind-mounts the granule files' host directory).
     Scoped to one invocation only, per the design doc's "manifests are
@@ -123,7 +125,7 @@ def resolve_mrva_landice_inputs(
     """Resolve MRVA's three per-day landice-output inputs (mrva4com_container.m's
     landice_ice_p011_file/landice_grid_p01_file/landice_icefiles_p011_file)
     from landice's own <root>/<year>/<file> output layout (documentation/
-    PIPELINE_CONFIGURATION.md's landice example). Global_ice may be
+    the configuration page's landice example). Global_ice may be
     gzip-compressed or not -- checks both, matching mrva4com_container.m's
     pre-refactor dual-check (now here, since the explicit-args contract
     puts existence decisions in Python, not the container)."""
@@ -252,10 +254,11 @@ class MUROrchestrator:
     - Stage 6: Purge old L2P downloads (rolling window cleanup)
     """
 
-    # Latency parameters (from nrtMRVA.py)
-    NRT_LATENCY = 1   # Days behind current for NRT mode
-    REA_LATENCY = 4   # Days behind current for reanalysis mode
-    SCAN_LATENCY = 9  # Total lookback window
+    # Latency parameters (from nrtMRVA.py), defined once in mur_window and
+    # re-exported here so MAAPOrchestrator can never drift from this class.
+    NRT_LATENCY = mur_window.NRT_LATENCY
+    REA_LATENCY = mur_window.REA_LATENCY
+    SCAN_LATENCY = mur_window.SCAN_LATENCY
 
     def __init__(
         self,
@@ -329,9 +332,9 @@ class MUROrchestrator:
         }
 
     def _load_config(self) -> Dict:
-        """Load configuration from JSON file."""
-        with open(self.config_path) as f:
-            return json.load(f)
+        """Load configuration from JSON file, normalizing key spellings so a
+        config written for either orchestrator works here (mur_config)."""
+        return mur_config.load_config(self.config_path)
 
     def get_reference_today(self) -> datetime.date:
         """
@@ -371,11 +374,7 @@ class MUROrchestrator:
         else:
             today = target_date
 
-        day2 = today - datetime.timedelta(days=self.NRT_LATENCY)  # NRT end
-        day1 = today - datetime.timedelta(days=self.REA_LATENCY)  # REA end
-        day0 = today - datetime.timedelta(days=self.SCAN_LATENCY) # REA start
-
-        return day0, day1, day2
+        return mur_window.calculate_processing_window(today)
 
     def is_nrt_mode(self, process_date: datetime.date, day1: datetime.date) -> bool:
         """
@@ -387,9 +386,7 @@ class MUROrchestrator:
 
         If force_nrt=True, always uses NRT mode regardless of date.
         """
-        if self.force_nrt:
-            return True  # Override: always NRT mode
-        return process_date > day1
+        return mur_window.is_nrt_mode(process_date, day1, force_nrt=self.force_nrt)
 
     def _ordinal_day(self, date: datetime.date) -> int:
         """Get ordinal day (cumulative days since epoch)."""
@@ -420,7 +417,7 @@ class MUROrchestrator:
         doy = process_date.timetuple().tm_yday
 
         # Resolve landice's six explicit static input files from the
-        # static-resources root (documentation/STATIC_DATA.md layout).
+        # static-resources root (docs/static-data.html layout).
         static_resources_dir = pathlib.Path(config["static_resources_dir"])
         static_files = resolve_landice_static_files(static_resources_dir)
 
@@ -475,8 +472,11 @@ class MUROrchestrator:
             "-v", f"{static_files['landmask_p011'].resolve()}:/input/landmask-p011.gds:ro",
             "-v", f"{static_files['gridindex_north_p011'].resolve()}:/input/gridindex-north-p011.mat:ro",
             "-v", f"{static_files['gridindex_south_p011'].resolve()}:/input/gridindex-south-p011.mat:ro",
-            "-v", f"{output_dir_p011.resolve()}:/output/p011",
-            "-v", f"{output_dir_p01.resolve()}:/output/p01",
+            # MUR_OUTPUT_ROOT keeps local behaviour identical now that the
+            # entrypoint defaults to $PWD/output for CWL stage-out.
+            "-e", "MUR_OUTPUT_ROOT=/data/output",
+            "-v", f"{output_dir_p011.resolve()}:/data/output/p011",
+            "-v", f"{output_dir_p01.resolve()}:/data/output/p01",
             container_image,
             "--year", str(year),
             "--doy", str(doy),
@@ -701,6 +701,7 @@ class MUROrchestrator:
             "--shm-size=2g",
             "-v", f"{input_dir.resolve()}:{container_input_dir}:ro",
             "-v", f"{manifest_path.resolve()}:/data/manifest.json:ro",
+            "-e", "MUR_OUTPUT_ROOT=/data/output",
             "-v", f"{output_dir.resolve()}:/data/output",
             container_image,
             "--sensor", sensor,
@@ -1090,6 +1091,7 @@ class MUROrchestrator:
             return False
 
         cmd.extend([
+            "-e", "MUR_OUTPUT_ROOT=/data/output",
             "-v", f"{csp_dir.resolve()}:/data/output/csp",
             "-v", f"{netcdf_dir.resolve()}:/data/output/netcdf",
             "-v", f"{cache_dir.resolve()}:/data/cache",
