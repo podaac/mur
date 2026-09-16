@@ -64,6 +64,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
@@ -75,6 +76,129 @@ os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 
 # Import centralized date handling for historical reprocessing support
 import mur_date  # noqa: E402
+
+import mur_config  # noqa: E402
+import mur_window  # noqa: E402
+from iquam_date_flags import format_iquam_mode, format_iquam_reference_date
+from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
+from mrva_static_files import MRVA_STATIC_RELATIVE_PATHS, seasonal_relative_path
+
+
+def resolve_landice_static_files(static_resources_dir: pathlib.Path) -> Dict[str, pathlib.Path]:
+    """Resolve landice's six explicit static input files from the static-resources root."""
+    return {
+        name: static_resources_dir / relative
+        for name, relative in LANDICE_STATIC_RELATIVE_PATHS.items()
+    }
+
+
+def resolve_mrva_static_files(static_resources_dir: pathlib.Path, doy: int) -> Dict[str, pathlib.Path]:
+    """Resolve MRVA's static input files (polar cap edge, MUR25 grid, and
+    this day's seasonal climatology) from the static-resources root. Not yet
+    consumed by run_mrva() -- MRVA's own explicit-args conversion (accepting
+    named static-file flags) hasn't happened yet; see mrva_static_files.py."""
+    files = {
+        name: static_resources_dir / relative
+        for name, relative in MRVA_STATIC_RELATIVE_PATHS.items()
+    }
+    files["seasonal"] = static_resources_dir / seasonal_relative_path(doy)
+    return files
+
+
+def build_l2p_granules_manifest(granule_files: List[pathlib.Path], container_input_dir: str) -> Dict:
+    """Build the granules manifest (docs/input-contract.html
+    section 3) for L2P, using container-side paths into container_input_dir
+    (wherever the caller bind-mounts the granule files' host directory).
+    Scoped to one invocation only, per the design doc's "manifests are
+    scoped per run, not cumulative" principle -- not written for reuse."""
+    return {
+        "files": [
+            {"path": f"{container_input_dir}/{f.name}"}
+            for f in sorted(granule_files)
+        ]
+    }
+
+
+def resolve_mrva_landice_inputs(
+    landice_p011_dir: pathlib.Path, landice_p01_dir: pathlib.Path, year: int, doy: int
+) -> Dict[str, pathlib.Path]:
+    """Resolve MRVA's three per-day landice-output inputs (mrva4com_container.m's
+    landice_ice_p011_file/landice_grid_p01_file/landice_icefiles_p011_file)
+    from landice's own <root>/<year>/<file> output layout (see the
+    configuration page's landice example). Global_ice may be
+    gzip-compressed or not -- checks both, matching mrva4com_container.m's
+    pre-refactor dual-check (now here, since the explicit-args contract
+    puts existence decisions in Python, not the container)."""
+    year_str = str(year)
+    ice_base = landice_p011_dir / year_str / f"Global_ice_{year}_{doy:03d}.bip"
+    ice_gz = ice_base.with_name(ice_base.name + ".gz")
+    landice_ice_p011 = ice_gz if ice_gz.exists() else ice_base
+
+    return {
+        "landice_ice_p011": landice_ice_p011,
+        "landice_grid_p01": landice_p01_dir / year_str / f"landiceP01_{year}_{doy:03d}.gds.gz",
+        "landice_icefiles_p011": landice_p011_dir / year_str / f"icefiles_{year}_{doy:03d}.txt",
+    }
+
+
+def build_mrva_sensor_manifest(
+    bic_dir: pathlib.Path,
+    iquam_dir: pathlib.Path,
+    process_date: datetime.date,
+    sensors_config: Dict,
+    active_sensors: List[str],
+) -> Dict:
+    """Build MRVA's sensor-inputs manifest (BIC + IQUAM0 unified -- IQUAM0
+    has the identical fan-in shape as the satellite sensors in
+    mrva4com_container.m's sensor table: {name, dir, region, La, Lb,
+    day_range}) across each sensor's own day_range window. Entries include
+    relative_path so common/bin/localize.sh's localize_manifest
+    materializes exactly the <sensor>/<year>/<file> layout
+    mrva4com_container.m already expects -- avoids inferring sensor/year
+    from the path string, per design doc section 1. Scoped to this one
+    invocation only, not cumulative."""
+    files = []
+    for sensor in active_sensors:
+        sensor_cfg = sensors_config[sensor]
+        day_range = sensor_cfg["day_range"]
+        for offset in range(-day_range, day_range + 1):
+            data_day = process_date + datetime.timedelta(days=offset)
+            y = data_day.year
+            doy = data_day.timetuple().tm_yday
+            if sensor == "IQUAM0":
+                candidates = [iquam_dir / str(y) / f"Global_IQUAM0_{y}_{doy:03d}.bii"]
+            else:
+                # l2p/src/writebic.m writes an uncompressed .bic; production
+                # archives are gzipped. makebiq.m accepts either (zcat for
+                # .gz, plain symlink otherwise), so look for both and prefer
+                # the compressed one when a directory happens to hold both.
+                stem = f"Global_{sensor}_{y}_{doy:03d}.bic"
+                sensor_dir = bic_dir / sensor / str(y)
+                candidates = [sensor_dir / f"{stem}.gz", sensor_dir / stem]
+            src = next((c for c in candidates if c.exists()), None)
+            if src is None:
+                continue
+            files.append({
+                "path": str(src),
+                "sensor": sensor,
+                "relative_path": f"{sensor}/{y}/{src.name}",
+            })
+    return {"files": files}
+
+
+def resolve_mrva_prior_csp(csp_dir: pathlib.Path, process_date: datetime.date, is_nrt: bool) -> Optional[pathlib.Path]:
+    """Resolve MRVA's optional prior-day coefficient file (--prior-csp-file):
+    the previous day's L=6 NRT coefficient, if it exists. Only relevant in
+    NRT mode -- REA mode never used a prior coefficient (see the removed
+    logic this replaces in mrva4com_container.m, which only branched on
+    `if realtime`). Returns None when absent, matching design doc section 8
+    (absence is a valid, meaningful state -> bootstrap-from-L4 in MATLAB)."""
+    if not is_nrt:
+        return None
+    prior_day = process_date - datetime.timedelta(days=1)
+    candidate = csp_dir / str(prior_day.year) / f"{prior_day.strftime('%Y%m%d')}09_MRVA4_Global.c06"
+    return candidate if candidate.exists() else None
+
 
 # Configure logging
 logging.basicConfig(
@@ -130,10 +254,11 @@ class MUROrchestrator:
     - Stage 6: Purge old L2P downloads (rolling window cleanup)
     """
 
-    # Latency parameters (from nrtMRVA.py)
-    NRT_LATENCY = 1   # Days behind current for NRT mode
-    REA_LATENCY = 4   # Days behind current for reanalysis mode
-    SCAN_LATENCY = 9  # Total lookback window
+    # Latency parameters (from nrtMRVA.py), defined once in mur_window and
+    # re-exported here so MAAPOrchestrator can never drift from this class.
+    NRT_LATENCY = mur_window.NRT_LATENCY
+    REA_LATENCY = mur_window.REA_LATENCY
+    SCAN_LATENCY = mur_window.SCAN_LATENCY
 
     def __init__(
         self,
@@ -207,9 +332,9 @@ class MUROrchestrator:
         }
 
     def _load_config(self) -> Dict:
-        """Load configuration from JSON file."""
-        with open(self.config_path) as f:
-            return json.load(f)
+        """Load configuration from JSON file, normalizing key spellings so a
+        config written for either orchestrator works here (mur_config)."""
+        return mur_config.load_config(self.config_path)
 
     def get_reference_today(self) -> datetime.date:
         """
@@ -249,11 +374,7 @@ class MUROrchestrator:
         else:
             today = target_date
 
-        day2 = today - datetime.timedelta(days=self.NRT_LATENCY)  # NRT end
-        day1 = today - datetime.timedelta(days=self.REA_LATENCY)  # REA end
-        day0 = today - datetime.timedelta(days=self.SCAN_LATENCY) # REA start
-
-        return day0, day1, day2
+        return mur_window.calculate_processing_window(today)
 
     def is_nrt_mode(self, process_date: datetime.date, day1: datetime.date) -> bool:
         """
@@ -265,9 +386,7 @@ class MUROrchestrator:
 
         If force_nrt=True, always uses NRT mode regardless of date.
         """
-        if self.force_nrt:
-            return True  # Override: always NRT mode
-        return process_date > day1
+        return mur_window.is_nrt_mode(process_date, day1, force_nrt=self.force_nrt)
 
     def _ordinal_day(self, date: datetime.date) -> int:
         """Get ordinal day (cumulative days since epoch)."""
@@ -297,8 +416,11 @@ class MUROrchestrator:
         year = process_date.year
         doy = process_date.timetuple().tm_yday
 
-        # Set up paths
-        input_dir = pathlib.Path(config["input_dir"])
+        # Resolve landice's six explicit static input files from the
+        # static-resources root (docs/static-data.html layout).
+        static_resources_dir = pathlib.Path(config["static_resources_dir"])
+        static_files = resolve_landice_static_files(static_resources_dir)
+
         # Two separate output directories matching production's NAS layout:
         #   p011 (1km):  /nas/ftp/mur_sst/tmchin/landice/
         #   p01 (0.01°): /nas2/landice/
@@ -311,8 +433,6 @@ class MUROrchestrator:
         logger.info(f"  Land/Ice ({mode_str}): {process_date} (DOY {doy})")
 
         # Docker command with required environment variables
-        # Note: Container expects positional args (year, doy) and uses
-        # hardcoded /input and /output paths inside the container
         cmd = ["docker", "run"]
         if not self.keep_containers:
             cmd.append("--rm")
@@ -327,23 +447,45 @@ class MUROrchestrator:
             "--cpus=2.0",
             # Java/memory settings
             "-e", "_JAVA_OPTIONS=-Xmx2048m -Xms512m -XX:+UseG1GC",
-            # OSISAF FTP endpoints for ice concentration data.
-            # Production uses the AMSR2-only product (OSI-408) — filenames are
-            # ice_conc_*_polstere-100_amsr2_*.nc — which lives in the amsr2_conc
-            # subtree. The conc/ subtree holds the multi-sensor product (OSI-401-d)
-            # which is what the icenew/ reference version was wired to; using it
-            # gives different marginal-ice-zone classifications than prod.
-            "-e", "OSISAF_FTP_REPROCESSED=ftp://osisaf.met.no/reprocessed/ice/conc/v1p2",
+            # OSISAF endpoints for ice concentration data. HTTPS throughout:
+            # OSI-SAF's anonymous FTP host is dead (connections time out).
+            # Production uses the single-sensor product (OSI-408) in the
+            # amsr2_conc subtree — filenames are ice_conc_*_polstere-100_
+            # amsr2|amsr3_*.nc, the sensor token switching at 2026-08-31 (see
+            # landice/src/readosisafice.m). The conc/ subtree holds the
+            # multi-sensor product (OSI-401-d) which is what the icenew/
+            # reference version was wired to; using it gives different
+            # marginal-ice-zone classifications than prod.
+            #
+            # OSISAF_FTP_REPROCESSED (pre-2009 dates) is deliberately not set:
+            # its old FTP path died with the rest of that host and the
+            # polstere-100 "reproc" product has no verified HTTPS equivalent.
+            # This pipeline only ever runs post-2009 days, so that branch is
+            # unreachable here; historical reprocessing must supply it.
             "-e", "OSISAF_FTP_ARCHIVE=https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc",
             "-e", "OSISAF_FTP_PROD=https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc",
-            # Volume mounts (container expects /input and /output/p011, /output/p01)
-            "-v", f"{input_dir.resolve()}:/input",
-            "-v", f"{output_dir_p011.resolve()}:/output/p011",
-            "-v", f"{output_dir_p01.resolve()}:/output/p01",
+            # Bind-mount each static file individually — one arg, one file,
+            # never the whole static-resources directory.
+            "-v", f"{static_files['landmask_p01'].resolve()}:/input/landmask-p01.gds:ro",
+            "-v", f"{static_files['gridindex_north_p01'].resolve()}:/input/gridindex-north-p01.mat:ro",
+            "-v", f"{static_files['gridindex_south_p01'].resolve()}:/input/gridindex-south-p01.mat:ro",
+            "-v", f"{static_files['landmask_p011'].resolve()}:/input/landmask-p011.gds:ro",
+            "-v", f"{static_files['gridindex_north_p011'].resolve()}:/input/gridindex-north-p011.mat:ro",
+            "-v", f"{static_files['gridindex_south_p011'].resolve()}:/input/gridindex-south-p011.mat:ro",
+            # MUR_OUTPUT_ROOT keeps local behaviour identical now that the
+            # entrypoint defaults to $PWD/output for CWL stage-out.
+            "-e", "MUR_OUTPUT_ROOT=/data/output",
+            "-v", f"{output_dir_p011.resolve()}:/data/output/p011",
+            "-v", f"{output_dir_p01.resolve()}:/data/output/p01",
             container_image,
-            # Positional arguments: year doy
-            str(year),
-            str(doy)
+            "--year", str(year),
+            "--doy", str(doy),
+            "--landmask-p01-file", "/input/landmask-p01.gds",
+            "--gridindex-north-p01-file", "/input/gridindex-north-p01.mat",
+            "--gridindex-south-p01-file", "/input/gridindex-south-p01.mat",
+            "--landmask-p011-file", "/input/landmask-p011.gds",
+            "--gridindex-north-p011-file", "/input/gridindex-north-p011.mat",
+            "--gridindex-south-p011-file", "/input/gridindex-south-p011.mat",
         ])
 
         try:
@@ -526,14 +668,29 @@ class MUROrchestrator:
             return True
 
         # Check if input files exist
-        if not input_dir.exists() or not list(input_dir.glob("*.nc")):
+        granule_files = list(input_dir.glob("*.nc"))
+        if not input_dir.exists() or not granule_files:
             logger.warning(f"    ⚠ No L2P input files for {sensor} {data_day}")
             self.stats["l2p_process"]["skipped"] += 1
             return True
 
         logger.info(f"    → Processing {sensor} {data_day} → BIC")
 
-        # Call container directly (5-arg simplified interface)
+        # Build the granules manifest -- container-side paths into the
+        # bind-mounted input_dir below, per docs/input-contract.html
+        # section 3. Scoped to
+        # this one invocation only (not cumulative), written to a temp file.
+        container_input_dir = "/data/l2p-input"
+        manifest = build_l2p_granules_manifest(granule_files, container_input_dir)
+        manifest_fd, manifest_path_str = tempfile.mkstemp(
+            prefix=f"l2p_manifest_{sensor}_{year}_{doy:03d}_", suffix=".json"
+        )
+        with os.fdopen(manifest_fd, "w") as f:
+            json.dump(manifest, f)
+        manifest_path = pathlib.Path(manifest_path_str)
+
+        # Call container directly with named flags -- indir is resolved
+        # inside the container from the manifest, not passed as a flag.
         cmd = ["docker", "run"]
         if not self.keep_containers:
             cmd.append("--rm")
@@ -542,14 +699,17 @@ class MUROrchestrator:
             *self.docker_extra_groups,
             "--memory=8g",
             "--shm-size=2g",
-            "-v", f"{input_dir.resolve()}:/data/input",
+            "-v", f"{input_dir.resolve()}:{container_input_dir}:ro",
+            "-v", f"{manifest_path.resolve()}:/data/manifest.json:ro",
+            "-e", "MUR_OUTPUT_ROOT=/data/output",
             "-v", f"{output_dir.resolve()}:/data/output",
             container_image,
-            sensor,
-            sensor_config["region"],
-            str(year),
-            str(doy),
-            str(1 if rewrite else 0)
+            "--sensor", sensor,
+            "--region", sensor_config["region"],
+            "--year", str(year),
+            "--doy", str(doy),
+            "--rewrite", str(1 if rewrite else 0),
+            "--granules-manifest", "/data/manifest.json",
         ])
 
         try:
@@ -561,6 +721,8 @@ class MUROrchestrator:
             logger.error(f"      ✗ Processing failed: {e}")
             self.stats["l2p_process"]["failed"] += 1
             return False
+        finally:
+            manifest_path.unlink(missing_ok=True)
 
     def run_l2p_sensor_download(self, sensor: str, process_date: datetime.date) -> bool:
         """
@@ -691,9 +853,6 @@ class MUROrchestrator:
             return True
 
         # Docker command
-        # Note: The iQUAM container determines what to process based on today's date
-        # internally via buoyDataProcessing.m. Pass MUR_SIMULATED_DATE env var so
-        # the container uses simulated "today" for historical reprocessing.
         cmd = ["docker", "run"]
         if not self.keep_containers:
             cmd.append("--rm")
@@ -707,16 +866,17 @@ class MUROrchestrator:
             "-v", f"{logs_dir.resolve()}:/data/logs",
         ])
 
-        # Pass simulated date to container if set (for historical reprocessing)
-        if mur_date.is_simulated():
-            simulated = mur_date.get_simulated_date()
-            cmd.extend(["-e", f"MUR_SIMULATED_DATE={simulated.strftime('%Y-%m-%d')}"])
-
         cmd.extend([
             container_image,
-            "/tmp/makebic",
-            "/data/logs",
-            "/data/output/iquam"
+            "--year", str(year),
+            "--doy", str(doy),
+            "--mode", format_iquam_mode(is_nrt),
+            "--reference-date", format_iquam_reference_date(reference_today),
+            "--work-dir", "/tmp/makebic",
+            "--log-dir", "/data/logs",
+            "--output-dir", "/data/output/iquam",
+            "--buoy-day-range", str(buoydayrange),
+            "--stability-latency", str(stablat),
         ])
 
         try:
@@ -784,6 +944,15 @@ class MUROrchestrator:
         static_resources_dir = pathlib.Path(
             config.get("static_resources_dir", "testing/static-resources")
         )
+        # L4 is a directory tree (static-resources/L4/GLOB/NCDC/AVHRR_OI/{year}/{doy}/*.bz2),
+        # not a single file -- bind-mounted whole and passed as a directory
+        # flag value, and only when it exists (see the mount block below:
+        # it's a bootstrap fallback, optional on both sides of the CLI).
+        # Real S3-recursive localization for this specific directory-shaped
+        # input is not implemented in common/bin/localize.sh (out of scope
+        # for this phase -- localize_input's `aws s3 cp` without --recursive
+        # won't sync a whole tree).
+        l4_reference_root = static_resources_dir / "L4"
 
         # Set up output paths
         csp_dir = pathlib.Path(
@@ -799,10 +968,10 @@ class MUROrchestrator:
             config.get("logs_dir", "testing/mrva/logs")
         )
 
-        # Create output directories and static resources directory
-        for directory in [
-            csp_dir, netcdf_dir, cache_dir, logs_dir, static_resources_dir
-        ]:
+        # Create output directories (static_resources_dir is read-only now --
+        # nothing writes back into it; makeSeasonal_container's seasonal25
+        # cache moved to cache_dir, matching its sibling ice cache).
+        for directory in [csp_dir, netcdf_dir, cache_dir, logs_dir]:
             directory.mkdir(parents=True, exist_ok=True)
 
         # Check for existing MRVA output (matches legacy nrtMRVA.py line 385)
@@ -839,8 +1008,25 @@ class MUROrchestrator:
         logger.info(f"    → Processing year {year}, DOY {doy}")
 
         # Build sensor list (optional - can be overridden)
-        active_sensors = config.get("active_sensors", [])
-        sensor_arg = ",".join(active_sensors) if active_sensors else ""
+        sensors_config = config.get("sensors", {})
+        active_sensors = config.get("active_sensors", list(sensors_config.keys()))
+
+        # Resolve every input as an explicit value
+        # (docs/input-contract.html) instead of mounting
+        # whole directories for the container to scan.
+        static_files = resolve_mrva_static_files(static_resources_dir, doy)
+        landice_files = resolve_mrva_landice_inputs(landice_p011_dir, landice_p01_dir, year, doy)
+        sensor_manifest = build_mrva_sensor_manifest(
+            bic_dir, iquam_dir, process_date, sensors_config, active_sensors
+        )
+        prior_csp = resolve_mrva_prior_csp(csp_dir, process_date, is_nrt)
+
+        manifest_fd, manifest_path_str = tempfile.mkstemp(
+            prefix=f"mrva_manifest_{year}_{doy:03d}_", suffix=".json"
+        )
+        with os.fdopen(manifest_fd, "w") as f:
+            json.dump(sensor_manifest, f)
+        manifest_path = pathlib.Path(manifest_path_str)
 
         # Generate unique container name for lifecycle management
         container_name = f"mrva_{year}_{doy:03d}_{int(time.time())}"
@@ -867,28 +1053,75 @@ class MUROrchestrator:
             simulated = mur_date.get_simulated_date()
             cmd.extend(["-e", f"MUR_SIMULATED_DATE={simulated.strftime('%Y-%m-%d')}"])
 
+        # Identity-mount every source root (host path == container path) so
+        # the manifest and resolved file flags below -- built from real host
+        # paths -- are valid unchanged from inside the container too; no
+        # separate container-path convention to track for six different roots.
+        source_roots = {bic_dir, iquam_dir, landice_p011_dir, landice_p01_dir,
+                        static_resources_dir}
+
+        # L4 is a bootstrap-only fallback: trimbip3a reads it solely when it
+        # gets no MUR reference coefficient, which never happens here because
+        # makeref always produces one. So mount and pass it only when it is
+        # actually staged -- a host without the L4 archive still runs. (Passing
+        # --l4-reference-root while silently skipping its mount is what
+        # produced "L4_REFERENCE_ROOT points at a directory that does not
+        # exist" from the container's own verify_inputs_exist().)
+        have_l4 = l4_reference_root.exists()
+        if have_l4:
+            source_roots.add(l4_reference_root)
+        else:
+            logger.info(
+                f"    → No L4 reference archive at {l4_reference_root}; "
+                "running without the L4 bootstrap fallback"
+            )
+
+        # Every remaining root backs a flag passed below, so a missing one
+        # can't just be dropped from the mount list -- the container would
+        # then fail on an unreadable path with no indication which host
+        # directory (or config key) is actually wrong.
+        missing_roots = sorted(str(r) for r in source_roots if not r.exists())
+        if missing_roots:
+            logger.error("    ✗ MRVA input root(s) missing on this host:")
+            for root in missing_roots:
+                logger.error(f"        {root}")
+            logger.error("    → Check the mrva section of the config file")
+            manifest_path.unlink(missing_ok=True)
+            self.stats["mrva"]["failed"] += 1
+            return False
+
         cmd.extend([
-            # Volume mounts for inputs (read-only)
-            "-v", f"{bic_dir.resolve()}:/data/input/bic:ro",
-            "-v", f"{iquam_dir.resolve()}:/data/input/iquam:ro",
-            "-v", f"{landice_p011_dir.resolve()}:/data/input/landice-p011:ro",
-            "-v", f"{landice_p01_dir.resolve()}:/data/input/landice-p01:ro",
-            "-v", f"{static_resources_dir.resolve()}:/data/static-resources:rw",
-            # Volume mounts for outputs
+            "-e", "MUR_OUTPUT_ROOT=/data/output",
             "-v", f"{csp_dir.resolve()}:/data/output/csp",
             "-v", f"{netcdf_dir.resolve()}:/data/output/netcdf",
             "-v", f"{cache_dir.resolve()}:/data/cache",
             "-v", f"{logs_dir.resolve()}:/data/logs",
-            container_image,
-            # Arguments: year doy mode [sensors]
-            str(year),
-            str(doy),
-            mode
         ])
+        for root in source_roots:
+            resolved_root = str(root.resolve())
+            cmd.extend(["-v", f"{resolved_root}:{resolved_root}:ro"])
 
-        # Add sensor list if specified
-        if sensor_arg:
-            cmd.append(sensor_arg)
+        cmd.extend([
+            "-v", f"{manifest_path.resolve()}:{manifest_path.resolve()}:ro",
+            container_image,
+            "--year", str(year),
+            "--doy", str(doy),
+            "--mode", mode,
+            "--polar-cap-edge-file", str(static_files["polar_cap_edge"].resolve()),
+            "--seasonal-file", str(static_files["seasonal"].resolve()),
+            "--landice-ice-p011-file", str(landice_files["landice_ice_p011"].resolve()),
+            "--landice-grid-p01-file", str(landice_files["landice_grid_p01"].resolve()),
+            "--landice-icefiles-p011-file", str(landice_files["landice_icefiles_p011"].resolve()),
+            "--sensor-inputs-manifest", str(manifest_path.resolve()),
+        ])
+        if have_l4:
+            cmd.extend(["--l4-reference-root", str(l4_reference_root.resolve())])
+        if active_sensors:
+            cmd.extend(["--sensors", ",".join(active_sensors)])
+        if static_files["mur25_grid"].exists():
+            cmd.extend(["--mur25-grid-file", str(static_files["mur25_grid"].resolve())])
+        if prior_csp is not None:
+            cmd.extend(["--prior-csp-file", str(prior_csp.resolve())])
 
         # MRVA timeout: 16 hours
         MRVA_TIMEOUT = 576000
@@ -1018,6 +1251,8 @@ class MUROrchestrator:
             subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
             self.stats["mrva"]["failed"] += 1
             return False
+        finally:
+            manifest_path.unlink(missing_ok=True)
 
     # ========================================================================
     # Stage 6: Purge Old L2P Downloads

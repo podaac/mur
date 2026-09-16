@@ -47,11 +47,6 @@ tests/out/
 .gitignore
 
 # Documentation (not needed in container)
-README.md
-REPROCESSING_DATES_README.md
-REFACTORING_SUMMARY.md
-BUILD_INSTRUCTIONS.md
-DEPLOYMENT.md
 *.md
 !Dockerfile*
 

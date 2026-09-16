@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MRVA container — MUR SST</title>
+<meta name="description" content="The analysis stage: fits the multi-scale field to every observation and writes the NetCDF product.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav>
+    <div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <a href="mrva-internals.html">MRVA internals</a>
+    <div class="nav-group">Operating it</div>
+    <a href="configuration.html">Configuration</a>
+    <a href="static-data.html">Static input data</a>
+    <a href="input-contract.html">Input contract</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a>
+    <div class="nav-group">Containers</div>
+    <a href="container-landice.html">Land/ice</a>
+    <a href="container-l2p.html">L2P</a>
+    <a href="container-iquam.html">iQUAM</a>
+    <a href="container-mrva.html" aria-current="page">MRVA</a>
+    <div class="nav-group">Reference</div>
+    <a href="landice-encoding.html">Land/ice encoding</a>
+    <a href="future.html">Future enhancements</a>
+    <div class="nav-group">Project</div>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>MRVA container</h1>
+    <p class="lede">The analysis stage: fits the multi-scale field to every observation and writes the NetCDF product.</p>
+    <nav class="toc" aria-label="On this page">
+    <b>On this page</b>
+    <ul>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#architecture">Architecture</a></li>
+      <li><a href="#prerequisites">Prerequisites</a></li>
+      <li><a href="#initial-setup">Initial Setup</a></li>
+      <li><a href="#building-the-container">Building the Container</a></li>
+      <li><a href="#running-the-container">Running the Container</a></li>
+      <li><a href="#testing">Testing</a></li>
+      <li><a href="#integration-with-orchestrator">Integration with Orchestrator</a></li>
+      <li><a href="#output-files">Output Files</a></li>
+      <li><a href="#performance-characteristics">Performance Characteristics</a></li>
+      <li><a href="#troubleshooting">Troubleshooting</a></li>
+      <li><a href="#advanced-configuration">Advanced Configuration</a></li>
+      <li><a href="#references">References</a></li>
+      <li><a href="#license">License</a></li>
+      <li><a href="#support">Support</a></li>
+    </ul>
+    </nav>
+    <p>This directory contains the containerized implementation of the MRVA (Multi-Resolution Variational Analysis) module for the MUR (Multi-scale Ultra-high Resolution) SST processing pipeline.</p>
+    <h2 id="overview">Overview</h2>
+    <p>MRVA is the core analysis stage of the MUR SST pipeline that combines satellite and in-situ observations using multi-scale variational analysis to produce high-resolution (~1 km) daily foundation sea surface temperature fields.</p>
+    <p><strong>Key Features:</strong></p>
+    <ul>
+    <li>Multi-scale progressive refinement (L=2-11, ~400 km down to ~1 km resolution)</li>
+    <li>Optimal interpolation with spatial smoothness constraints</li>
+    <li>Temporal decorrelation modeling (scale-dependent decay times)</li>
+    <li>GHRSST L4 compliant NetCDF4 output</li>
+    <li>OpenMP parallelized Fortran core with MATLAB orchestration</li>
+    </ul>
+    <h2 id="architecture">Architecture</h2>
+    <p>The MRVA container uses a multi-stage Docker build pattern:</p>
+    <ol>
+    <li><strong>Build Stage</strong>: Full MATLAB R2024b + gfortran compiler
+    <ul>
+    <li>Compiles 5 Fortran executables (<code>mrva</code>, <code>spgrid</code>, <code>trimbip3</code>, <code>makehiresgrid</code>, <code>samplegdscsp</code>)</li>
+    <li>Compiles MATLAB wrapper using <code>mcc</code> (includes 70+ MATLAB scripts)</li>
+    <li>Creates standalone deployment package</li>
+    </ul>
+    </li>
+    <li><strong>Runtime Stage</strong>: MATLAB Runtime R2024b only (~4GB vs ~8GB for full MATLAB)
+    <ul>
+    <li>Copies compiled binaries from build stage</li>
+    <li>Minimal dependencies (curl, wget, gzip, libgomp1)</li>
+    <li>Fixed container paths for reproducibility</li>
+    </ul>
+    </li>
+    </ol>
+    <h2 id="prerequisites">Prerequisites</h2>
+    <h3 id="system-requirements">System Requirements</h3>
+    <ul>
+    <li><strong>Memory</strong>: 32GB (NRT mode) to 64GB (REA mode) recommended
+    <ul>
+    <li>L=11 grid: 51,712 × 23,040 = 1.19 billion points</li>
+    <li>Processing memory: ~15GB per scale</li>
+    </ul>
+    </li>
+    <li><strong>CPU</strong>: 8-16 cores (OpenMP parallelization enabled)</li>
+    <li><strong>Disk</strong>: 10GB temporary space for intermediate files</li>
+    <li><strong>Docker</strong>: Version 20.10+ with platform support (linux/amd64)</li>
+    </ul>
+    <h3 id="build-requirements">Build Requirements</h3>
+    <ul>
+    <li>Access to JPL MATLAB license servers (network connectivity required during build)</li>
+    <li>MATLAB R2024b license with Compiler, Image Processing, and Statistics toolboxes</li>
+    <li>Docker with multi-stage build support</li>
+    </ul>
+    <h3 id="input-data-requirements">Input Data Requirements</h3>
+    <p>MRVA requires preprocessed data from earlier pipeline stages:</p>
+    <ol>
+    <li><strong>L2P Satellite Data</strong> (BIC.gz format)
+    <ul>
+    <li>From <code>l2p</code> module: <code>/testing/preprocessing/output/l2p/</code></li>
+    <li>Sensors: AMSR2R, MODISA, MODIST, AVMTAG, AVMTBG</li>
+    <li>Files: <code>Global_SENSOR_YYYY_DDD.bic.gz</code></li>
+    </ul>
+    </li>
+    <li><strong>iQUAM Buoy Data</strong> (BII format)
+    <ul>
+    <li>From <code>iquam</code> module: <code>/testing/preprocessing/output/iquam/</code></li>
+    <li>Files: <code>Global_IQUAM0_YYYY_DDD.bii</code></li>
+    </ul>
+    </li>
+    <li><strong>Land/Ice Masks</strong> (BIP format)
+    <ul>
+    <li>From <code>landice</code> module: <code>/testing/preprocessing/output/landice/YYYY/</code></li>
+    <li>Files: <code>Global_ice_YYYY_DDD.bip.gz</code>, <code>landiceP01_YYYY_DDD.gds.gz</code></li>
+    </ul>
+    </li>
+    <li><strong>Polar Cap Reference File</strong> (Static, one-time setup)
+    <ul>
+    <li><strong>File</strong>: <code>CylinderP01_edge.bip</code> (~33 MB)</li>
+    <li><strong>Location</strong>: <code>testing/static-resources/landice/CylinderP01_edge.bip</code></li>
+    <li><strong>Purpose</strong>: Synthetic observations for polar latitudes (89°-95° N/S) to handle coordinate singularity</li>
+    <li><strong>Generation</strong>: One-time using <code>makeedge.m</code> script (see setup section below)</li>
+    <li><strong>Note</strong>: This is a static reference file, not generated by preprocessing stages</li>
+    </ul>
+    </li>
+    </ol>
+    <h2 id="initial-setup">Initial Setup</h2>
+    <h3 id="generate-polar-cap-reference-file-one-time">Generate Polar Cap Reference File (One-Time)</h3>
+    <p>Before running MRVA for the first time, you must generate the static polar cap reference file:</p>
+    <pre><code class="language-bash"># Navigate to the legacy code directory
+    cd mur-internal/icenew/p01/
+
+    # Run MATLAB to generate the file
+    matlab -batch "addpath('../mat'); makeedge"</code></pre>
+    <p>This creates <code>/nas2/landice/CylinderP01_edge.bip</code> (~33 MB). For containerized deployment, copy it to the static resources directory:</p>
+    <pre><code class="language-bash"># Create static resources directory
+    mkdir -p testing/static-resources/landice
+
+    # Copy the generated file
+    cp /nas2/landice/CylinderP01_edge.bip \
+       testing/static-resources/landice/CylinderP01_edge.bip</code></pre>
+    <p><strong>What it does:</strong> Creates synthetic SST observations (-1.8°C, weight=100) at polar latitudes (89°-95° N/S) in a cylindrical grid pattern to handle coordinate singularity at the poles.</p>
+    <p><strong>Why it's needed:</strong> The MRVA algorithm needs observations at all latitudes. Real satellite/buoy data has gaps at extreme polar latitudes due to coordinate system limitations. This file provides synthetic "observations" to fill those gaps and prevent numerical instabilities.</p>
+    <p><strong>Note:</strong> This file never changes and only needs to be generated once. If missing, MRVA will run but with reduced accuracy at polar latitudes.</p>
+    <h2 id="building-the-container">Building the Container</h2>
+    <h3 id="quick-start">Quick Start</h3>
+    <p>Build with <code>build_module.sh</code> from the <code>mur/</code> directory:</p>
+    <pre><code class="language-bash">cd mur
+    ./build_module.sh mrva</code></pre>
+    <p>It builds the <code>mur-matlab-base:r2024b</code> image first if missing, checks that <code>network.lic</code> exists, builds <code>--platform linux/amd64</code> with the parent <code>mur/</code> directory as context, and tags the image <strong><code>mur-mrva:latest</code></strong> — the name <code>config.json</code> expects.</p>
+    <p><strong>Build Options:</strong></p>
+    <pre><code class="language-bash"># Force rebuild without cache (useful after code changes)
+    ./build_module.sh mrva --no-cache
+
+    # Debug build: symbols, bounds checking, uninitialized-variable and FP-exception traps
+    # (still tagged :latest, so the pipeline picks it up unchanged)
+    ./build_module.sh mrva --debug</code></pre>
+    <p><strong>Build Time:</strong> ~15-30 minutes (depends on network speed and CPU), plus ~15-20 minutes the first time the base image is built.</p>
+    <p><strong>Build Stages:</strong></p>
+    <ol>
+    <li>Compile Fortran executables with the Intel oneAPI toolchain (~2 min)</li>
+    <li>Compile the MATLAB application against <code>mur-matlab-base:r2024b</code> (~10-20 min)</li>
+    <li>Create runtime image (~2 min)</li>
+    </ol>
+    <h3 id="manual-build-advanced">Manual Build (Advanced)</h3>
+    <p>Only when <code>build_module.sh</code> doesn't fit — a custom tag, external CI, or debugging the Dockerfile. Build context must be the parent <code>mur</code> directory (for <code>common/</code>), and the base image must already exist (<code>./build_matlab_base.sh</code> from <code>mur/</code>):</p>
+    <pre><code class="language-bash">cd mur/mrva
+    docker build --platform linux/amd64 -t mur-mrva:latest -f Dockerfile ..
+
+    # Debug variant (what --debug passes)
+    docker build --platform linux/amd64 --build-arg DEBUG=1 -t mur-mrva:latest -f Dockerfile ..</code></pre>
+    <p>See <a href="configuration.html#manual-builds-advanced">Manual Builds (Advanced)</a>.</p>
+    <h2 id="running-the-container">Running the Container</h2>
+    <h3 id="container-interface">Container Interface</h3>
+    <p>Named args only — every input is an explicit flag, resolved by the calling Python orchestrator (<code>run_mur_pipeline.py</code> / <code>run_mur_maap.py</code>). See <code>mrva/bin/entrypoint.sh</code>'s <code>usage()</code> for the authoritative flag list; the static and dynamic input flags mirror <a href="static-data.html">static input data</a>.</p>
+    <pre><code class="language-bash">docker run [OPTIONS] mur-mrva:latest \
+      --year YEAR --doy DOY --mode MODE [--sensors LIST] \
+      --polar-cap-edge-file FILE --seasonal-file FILE \
+      --landice-ice-p011-file FILE --landice-grid-p01-file FILE --landice-icefiles-p011-file FILE \
+      --sensor-inputs-manifest FILE \
+      [--mur25-grid-file FILE] [--prior-csp-file FILE] [--l4-reference-root DIR] [--debug]</code></pre>
+    <p><strong>Arguments:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Argument</th><th>Required</th><th>Description</th><th>Example</th></tr></thead>
+    <tbody>
+    <tr><td><code>--year</code></td><td>Yes</td><td>4-digit year</td><td><code>2025</code></td></tr>
+    <tr><td><code>--doy</code></td><td>Yes</td><td>Day of year (1-366)</td><td><code>220</code></td></tr>
+    <tr><td><code>--mode</code></td><td>Yes</td><td>Processing mode: <code>nrt</code> or <code>rea</code></td><td><code>nrt</code></td></tr>
+    <tr><td><code>--sensors</code></td><td>No</td><td>Comma-separated sensor list (default: all configured)</td><td><code>AMSR2R,MODISA</code></td></tr>
+    <tr><td><code>--sensor-inputs-manifest</code></td><td>Yes</td><td>Path/href to a manifest JSON listing this run's BIC + iQuam files (schema: the <a href="input-contract.html#3-manifest-file-format">input contract</a>, §3)</td><td></td></tr>
+    <tr><td><code>--mur25-grid-file</code></td><td>No</td><td>Absent → skip MUR25 generation</td><td></td></tr>
+    <tr><td><code>--prior-csp-file</code></td><td>No</td><td>Absent → bootstrap reference field from L4 instead</td><td></td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p>Every <code>FILE</code>/<code>DIR</code> value may be a local path or an <code>s3://</code> href — resolved via <code>common/bin/localize.sh</code> before MATLAB runs.</p>
+    <p><strong>Processing Modes:</strong></p>
+    <ul>
+    <li><strong>NRT (Near Real-Time)</strong>: L0=6 → LF=11 (starts at ~50 km resolution)
+    <ul>
+    <li>Faster processing (~1-2 hours)</li>
+    <li>Used for recent data within stability latency</li>
+    <li>Interim product (may be reprocessed)</li>
+    </ul>
+    </li>
+    <li><strong>REA (Reanalysis)</strong>: L0=2 → LF=11 (starts at ~400 km resolution)
+    <ul>
+    <li>Comprehensive processing (~3-4 hours)</li>
+    <li>Used for stable historical data</li>
+    <li>Final product (not reprocessed)</li>
+    </ul>
+    </li>
+    </ul>
+    <h3 id="volume-mounts">Volume Mounts</h3>
+    <p>Output/working paths are still fixed container-internal bind mounts, unchanged from before — only the input side became explicit flags:</p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Container Path</th><th>Purpose</th><th>Example Host Path</th></tr></thead>
+    <tbody>
+    <tr><td><code>/data/output/csp/</code></td><td>Coefficient files (CSP format)</td><td><code>/local/mrva/output/csp/</code></td></tr>
+    <tr><td><code>/data/output/netcdf/</code></td><td>Final NetCDF4 products</td><td><code>/local/mrva/output/netcdf/</code></td></tr>
+    <tr><td><code>/data/cache/</code></td><td>Temporary working files</td><td><code>/local/mrva/cache/</code></td></tr>
+    <tr><td><code>/data/logs/</code></td><td>Execution logs</td><td><code>/local/mrva/logs/</code></td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p>Every input flag's value (a local path or an <code>s3://</code> href) needs to be reachable from inside the container — for local paths, bind-mount the source root at the same absolute path (<code>run_mur_pipeline.py</code> does this automatically); for <code>s3://</code> hrefs, no mount is needed at all.</p>
+    <h3 id="example-usage">Example Usage</h3>
+    <p><strong>In practice, use <code>run_mur_pipeline.py</code> (local) or <code>run_mur_maap.py</code> (MAAP)</strong> — both resolve every flag automatically (static-resource files, per-day landice outputs, and the sensor-inputs manifest) and invoke the container correctly. The flags below are for manual/debug invocation only:</p>
+    <pre><code class="language-bash">docker run --rm \
+      --memory=32g --shm-size=4g \
+      -v /local/static-resources:/local/static-resources:ro \
+      -v /local/preprocessing:/local/preprocessing:ro \
+      -v /local/manifest.json:/local/manifest.json:ro \
+      -v /local/mrva/output:/data/output \
+      -v /local/mrva/cache:/data/cache \
+      -v /local/mrva/logs:/data/logs \
+      mur-mrva:latest \
+      --year 2025 --doy 220 --mode nrt \
+      --polar-cap-edge-file /local/static-resources/landice/CylinderP01_edge.bip \
+      --seasonal-file /local/static-resources/seasonal/mur_220.nc \
+      --landice-ice-p011-file /local/preprocessing/landice-p011/2025/Global_ice_2025_220.bip \
+      --landice-grid-p01-file /local/preprocessing/landice-p01/2025/landiceP01_2025_220.gds.gz \
+      --landice-icefiles-p011-file /local/preprocessing/landice-p011/2025/icefiles_2025_220.txt \
+      --sensor-inputs-manifest /local/manifest.json \
+      --l4-reference-root /local/static-resources/L4</code></pre>
+    <h2 id="testing">Testing</h2>
+    <h3 id="basic-validation">Basic Validation</h3>
+    <p>Validates that the container is built correctly and all components are present:</p>
+    <pre><code class="language-bash">cd mur/mrva
+    ./test_container.sh basic</code></pre>
+    <p><strong>Tests:</strong></p>
+    <ul>
+    <li>✓ Image exists</li>
+    <li>✓ Entrypoint shows usage</li>
+    <li>✓ Fortran executables present</li>
+    <li>✓ MATLAB executable present</li>
+    <li>✓ Directory structure correct</li>
+    </ul>
+    <h3 id="full-processing-test">Full Processing Test</h3>
+    <p>Runs MRVA with sample data from preprocessing pipeline:</p>
+    <pre><code class="language-bash">cd mur/mrva
+    ./test_container.sh full</code></pre>
+    <p><strong>Prerequisites:</strong></p>
+    <ul>
+    <li>Preprocessing stages must be run first to generate test data</li>
+    <li>Run: <code>uv run run_mur_pipeline.py --config config.json --date 2024-08-08 --execute landice,iquam,l2p</code></li>
+    </ul>
+    <h2 id="integration-with-orchestrator">Integration with Orchestrator</h2>
+    <p>MRVA is integrated into the main pipeline orchestrator (<code>run_mur_pipeline.py</code>).</p>
+    <h3 id="configuration">Configuration</h3>
+    <p>Add MRVA configuration to <code>mur/config.json</code>:</p>
+    <pre><code class="language-json">{
+      "mrva": {
+        "container_image": "mur-mrva:latest",
+        "input_dir_bic": "testing/preprocessing/output/l2p",
+        "input_dir_iquam": "testing/preprocessing/output/iquam",
+        "input_dir_landice": "testing/preprocessing/output/landice",
+        "output_dir_csp": "testing/mrva/output/csp",
+        "output_dir_netcdf": "testing/mrva/output/netcdf",
+        "cache_dir": "testing/mrva/cache",
+        "logs_dir": "testing/mrva/logs",
+        "active_sensors": ["IQUAM0", "AMSR2R", "MODISA", "MODIST", "AVMTAG", "AVMTBG"],
+        "L0_nrt": 6,
+        "L0_rea": 2,
+        "LF": 11,
+        "decay": [48, 48, 48, 48, 48, 48, 42, 36, 30, 24, 18, 12]
+      }
+    }</code></pre>
+    <h3 id="running-via-orchestrator">Running via Orchestrator</h3>
+    <p>There is no separate <code>--run-mrva</code> flag — MRVA runs by default alongside landice/iquam/l2p unless you narrow the run with <code>--preprocess-only</code> or <code>--execute</code>:</p>
+    <pre><code class="language-bash"># Run full pipeline including MRVA
+    uv run run_mur_pipeline.py --config config.json --date 2024-08-08
+
+    # Run only MRVA stage (requires preprocessed inputs already present)
+    uv run run_mur_pipeline.py --config config.json --date 2024-08-08 --execute mrva --keep-containers
+
+    # Run full window (9 days) including MRVA
+    uv run run_mur_pipeline.py --config config.json --all-stages</code></pre>
+    <p><code>--keep-containers</code> is worth adding when debugging a specific day — it stops the container from being auto-removed on failure, so <code>docker logs &lt;container_name&gt;</code> still works afterward.</p>
+    <h2 id="output-files">Output Files</h2>
+    <h3 id="coefficient-files-csp-format">Coefficient Files (CSP Format)</h3>
+    <p><strong>Location:</strong> <code>/data/output/csp/YYYY/</code></p>
+    <p><strong>Files:</strong></p>
+    <ul>
+    <li><code>YYYYMMDDH_MRVA4_Global.c02</code> through <code>.c11</code> - Analysis coefficients per scale</li>
+    <li><code>YYYYMMDDH_MRVA4_Global.u06</code> through <code>.u08</code> - Uncertainty estimates (optional)</li>
+    </ul>
+    <p><strong>Format:</strong> Binary Fortran unformatted (see <code>filemod.f</code> for structure)</p>
+    <h3 id="netcdf4-output-ghrsst-l4">NetCDF4 Output (GHRSST L4)</h3>
+    <p><strong>Location:</strong> <code>/data/output/netcdf/YYYY/DDD/</code></p>
+    <p><strong>File:</strong> <code>YYYYMMDD090000-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-v02.0-fv04.1.nc</code></p>
+    <p><strong>Variables:</strong></p>
+    <ul>
+    <li><code>analysed_sst(time, lat, lon)</code> - Foundation SST [Kelvin, float32]</li>
+    <li><code>analysis_error(time, lat, lon)</code> - Uncertainty (1σ) [Kelvin, float32]</li>
+    <li><code>mask(time, lat, lon)</code> - Land/sea/ice classification [int8]</li>
+    <li><code>sea_ice_fraction(time, lat, lon)</code> - Ice concentration [0-1, float32]</li>
+    <li><code>dt_1km_data(time, lat, lon)</code> - Distance to high-res obs [km, float32]</li>
+    </ul>
+    <p><strong>Grid:</strong></p>
+    <ul>
+    <li>Longitude: -179.995° to 180.005° (36,000 points, 0.01° resolution)</li>
+    <li>Latitude: -89.995° to 89.995° (17,999 points, 0.01° resolution)</li>
+    <li>Time: Single daily analysis at 09:00 UTC</li>
+    </ul>
+    <p><strong>Compliance:</strong> GHRSST Data Specification v2.0</p>
+    <h2 id="performance-characteristics">Performance Characteristics</h2>
+    <h3 id="processing-time">Processing Time</h3>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Mode</th><th>Scales</th><th>Time (16 cores)</th><th>Memory</th></tr></thead>
+    <tbody>
+    <tr><td>NRT</td><td>L=6-11</td><td>~1-2 hours</td><td>~32 GB</td></tr>
+    <tr><td>REA</td><td>L=2-11</td><td>~3-4 hours</td><td>~64 GB</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Breakdown:</strong></p>
+    <ul>
+    <li>Data preparation (BIQ generation): ~5 min</li>
+    <li>Reference field generation: ~10 min</li>
+    <li>Outlier detection: ~5 min</li>
+    <li>Bias correction: ~5 min</li>
+    <li>MRVA core (L=2-11): ~30-45 min per scale</li>
+    <li>NetCDF generation: ~20 min</li>
+    </ul>
+    <h3 id="parallelization">Parallelization</h3>
+    <ul>
+    <li><strong>Fortran</strong>: OpenMP parallelization across observation loop
+    <ul>
+    <li>Set <code>--cpus=N</code> to control thread count</li>
+    <li>Scales well up to 16 cores</li>
+    <li>Memory bandwidth limited beyond 16 cores</li>
+    </ul>
+    </li>
+    <li><strong>MATLAB</strong>: Single-threaded orchestration
+    <ul>
+    <li>NetCDF generation can be backgrounded</li>
+    </ul>
+    </li>
+    </ul>
+    <h2 id="troubleshooting">Troubleshooting</h2>
+    <h3 id="build-issues">Build Issues</h3>
+    <p><strong>Problem:</strong> Compilation timeout after 10 minutes</p>
+    <pre><code>ERROR: Compilation failed or timed out after 10 minutes</code></pre>
+    <p><strong>Solution:</strong> Check MATLAB license server connectivity</p>
+    <ul>
+    <li>Verify network access to JPL license servers</li>
+    <li>Check firewall rules for port 7282</li>
+    <li>Try building with <code>--no-cache</code> to force re-download of mpm</li>
+    </ul>
+    <p><strong>Problem:</strong> Fortran compilation fails with gfortran</p>
+    <pre><code>Error: Unclassifiable statement at (1)</code></pre>
+    <p><strong>Solution:</strong> Fortran source uses fixed-form format</p>
+    <ul>
+    <li>Ensure Makefile uses <code>-ffixed-line-length-none</code> flag</li>
+    <li>Original code uses Intel Fortran; gfortran compatibility may vary</li>
+    <li>Consider using Intel oneAPI HPC Toolkit base image for production</li>
+    </ul>
+    <h3 id="runtime-issues">Runtime Issues</h3>
+    <p><strong>Problem:</strong> Container exits with "No such file or directory"</p>
+    <pre><code>ERROR: /opt/mrva/bin/mrva: No such file or directory</code></pre>
+    <p><strong>Solution:</strong> Platform mismatch (common on Apple Silicon)</p>
+    <ul>
+    <li>Add <code>--platform linux/amd64</code> to docker run command</li>
+    <li>Rebuild with <code>./build_module.sh mrva</code> (from <code>mur/</code>), which always builds <code>--platform linux/amd64</code></li>
+    </ul>
+    <p><strong>Problem:</strong> Out of memory error during L=10 or L=11</p>
+    <pre><code>Error: Memory allocation failed</code></pre>
+    <p><strong>Solution:</strong> Increase container memory limits</p>
+    <ul>
+    <li>NRT mode: Minimum 32GB (<code>--memory=32g</code>)</li>
+    <li>REA mode: Minimum 64GB (<code>--memory=64g</code>)</li>
+    <li>Also increase swap: <code>--memory-swap=72g</code></li>
+    <li>Check host system has sufficient RAM available</li>
+    </ul>
+    <p><strong>Problem:</strong> Missing input files</p>
+    <pre><code>WARNING: L2P data directory not found</code></pre>
+    <p><strong>Solution:</strong> Run preprocessing stages first</p>
+    <pre><code class="language-bash"># Generate required input data
+    uv run run_mur_pipeline.py --config config.json \
+      --date 2024-08-08 \
+      --execute landice,iquam,l2p</code></pre>
+    <h3 id="performance-issues">Performance Issues</h3>
+    <p><strong>Problem:</strong> Processing slower than expected</p>
+    <p><strong>Solutions:</strong></p>
+    <ol>
+    <li>Check CPU allocation: Ensure <code>--cpus=16</code> or similar</li>
+    <li>Verify OpenMP threads: Container should log thread count at startup</li>
+    <li>Check I/O: Slow disk or network mounts can bottleneck</li>
+    <li>Review logs: Look for repeated warnings or error-recovery loops</li>
+    </ol>
+    <h2 id="advanced-configuration">Advanced Configuration</h2>
+    <h3 id="custom-decay-times">Custom Decay Times</h3>
+    <p>Edit <code>config.json</code> to adjust temporal decorrelation parameters:</p>
+    <pre><code class="language-json">{
+      "mrva": {
+        "decay": [48, 48, 48, 48, 48, 48, 42, 36, 30, 24, 18, 12]
+      }
+    }</code></pre>
+    <ul>
+    <li>12 values corresponding to L=0 through L=11</li>
+    <li>Units: hours (time scale for exponential decay)</li>
+    <li>Lower values = stronger temporal constraint</li>
+    <li>Default values from production system</li>
+    </ul>
+    <h3 id="scale-range-adjustment">Scale Range Adjustment</h3>
+    <p>Modify start/end scales:</p>
+    <pre><code class="language-json">{
+      "mrva": {
+        "L0_nrt": 6,   # NRT starts at L=6 (~50 km)
+        "L0_rea": 2,   # REA starts at L=2 (~400 km)
+        "LF": 11        # Both end at L=11 (~1 km)
+      }
+    }</code></pre>
+    <p><strong>Trade-offs:</strong></p>
+    <ul>
+    <li>Higher L0 → Faster, but less large-scale constraint</li>
+    <li>Lower LF → Faster, but coarser output resolution</li>
+    </ul>
+    <h2 id="references">References</h2>
+    <h3 id="documentation">Documentation</h3>
+    <ul>
+    <li><strong>The algorithm</strong>: <a href="algorithm.html">the MRVA algorithm</a></li>
+    <li><strong>The implementation</strong>: <a href="mrva-internals.html">MRVA internals</a></li>
+    <li><strong>Daily scheduling</strong>: <a href="sequence.html">daily execution</a></li>
+    </ul>
+    <h3 id="source-code">Source Code</h3>
+    <ul>
+    <li><strong>Fortran</strong>: src/fortran/
+    <ul>
+    <li><code>mrva.f</code> - Main variational analysis</li>
+    <li><code>spmm.f</code> - Spline module (1266 lines)</li>
+    <li><code>filemod.f</code> - Binary I/O module</li>
+    <li><code>spgrid.f</code> - Coefficient sampling</li>
+    <li><code>trimbip3.f</code> - Outlier filtering</li>
+    <li><code>makehiresgrid.f</code> - Distance-to-land grid</li>
+    </ul>
+    </li>
+    <li><strong>MATLAB</strong>: src/matlab/
+    <ul>
+    <li><code>workflow/mrva4com.m</code> - Main orchestration</li>
+    <li><code>preprocessing/</code> - Data preparation (14 scripts)</li>
+    <li><code>io/</code> - Binary file I/O (16 scripts)</li>
+    <li><code>output/csp2nc4a.m</code> - NetCDF generation</li>
+    </ul>
+    </li>
+    </ul>
+    <h3 id="publications">Publications</h3>
+    <ul>
+    <li>Chin, T. M., et al. (2017). "A multi-scale high-resolution analysis of global sea surface temperature." <em>Remote Sensing of Environment</em>, 200, 154-169.</li>
+    <li>JPL MUR Project: https://podaac.jpl.nasa.gov/dataset/MUR-JPL-L4-GLOB-v4.1</li>
+    </ul>
+    <h2 id="license">License</h2>
+    <p>This software is subject to NASA JPL licensing terms. Contact the MUR team for details.</p>
+    <h2 id="support">Support</h2>
+    <p>For questions or issues:</p>
+    <ol>
+    <li>Check <a href="#troubleshooting">Troubleshooting</a> section</li>
+    <li>Review logs in <code>/data/logs/</code></li>
+    <li>Contact MUR development team</li>
+    </ol>
+    <p>The image ships MATLAB Runtime R2024b and Fortran built with gfortran (GCC).</p>
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. This site is
+      the documentation &mdash; there is no separate Markdown copy to fall out of date.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

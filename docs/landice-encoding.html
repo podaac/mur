@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Land/ice encoding — MUR SST</title>
+<meta name="description" content="Bit-level layout of the land/ice mask: what each flag means, how the values are built, and how to read them back.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav>
+    <div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <a href="mrva-internals.html">MRVA internals</a>
+    <div class="nav-group">Operating it</div>
+    <a href="configuration.html">Configuration</a>
+    <a href="static-data.html">Static input data</a>
+    <a href="input-contract.html">Input contract</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html">Running on MAAP</a>
+    <div class="nav-group">Containers</div>
+    <a href="container-landice.html">Land/ice</a>
+    <a href="container-l2p.html">L2P</a>
+    <a href="container-iquam.html">iQUAM</a>
+    <a href="container-mrva.html">MRVA</a>
+    <div class="nav-group">Reference</div>
+    <a href="landice-encoding.html" aria-current="page">Land/ice encoding</a>
+    <a href="future.html">Future enhancements</a>
+    <div class="nav-group">Project</div>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>Land/ice encoding</h1>
+    <p class="lede">Bit-level layout of the land/ice mask: what each flag means, how the values are built, and how to read them back.</p>
+    <nav class="toc" aria-label="On this page">
+    <b>On this page</b>
+    <ul>
+      <li><a href="#introduction">Introduction</a></li>
+      <li><a href="#bit-flag-structure">Bit Flag Structure</a></li>
+      <li><a href="#mask-values">Mask Values</a></li>
+      <li><a href="#processing-pipeline">Processing Pipeline</a></li>
+      <li><a href="#usage-examples">Usage Examples</a></li>
+      <li><a href="#data-validation">Data Validation</a></li>
+      <li><a href="#file-formats">File Formats</a></li>
+      <li><a href="#summary">Summary</a></li>
+      <li><a href="#references">References</a></li>
+    </ul>
+    </nav>
+    <h2 id="introduction">Introduction</h2>
+    <p>The MUR SST land/ice mask uses <strong>bitwise flag encoding</strong> to compactly represent multiple surface properties in a single <code>int8</code> value. This document explains the encoding scheme, mask values, processing pipeline, and usage examples.</p>
+    <h2 id="bit-flag-structure">Bit Flag Structure</h2>
+    <h3 id="flag-bits-definition">Flag Bits Definition</h3>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Bit Position</th><th>Mask Value</th><th>Flag Name</th><th>Meaning</th></tr></thead>
+    <tbody>
+    <tr><td><strong>Bit 0</strong></td><td><code>1</code> (<code>0001b</code>)</td><td><code>open_sea</code></td><td>Pixel contains ocean water</td></tr>
+    <tr><td><strong>Bit 1</strong></td><td><code>2</code> (<code>0010b</code>)</td><td><code>land</code></td><td>Pixel contains land</td></tr>
+    <tr><td><strong>Bit 2</strong></td><td><code>4</code> (<code>0100b</code>)</td><td><code>open_lake</code></td><td>Pixel contains lake water</td></tr>
+    <tr><td><strong>Bit 3</strong></td><td><code>8</code> (<code>1000b</code>)</td><td><code>ice_in_grid</code></td><td>Pixel contains ice (concentration &gt; 0%)</td></tr>
+    <tr><td><strong>Bit 4</strong></td><td><code>16</code> (<code>10000b</code>)</td><td><em>(reserved)</em></td><td>Currently unused</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="bitwise-testing">Bitwise Testing</h3>
+    <p><strong>Python/NumPy:</strong></p>
+    <pre><code class="language-python">import numpy as np
+
+    # Test if pixel has ice
+    has_ice = (mask &amp; 8) != 0
+
+    # Test if pixel is land
+    is_land = (mask &amp; 2) != 0
+
+    # Test if pixel is ocean (not land)
+    is_ocean = (mask &amp; 2) == 0
+
+    # Test if pixel is lake
+    is_lake = (mask &amp; 4) != 0
+
+    # Test if pixel is ice-covered ocean
+    ice_ocean = ((mask &amp; 8) != 0) &amp; ((mask &amp; 1) != 0)
+    # OR simply: ice_ocean = (mask == 9)</code></pre>
+    <p><strong>MATLAB:</strong></p>
+    <pre><code class="language-matlab">% Test if pixel has ice
+    has_ice = bitand(mask, 8) ~= 0;
+
+    % Test if pixel is land
+    is_land = bitand(mask, 2) ~= 0;
+
+    % Test if pixel is ocean
+    is_ocean = bitand(mask, 2) == 0;
+
+    % Test if pixel is ice-covered ocean
+    ice_ocean = (mask == 9);</code></pre>
+    <h2 id="mask-values">Mask Values</h2>
+    <h3 id="base-mask-values-static-classification">Base Mask Values (Static Classification)</h3>
+    <p>These values are defined in static land mask files:</p>
+    <ul>
+    <li><code>maskGLOBp01deg.gds</code> (0.01° resolution, ~1km)</li>
+    <li><code>maskGlob1km.gds</code> (1km resolution)</li>
+    </ul>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Value</th><th>Binary</th><th>Bits Set</th><th>Description</th><th>Source</th></tr></thead>
+    <tbody>
+    <tr><td><strong>1</strong></td><td><code>0001b</code></td><td>0</td><td><strong>Open sea</strong> - Ocean water</td><td>Base mask</td></tr>
+    <tr><td><strong>2</strong></td><td><code>0010b</code></td><td>1</td><td><strong>Land</strong> - Solid land</td><td>Base mask</td></tr>
+    <tr><td><strong>3</strong></td><td><code>0011b</code></td><td>0+1</td><td><strong>Coast/shore</strong> - Land-ocean boundary</td><td>Base mask</td></tr>
+    <tr><td><strong>4</strong></td><td><code>0100b</code></td><td>2</td><td><strong>Lake boundary</strong> - Lake edge marker</td><td>Base mask</td></tr>
+    <tr><td><strong>5</strong></td><td><code>0101b</code></td><td>0+2</td><td><strong>Open lake</strong> - Lake water (e.g., Great Lakes)</td><td>Base mask</td></tr>
+    <tr><td><strong>7</strong></td><td><code>0111b</code></td><td>0+1+2</td><td><strong>Lake shore</strong> - Lake-land boundary</td><td>Base mask</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Note:</strong> Coastal values (3, 7, and ice variants 11, 15) are <strong>simplified to 2 (land)</strong> in final NetCDF output.</p>
+    <h3 id="ice-modified-values-dynamic-date-dependent">Ice-Modified Values (Dynamic, Date-Dependent)</h3>
+    <p>When ice concentration &gt; 0% is detected in OSI-SAF data, <strong>bit 3 (value 8) is added</strong> to the base mask:</p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Base Value</th><th>Base Meaning</th><th>Ice Added</th><th>Final Value</th><th>Binary</th><th>Final Meaning</th></tr></thead>
+    <tbody>
+    <tr><td><strong>1</strong></td><td>Open sea</td><td>+8</td><td><strong>9</strong></td><td><code>1001b</code></td><td>Open sea with ice</td></tr>
+    <tr><td><strong>3</strong></td><td>Coast</td><td>+8</td><td><strong>11</strong></td><td><code>1011b</code></td><td>Coast with ice → <strong>simplified to 2</strong></td></tr>
+    <tr><td><strong>5</strong></td><td>Open lake</td><td>+8</td><td><strong>13</strong></td><td><code>1101b</code></td><td>Open lake with ice</td></tr>
+    <tr><td><strong>7</strong></td><td>Lake shore</td><td>+8</td><td><strong>15</strong></td><td><code>1111b</code></td><td>Lake shore with ice → <strong>simplified to 2</strong></td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="final-netcdf-output-values">Final NetCDF Output Values</h3>
+    <p>After post-processing, shoreline variants are collapsed to simple land:</p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Value</th><th>Binary</th><th>Meaning</th><th>Typical Usage</th></tr></thead>
+    <tbody>
+    <tr><td><strong>1</strong></td><td><code>0001b</code></td><td>Open sea (no ice)</td><td>Most ocean pixels year-round</td></tr>
+    <tr><td><strong>2</strong></td><td><code>0010b</code></td><td>Land</td><td>All land including coasts and shores</td></tr>
+    <tr><td><strong>5</strong></td><td><code>0101b</code></td><td>Open lake (no ice)</td><td>Great Lakes, Caspian Sea (summer)</td></tr>
+    <tr><td><strong>9</strong></td><td><code>1001b</code></td><td>Open sea with ice</td><td>Arctic/Antarctic seasonal ice zones</td></tr>
+    <tr><td><strong>13</strong></td><td><code>1101b</code></td><td>Open lake with ice</td><td>Frozen Great Lakes (winter)</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="seasonal-variation">Seasonal Variation</h3>
+    <p><strong>Summer (July-September, Northern Hemisphere):</strong></p>
+    <pre><code>Value 1 (ocean):      ~71% of pixels
+    Value 2 (land):       ~29% of pixels
+    Value 5 (lake):       &lt;0.1% of pixels
+    Value 9 (ice ocean):  ~0-2% (minimal Arctic ice)
+    Value 13 (ice lake):  0% (no frozen lakes)</code></pre>
+    <p><strong>Winter (January-March, Northern Hemisphere):</strong></p>
+    <pre><code>Value 1 (ocean):      ~64% of pixels
+    Value 2 (land):       ~29% of pixels
+    Value 5 (lake):       &lt;0.05% of pixels (some frozen)
+    Value 9 (ice ocean):  ~6-7% (extensive Arctic/Antarctic ice)
+    Value 13 (ice lake):  &lt;0.01% (frozen Great Lakes)</code></pre>
+    <h2 id="processing-pipeline">Processing Pipeline</h2>
+    <h3 id="step-1-static-mask-generation">Step 1: Static Mask Generation</h3>
+    <p><strong>Historical Process (not in current repo):</strong></p>
+    <ul>
+    <li>Tool: <code>grids/gmt/maskbin2gds.m</code></li>
+    <li>Input: GSHHS (Global Self-consistent Hierarchical High-resolution Shoreline) database</li>
+    <li>Output: <code>maskGLOBp01deg.gds</code>, <code>maskGlob1km.gds</code></li>
+    <li>Values: 1, 2, 3, 5, 7 (base land/water classification)</li>
+    </ul>
+    <p><strong>Mask Characteristics:</strong></p>
+    <ul>
+    <li>Resolution: 0.01° (~1 km at equator)</li>
+    <li>Coverage: Global (-180° to +180° lon, -90° to +90° lat)</li>
+    <li>Data type: int8</li>
+    <li>Static (does not change with date)</li>
+    </ul>
+    <h3 id="step-2-ice-data-integration">Step 2: Ice Data Integration</h3>
+    <p><strong>Tool:</strong> <code>makeicefiles.m</code> → <code>saf2bip.m</code></p>
+    <p><strong>Input:</strong></p>
+    <ul>
+    <li>Static mask file (<code>maskGLOBp01deg.gds</code>)</li>
+    <li>OSI-SAF ice concentration data:
+    <ul>
+    <li>Northern Hemisphere: <code>ice_conc_nh_polstere-100_multi_YYYYMMDD1200.nc</code></li>
+    <li>Southern Hemisphere: <code>ice_conc_sh_polstere-100_multi_YYYYMMDD1200.nc</code></li>
+    </ul>
+    </li>
+    </ul>
+    <p><strong>Processing Steps:</strong></p>
+    <ol>
+    <li><strong>Download ice data</strong> via <code>readosisafice()</code>
+    <ul>
+    <li>Source: EUMETSAT OSI-SAF FTP server</li>
+    <li>Fallback: Up to 10 days backward if current day unavailable</li>
+    </ul>
+    </li>
+    <li><strong>Quality control:</strong>
+    <ul>
+    <li>Reject ice concentration &lt; 30% (unreliable)</li>
+    <li>Reject ice concentration &gt; 100% (invalid)</li>
+    <li>Fill polar regions (lat ≥ 87.7°N/S) with 100% ice</li>
+    </ul>
+    </li>
+    <li><strong>Grid mapping:</strong>
+    <ul>
+    <li>Use pre-computed indices to map OSI-SAF polar grid → MUR global grid</li>
+    <li>Interpolate to 0.01° resolution</li>
+    </ul>
+    </li>
+    <li><strong>Ice flag addition:</strong>
+    <pre><code class="language-matlab">% Add bit 3 (value 8) where ice concentration &gt; 0%
+    knx = find(icemap &gt; 0 &amp; mask == 1);
+    if length(knx), mask(knx) = 9; end;  % Ocean with ice
+
+    knx = find(icemap &gt; 0 &amp; mask == 3);
+    if length(knx), mask(knx) = 11; end;  % Coast with ice
+
+    knx = find(icemap &gt; 0 &amp; mask == 5);
+    if length(knx), mask(knx) = 13; end;  % Lake with ice</code></pre></li>
+    </ol>
+    <p><strong>Output:</strong></p>
+    <ul>
+    <li><code>.gds</code> file: <code>landiceP01_YYYY_DDD.gds.gz</code> (land/ice mask, p01 / 0.01° resolution)</li>
+    <li><code>.bip</code> file: <code>G10_YYYY_DDD.bip</code> (ice SST points for MRVA)</li>
+    </ul>
+    <p><strong>Resolution note:</strong> The landice container also generates a legacy p011 (0.011° / ~1km) variant named <code>landice_YYYY_DDD.gds.gz</code> in the <code>land/p011/</code> directory. This was used by MUR v3 but is <strong>not consumed by the current MUR v4 pipeline</strong>. Only the p01 output (<code>landiceP01_</code> prefix, <code>land/p01/</code> directory) is used.</p>
+    <p><strong>Daily Update:</strong> Ice mask regenerated every day (no caching)</p>
+    <h3 id="step-3-netcdf-output-generation">Step 3: NetCDF Output Generation</h3>
+    <p><strong>Tool:</strong> <code>csp2nc4a.m</code> (MRVA post-processing)</p>
+    <p><strong>Processing:</strong></p>
+    <ol>
+    <li>Read daily landice mask file</li>
+    <li><strong>Simplify shoreline values:</strong>
+    <pre><code class="language-matlab">mask(mask == 3) = 2;   % Coast → land
+    mask(mask == 7) = 2;   % Lake shore → land
+    mask(mask == 11) = 2;  % Coast+ice → land
+    mask(mask == 15) = 2;  % Complex → land</code></pre></li>
+    <li>Write to NetCDF with CF-compliant metadata</li>
+    </ol>
+    <p><strong>NetCDF Attributes:</strong></p>
+    <pre><code>mask:valid_min = 1
+    mask:valid_max = 31
+    mask:flag_masks = 1, 2, 4, 8, 16
+    mask:flag_meanings = "open_sea land open_lake open_sea_with_ice_in_the_grid open_lake_with_ice_in_the_grid"
+    mask:comment = "mask can be used to further filter the data."</code></pre>
+    <h2 id="usage-examples">Usage Examples</h2>
+    <h3 id="example-1-extract-open-ocean-sst-no-ice-no-land">Example 1: Extract Open Ocean SST (No Ice, No Land)</h3>
+    <pre><code class="language-python">import xarray as xr
+    import numpy as np
+
+    # Load MUR SST NetCDF file
+    ds = xr.open_dataset('20250211090000-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-v02.0-fv04.1.nc')
+    mask = ds['mask'].values
+    sst = ds['analysed_sst'].values
+
+    # Method 1: Exact value
+    ocean_sst = sst[mask == 1]
+
+    # Method 2: Bitwise (more flexible)
+    is_ocean = ((mask &amp; 2) == 0) &amp; ((mask &amp; 8) == 0)  # Not land, not ice
+    ocean_sst = sst[is_ocean]
+
+    print(f"Ocean SST: mean={ocean_sst.mean():.2f} K, std={ocean_sst.std():.2f} K")</code></pre>
+    <h3 id="example-2-identify-ice-covered-regions">Example 2: Identify Ice-Covered Regions</h3>
+    <pre><code class="language-python"># All ice pixels (ocean + lake)
+    ice_mask = (mask &amp; 8) != 0
+    ice_sst = sst[ice_mask]
+
+    # Ice-covered ocean only
+    ice_ocean_mask = (mask == 9)
+    ice_ocean_sst = sst[ice_ocean_mask]
+
+    # Ice-covered lakes only
+    ice_lake_mask = (mask == 13)
+    ice_lake_sst = sst[ice_lake_mask]
+
+    # Calculate ice extent
+    ice_pixel_count = np.sum(ice_mask)
+    pixel_area_km2 = 1.0  # Approximate at equator
+    ice_extent_km2 = ice_pixel_count * pixel_area_km2
+
+    print(f"Ice extent: {ice_extent_km2 / 1e6:.2f} million km²")</code></pre>
+    <h3 id="example-3-exclude-coastal-pixels">Example 3: Exclude Coastal Pixels</h3>
+    <pre><code class="language-python">from scipy.ndimage import binary_dilation
+
+    # All coast is marked as land (value 2) after simplification
+    land_mask = (mask == 2)
+
+    # Create 3-pixel coastal buffer
+    coast_buffer = binary_dilation(land_mask, iterations=3)
+
+    # Extract offshore ocean only
+    offshore_mask = (mask == 1) &amp; ~coast_buffer
+    offshore_sst = sst[offshore_mask]
+
+    print(f"Offshore ocean pixels: {np.sum(offshore_mask)}")</code></pre>
+    <h3 id="example-4-lake-analysis">Example 4: Lake Analysis</h3>
+    <pre><code class="language-python"># Extract all lake pixels (frozen or unfrozen)
+    lake_mask = (mask == 5) | (mask == 13)
+    lake_sst = sst[lake_mask]
+
+    # Separate by ice status
+    lake_open = sst[mask == 5]
+    lake_frozen = sst[mask == 13]
+
+    print(f"Open lakes: {len(lake_open)} pixels, mean SST={lake_open.mean():.2f} K")
+    print(f"Frozen lakes: {len(lake_frozen)} pixels, mean SST={lake_frozen.mean():.2f} K")
+
+    # Identify frozen fraction
+    frozen_fraction = len(lake_frozen) / (len(lake_open) + len(lake_frozen))
+    print(f"Frozen lake fraction: {frozen_fraction:.1%}")</code></pre>
+    <h3 id="example-5-create-custom-mask">Example 5: Create Custom Mask</h3>
+    <pre><code class="language-python"># Define custom ocean region (tropical Pacific)
+    lat = ds['lat'].values
+    lon = ds['lon'].values
+
+    # Create meshgrid
+    lon_grid, lat_grid = np.meshgrid(lon, lat)
+
+    # Define region bounds
+    tropical_pacific = (
+        (lat_grid &gt;= -30) &amp; (lat_grid &lt;= 30) &amp;
+        (lon_grid &gt;= 120) &amp; (lon_grid &lt;= -80) &amp;
+        (mask == 1)  # Ocean only
+    )
+
+    tropical_sst = sst[tropical_pacific]
+    print(f"Tropical Pacific SST: {tropical_sst.mean():.2f} K")</code></pre>
+    <h2 id="data-validation">Data Validation</h2>
+    <h3 id="expected-value-distribution">Expected Value Distribution</h3>
+    <p>For a typical global MUR file (36000 × 18000 pixels):</p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Value</th><th>% of Pixels</th><th>Typical Count</th><th>Seasonal Variation</th></tr></thead>
+    <tbody>
+    <tr><td><strong>1</strong> (Ocean)</td><td>~71%</td><td>~460M</td><td>Stable</td></tr>
+    <tr><td><strong>2</strong> (Land)</td><td>~29%</td><td>~188M</td><td>Stable</td></tr>
+    <tr><td><strong>5</strong> (Lake)</td><td>&lt;0.1%</td><td>~500K</td><td>Stable</td></tr>
+    <tr><td><strong>9</strong> (Ice ocean)</td><td>0-7%</td><td>0-45M</td><td>High (winter max)</td></tr>
+    <tr><td><strong>13</strong> (Ice lake)</td><td>&lt;0.01%</td><td>0-50K</td><td>High (frozen lakes)</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="quality-check-function">Quality Check Function</h3>
+    <pre><code class="language-python">def validate_mask(mask):
+        """Validate MUR land/ice mask values."""
+        import numpy as np
+
+        valid_values = {1, 2, 5, 9, 13}
+        unique_vals = set(np.unique(mask))
+
+        # Check for invalid values
+        invalid = unique_vals - valid_values
+        if invalid:
+            print(f"❌ Invalid mask values found: {invalid}")
+            return False
+
+        # Check ocean percentage (should be ~71%)
+        ocean_pct = 100 * np.sum(mask == 1) / mask.size
+        if not (60 &lt; ocean_pct &lt; 80):
+            print(f"⚠️ Ocean percentage unusual: {ocean_pct:.1f}% (expected ~71%)")
+
+        # Check land percentage (should be ~29%)
+        land_pct = 100 * np.sum(mask == 2) / mask.size
+        if not (20 &lt; land_pct &lt; 40):
+            print(f"⚠️ Land percentage unusual: {land_pct:.1f}% (expected ~29%)")
+
+        # Print statistics
+        print(f"✅ Mask validation passed")
+        print(f"   Ocean (1):     {ocean_pct:.2f}%")
+        print(f"   Land (2):      {land_pct:.2f}%")
+        print(f"   Lake (5):      {100*np.sum(mask==5)/mask.size:.3f}%")
+        print(f"   Ice ocean (9): {100*np.sum(mask==9)/mask.size:.2f}%")
+        print(f"   Ice lake (13): {100*np.sum(mask==13)/mask.size:.3f}%")
+
+        return True
+
+    # Example usage
+    ds = xr.open_dataset('mur_sst.nc')
+    validate_mask(ds['mask'].values)</code></pre>
+    <h3 id="physical-consistency-checks">Physical Consistency Checks</h3>
+    <pre><code class="language-python">def check_ice_sst_consistency(sst, mask):
+        """Verify that ice-covered pixels have appropriate SST."""
+        import numpy as np
+
+        # Ice pixels should have SST near freezing (~271-273 K)
+        ice_mask = (mask &amp; 8) != 0
+        ice_sst = sst[ice_mask]
+
+        # Check range
+        min_ice_sst = ice_sst.min()
+        max_ice_sst = ice_sst.max()
+
+        if min_ice_sst &lt; 270:
+            print(f"⚠️ Ice SST too cold: {min_ice_sst:.2f} K")
+
+        if max_ice_sst &gt; 274:
+            print(f"⚠️ Ice SST too warm: {max_ice_sst:.2f} K")
+
+        print(f"Ice SST range: {min_ice_sst:.2f} - {max_ice_sst:.2f} K")
+        print(f"Ice SST mean: {ice_sst.mean():.2f} K")</code></pre>
+    <h2 id="file-formats">File Formats</h2>
+    <h3 id="gds-file-structure-fortran-binary">.gds File Structure (Fortran Binary)</h3>
+    <p><strong>Layout:</strong></p>
+    <pre><code>Record 1: ii, jj (int32 × 2)                    - Grid dimensions
+    Record 2: mask(ii,jj), lon(ii), lat(jj) (bytes) - int8 array + float32 arrays
+    Record 3: icemap(ii,jj) (int8)                  - Ice concentration [0-100]</code></pre>
+    <p><strong>Details:</strong></p>
+    <ul>
+    <li><code>ii</code>, <code>jj</code>: Grid dimensions (e.g., 36000 × 18000 for 0.01° global)</li>
+    <li><code>mask</code>: Land/ice mask values (int8)</li>
+    <li><code>lon</code>: Longitude array (float32, -180 to +180)</li>
+    <li><code>lat</code>: Latitude array (float32, -90 to +90)</li>
+    <li><code>icemap</code>: Ice concentration (int8, 0-100% or -1 for no ice)</li>
+    </ul>
+    <h3 id="reading-gds-in-python">Reading .gds in Python</h3>
+    <pre><code class="language-python">import struct
+    import numpy as np
+
+    def read_gds_file(filename):
+        """Read MUR land/ice .gds file."""
+        with open(filename, 'rb') as f:
+            # Read grid dimensions (Fortran record)
+            rec_len = struct.unpack('i', f.read(4))[0]
+            ii, jj = struct.unpack('ii', f.read(8))
+            rec_len_end = struct.unpack('i', f.read(4))[0]
+            assert rec_len == rec_len_end, "Record length mismatch"
+
+            print(f"Grid dimensions: {ii} × {jj}")
+
+            # Read mask, lon, lat
+            rec_len = struct.unpack('i', f.read(4))[0]
+            mask = np.frombuffer(f.read(ii * jj), dtype='int8').reshape((jj, ii))
+            lon = np.frombuffer(f.read(ii * 4), dtype='float32')
+            lat = np.frombuffer(f.read(jj * 4), dtype='float32')
+            rec_len_end = struct.unpack('i', f.read(4))[0]
+
+            # Read icemap
+            rec_len = struct.unpack('i', f.read(4))[0]
+            icemap = np.frombuffer(f.read(ii * jj), dtype='int8').reshape((jj, ii))
+            rec_len_end = struct.unpack('i', f.read(4))[0]
+
+        return {
+            'mask': mask,
+            'lon': lon,
+            'lat': lat,
+            'icemap': icemap
+        }
+
+    # Example usage
+    data = read_gds_file('/nas2/gds/2025/G10_2025_042.gds')
+    print(f"Mask values: {np.unique(data['mask'])}")
+    print(f"Ice coverage: {np.sum(data['icemap'] &gt; 0)} pixels")</code></pre>
+    <h3 id="writing-gds-in-python">Writing .gds in Python</h3>
+    <pre><code class="language-python">def write_gds_file(filename, mask, lon, lat, icemap):
+        """Write MUR land/ice .gds file."""
+        jj, ii = mask.shape
+
+        with open(filename, 'wb') as f:
+            # Write grid dimensions
+            rec_len = 8  # 2 × int32
+            f.write(struct.pack('i', rec_len))
+            f.write(struct.pack('ii', ii, jj))
+            f.write(struct.pack('i', rec_len))
+
+            # Write mask, lon, lat
+            rec_len = ii * jj + ii * 4 + jj * 4
+            f.write(struct.pack('i', rec_len))
+            f.write(mask.astype('int8').tobytes())
+            f.write(lon.astype('float32').tobytes())
+            f.write(lat.astype('float32').tobytes())
+            f.write(struct.pack('i', rec_len))
+
+            # Write icemap
+            rec_len = ii * jj
+            f.write(struct.pack('i', rec_len))
+            f.write(icemap.astype('int8').tobytes())
+            f.write(struct.pack('i', rec_len))
+
+    # Example: Create custom mask
+    mask = np.ones((18000, 36000), dtype='int8')  # All ocean
+    icemap = np.zeros((18000, 36000), dtype='int8') - 1  # No ice
+    lon = np.linspace(-180, 180, 36000, dtype='float32')
+    lat = np.linspace(-90, 90, 18000, dtype='float32')
+
+    write_gds_file('custom_mask.gds', mask, lon, lat, icemap)</code></pre>
+    <h2 id="summary">Summary</h2>
+    <p>The MUR land/ice mask encoding:</p>
+    <ul>
+    <li><strong>Compact representation:</strong> Single int8 value encodes 4 surface properties</li>
+    <li><strong>Bitwise flags:</strong> Allows flexible filtering (ocean, land, lake, ice)</li>
+    <li><strong>Daily updates:</strong> Ice extent changes daily based on OSI-SAF data</li>
+    <li><strong>Simplified output:</strong> Coastal complexity reduced to land (value 2) in final products</li>
+    <li><strong>Quality assured:</strong> Expected value distributions validate processing</li>
+    </ul>
+    <p><strong>Key Values:</strong></p>
+    <ul>
+    <li><code>1</code> - Open ocean (most common, ~71% of pixels)</li>
+    <li><code>2</code> - Land (all land including coasts, ~29%)</li>
+    <li><code>5</code> - Lakes (Great Lakes, etc., &lt;0.1%)</li>
+    <li><code>9</code> - Ice-covered ocean (Arctic/Antarctic, seasonal)</li>
+    <li><code>13</code> - Frozen lakes (winter only, rare)</li>
+    </ul>
+    <h2 id="references">References</h2>
+    <ul>
+    <li><a href="index.html">System overview</a> - System architecture</li>
+    <li><a href="container-landice.html">Land/ice container</a> - Land/ice processing details</li>
+    <li>OSI-SAF ice data: https://osi-saf.eumetsat.int/</li>
+    <li>GHRSST format: https://www.ghrsst.org/</li>
+    </ul>
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. This site is
+      the documentation &mdash; there is no separate Markdown copy to fall out of date.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>

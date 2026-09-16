@@ -65,9 +65,12 @@ The build script automatically:
 - After: 1 shared base layer = ~3.5GB
 - **Savings: ~10.5GB**
 
-## Manual Builds (Alternative)
+## Manual Builds (Advanced)
 
-If you prefer to build manually without the scripts:
+`build_matlab_base.sh` / `build_module.sh` are the supported path. Build by hand only when
+you need something they don't do — a custom tag, an external CI system, or debugging a
+Dockerfile. Note the `mur-` prefixed tags: the pipeline's `config.json` looks for exactly
+these names.
 
 ```bash
 # Build base image
@@ -82,10 +85,10 @@ cd mur/l2p
 docker build --platform linux/amd64 -t mur-l2p:latest -f Dockerfile ..
 
 cd mur/landice
-docker build --platform linux/amd64 -t landice:latest -f Dockerfile ..
+docker build --platform linux/amd64 -t mur-landice:latest -f Dockerfile ..
 
 cd mur/mrva
-docker build --platform linux/amd64 -t mrva:latest -f Dockerfile ..
+docker build --platform linux/amd64 -t mur-mrva:latest -f Dockerfile ..
 ```
 
 ## Rebuilding the Base Image
@@ -144,8 +147,8 @@ This is a MATLAB compilation error (not base image related). Check:
              │
              ├──> mur-iquam:latest    (runtime + iquam binaries)
              ├──> mur-l2p:latest      (runtime + l2p binaries)
-             ├──> landice:latest      (runtime + landice binaries)
-             └──> mrva:latest         (runtime + mrva binaries + fortran)
+             ├──> mur-landice:latest  (runtime + landice binaries)
+             └──> mur-mrva:latest     (runtime + mrva binaries + fortran)
 ```
 
 ## What Changed in the Dockerfiles

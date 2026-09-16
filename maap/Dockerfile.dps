@@ -1,0 +1,33 @@
+# DPS variant of a MUR module image.
+#
+# WHY THIS EXISTS
+#   The module images set ENTRYPOINT ["/opt/<module>/bin/entrypoint.sh"], which
+#   is right for `docker run <image> --year 2026 ...` as run_mur_pipeline.py
+#   invokes them. But CWL sets `baseCommand`, and Docker APPENDS the command to
+#   ENTRYPOINT rather than replacing it -- so a CWL job would execute
+#
+#       entrypoint.sh /opt/landice/bin/entrypoint.sh --year 2026 ...
+#
+#   and every MUR entrypoint rejects unknown positional args with
+#   "ERROR: Unknown argument", exiting 1. (MAAP's own stac_clip reference
+#   Containerfile declares no ENTRYPOINT for exactly this reason.)
+#
+#   Clearing ENTRYPOINT in a derived image is a metadata-only change: it adds
+#   no layer content, builds in about a second, and leaves the base image --
+#   and therefore local execution -- completely untouched.
+#
+# BUILD
+#   See utils/build_dps_images.sh, which builds all four.
+#
+#     docker build -f maap/Dockerfile.dps \
+#       --build-arg BASE_IMAGE=ghcr.io/podaac/mur/landice:1.0.0 \
+#       -t ghcr.io/podaac/mur/landice-dps:1.0.0 maap/
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# CWL supplies the command via baseCommand; an ENTRYPOINT would prefix it.
+ENTRYPOINT []
+
+# No CMD either: CWL always supplies one, and a stray default would run if a
+# human invoked this image bare, which should instead fail loudly.
+CMD []

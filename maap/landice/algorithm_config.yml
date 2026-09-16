@@ -1,0 +1,85 @@
+# OGC Application Package description for the MUR landice module.
+#
+# Consumed by MAAP-Project/ogc-app-pack-generator's build_cwl_workflow.py to
+# produce maap/cwl_workflows/process_mur-landice_1.0.0.cwl. See maap/README.md
+# for the generate -> validate -> deploy sequence.
+#
+# algorithm_name must stay "mur-landice": run_mur_maap.py submits against that
+# process_id string directly.
+algorithm_description: >
+  MUR land/sea/ice mask generation for one analysis day. Downloads OSI-SAF sea
+  ice concentration from thredds.met.no and grids it onto the MUR 0.01-degree
+  (p01) and 0.011-degree (p011) cylindrical grids, emitting the ice BIP, the
+  ice-flagged land mask, and the icefiles listing for each resolution.
+algorithm_name: mur-landice
+algorithm_version: "1.0.0"
+
+# Pre-built image, so no Dockerfile build is needed at registration time. This
+# is the "-dps" variant, which clears ENTRYPOINT so CWL's baseCommand runs
+# directly rather than being appended to it (see maap/Dockerfile.dps). It must
+# be anonymously pullable: a CWL DockerRequirement carries no credentials.
+algorithm_container_url: ghcr.io/podaac/mur/landice-dps:1.0.0
+
+keywords: MUR, SST, sea ice, OSI-SAF, land mask, GHRSST
+code_repository: https://github.com/podaac/mur
+citation: >
+  Chin, T.M., Vazquez-Cuervo, J., Armstrong, E.M. (2017). A multi-scale
+  high-resolution analysis of global sea surface temperature. Remote Sensing
+  of Environment, 200, 154-169.
+author: JPL PO.DAAC MUR Team
+contributor: JPL PO.DAAC MUR Team
+license: https://github.com/podaac/mur/blob/main/LICENSE
+release_notes: >
+  First MAAP OGC application package for landice. Requires the MUR_OUTPUT_ROOT
+  stage-out change: output now defaults to $PWD/output so CWL's
+  "glob: ./output*" can collect it.
+
+run_command: /opt/landice/bin/entrypoint.sh
+
+# 6 GiB / 2 cores, matching the proven local --memory=6g cap. DPS has no
+# swap, so this is the floor rather than the 8g memory-swap ceiling.
+ram_min: 6144
+cores_min: 2
+outdir_max: 2048   # mebibytes; measured outputs are ~8.5 MB/day
+
+inputs:
+  - name: year
+    label: Year
+    doc: Four-digit analysis year, e.g. 2026.
+    type: string
+  - name: doy
+    label: Day of year
+    doc: Day of year, 1-366.
+    type: string
+  - name: landmask-p01-file
+    label: 0.01-degree land mask
+    doc: >
+      s3:// href to grids/maskGLOBp01deg.gds under the static-resources root.
+      Fetched inside the container by common/bin/localize.sh.
+    type: string
+  - name: gridindex-north-p01-file
+    label: 0.01-degree NH OSI-SAF index
+    doc: s3:// href to mat/p01/saf2north.mat.
+    type: string
+  - name: gridindex-south-p01-file
+    label: 0.01-degree SH OSI-SAF index
+    doc: s3:// href to mat/p01/saf2south.mat.
+    type: string
+  - name: landmask-p011-file
+    label: 0.011-degree land mask
+    doc: s3:// href to grids/maskGlob1km.gds.
+    type: string
+  - name: gridindex-north-p011-file
+    label: 0.011-degree NH OSI-SAF index
+    doc: s3:// href to mat/p011/saf2north.mat.
+    type: string
+  - name: gridindex-south-p011-file
+    label: 0.011-degree SH OSI-SAF index
+    doc: s3:// href to mat/p011/saf2south.mat.
+    type: string
+
+# One Directory: DPS stages out everything under it. The entrypoint writes
+# p01/ and p011/ subdirectories inside.
+outputs:
+  - name: output
+    type: Directory
