@@ -196,3 +196,40 @@ def test_from_config_warns_when_landice_and_mrva_disagree(tmp_path, capsys):
     }))
     assert upload.source_root_from_config(config) == pathlib.Path("/a")
     assert "different" in capsys.readouterr().err
+
+
+# --- response shape --------------------------------------------------------
+#
+# Two documented shapes disagree: MAAP's OGC docs show snake_case nested under
+# "credentials", while maap-py's own workspace_bucket_credentials docstring
+# describes a flat camelCase object. Accept both rather than bet on one.
+
+CAMEL_SHAPE = {
+    "accessKeyId": "AKIAEXAMPLE",
+    "secretAccessKey": "secret",
+    "sessionToken": "token",
+    "expiration": "2026-09-16T18:42:11Z",
+}
+
+
+@pytest.mark.parametrize("shape", [MAAP_SHAPE, STS_SHAPE, CAMEL_SHAPE])
+def test_every_documented_shape_normalizes_identically(shape):
+    payload = upload._normalize_credentials(shape)
+    assert payload == {
+        "access_key": "AKIAEXAMPLE",
+        "secret_key": "secret",
+        "token": "token",
+        "expiry_time": "2026-09-16T18:42:11Z",
+    }
+
+
+def test_maap_py_docstring_shape_is_accepted():
+    """maap-py 5.1.0's AWS.workspace_bucket_credentials documents
+    accessKeyId/secretAccessKey/sessionToken/expiration, flat. Reading only
+    the OGC docs' nested snake_case shape would fail on the real response."""
+    assert upload._normalize_credentials(CAMEL_SHAPE)["access_key"] == "AKIAEXAMPLE"
+
+
+def test_an_unrecognized_shape_names_the_keys_it_saw():
+    with pytest.raises(ValueError, match="got keys"):
+        upload._normalize_credentials({"nonsense": 1})

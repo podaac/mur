@@ -67,36 +67,17 @@ def _maap_client():
     return MAAP()
 
 
-def _credentials_payload(maap) -> Dict:
-    """One call to MAAP, normalized into botocore's metadata shape."""
-    resp = maap.aws.workspace_bucket_credentials()
-    creds = resp["credentials"]
-    return {
-        "access_key": creds["aws_access_key_id"],
-        "secret_key": creds["aws_secret_access_key"],
-        "token": creds["aws_session_token"],
-        "expiry_time": creds.get("expires_at") or creds.get("expiration"),
-    }, resp
+def _normalize_credentials(data: Dict) -> Dict:
+    """Coerce a credentials response into botocore's metadata shape.
 
-
-def _credentials_from_command(command: str) -> Dict:
-    """Refresh credentials by running a shell command that prints JSON.
-
-    The escape hatch for a host that cannot install maap-py or reach the MAAP
-    API -- a production NAS box, typically. The command is re-run on every
-    refresh, not once, which is what keeps a multi-hour upload alive: anything
-    that can mint fresh credentials works, including an ssh back to a
-    workspace that runs maap-py there.
-
-    Accepts either MAAP's own response shape or a flat AWS-style object, so a
-    command can pipe `maap.aws.workspace_bucket_credentials()` straight
-    through without reshaping it.
+    Two documented shapes disagree, so accept both rather than pick:
+    MAAP's OGC docs show snake_case nested under a "credentials" key
+    (aws_access_key_id / expires_at), while maap-py's own
+    workspace_bucket_credentials docstring describes a flat camelCase object
+    (accessKeyId / sessionToken / expiration). A flat STS-style response
+    (AccessKeyId / SessionToken / Expiration) is handled too, so the same
+    parser serves --credentials-command.
     """
-    import subprocess
-
-    out = subprocess.run(command, shell=True, check=True,
-                         capture_output=True, text=True).stdout
-    data = json.loads(out)
     creds = data.get("credentials", data)
 
     def pick(*names):
@@ -106,18 +87,45 @@ def _credentials_from_command(command: str) -> Dict:
         return None
 
     payload = {
-        "access_key": pick("aws_access_key_id", "AccessKeyId", "access_key"),
-        "secret_key": pick("aws_secret_access_key", "SecretAccessKey", "secret_key"),
-        "token": pick("aws_session_token", "SessionToken", "token"),
+        "access_key": pick("aws_access_key_id", "accessKeyId", "AccessKeyId", "access_key"),
+        "secret_key": pick("aws_secret_access_key", "secretAccessKey",
+                           "SecretAccessKey", "secret_key"),
+        "token": pick("aws_session_token", "sessionToken", "SessionToken", "token"),
         "expiry_time": pick("expires_at", "expiration", "Expiration", "expiry_time"),
     }
     missing = [k for k, v in payload.items() if not v and k != "token"]
     if missing:
         raise ValueError(
-            f"--credentials-command output is missing {missing}. Expected MAAP's "
-            f"workspace_bucket_credentials() response or a flat AWS credentials object."
+            f"credentials response is missing {missing}; got keys {sorted(creds)}. "
+            f"Expected MAAP's workspace_bucket_credentials() response or a flat "
+            f"AWS credentials object."
         )
-    return payload, data
+    return payload
+
+
+def _credentials_payload(maap) -> Dict:
+    """One call to MAAP, normalized into botocore's metadata shape."""
+    resp = maap.aws.workspace_bucket_credentials()
+    return _normalize_credentials(resp), resp
+
+
+def _credentials_from_command(command: str) -> Dict:
+    """Refresh credentials by running a shell command that prints JSON.
+
+    The escape hatch for a host that cannot install maap-py or reach the MAAP
+    API. The command is re-run on every refresh, not once, which is what keeps
+    a multi-hour upload alive: anything that can mint fresh credentials works,
+    including an ssh back to a workspace that runs maap-py there.
+
+    Shape handling is shared with the maap-py path, so a command can pipe
+    workspace_bucket_credentials() straight through without reshaping it.
+    """
+    import subprocess
+
+    out = subprocess.run(command, shell=True, check=True,
+                         capture_output=True, text=True).stdout
+    data = json.loads(out)
+    return _normalize_credentials(data), data
 
 
 def make_session(args, maap=None):
@@ -319,8 +327,14 @@ def check_environment(args) -> int:
         payload, resp = _credentials_payload(maap)
     except Exception as exc:                              # noqa: BLE001
         print(f"  credentials        FAILED: {exc}")
-        print("                     Outside a workspace you need a MAAP token from")
-        print("                     https://console.maap-project.org/profile/tokens")
+        print("                     Inside a workspace this should just work.")
+        print("                     Elsewhere, maap-py authenticates with a MAAP")
+        print("                     token -- NOT an AWS profile; it mints temporary")
+        print("                     AWS credentials for you:")
+        print("                       pip install 'maap-py>=5.1.0'")
+        print("                       export MAAP_PGT='<token>'   # console.maap-project.org/profile/tokens")
+        print("                       export MAAP_API_HOST=api.maap-project.org  # default")
+        print("                     The host needs outbound HTTPS to that API and to S3.")
         return 1
     print(f"  credentials        OK, expire {payload['expiry_time']}")
 
@@ -383,8 +397,14 @@ def default_destination(maap) -> str:
     authorized_s3_paths[0] is documented as always being the workspace path.
     """
     _, resp = _credentials_payload(maap)
-    workspace = resp["authorized_s3_paths"][0]
-    return f"{workspace['uri'].rstrip('/')}/{DEFAULT_SUBPREFIX}"
+    paths = resp.get("authorized_s3_paths")
+    if not paths:
+        raise SystemExit(
+            "The credentials response carried no authorized_s3_paths, so the "
+            "destination cannot be discovered. Pass --dest explicitly, e.g.\n"
+            "  --dest s3://maap-ops-workspace/<username>/" + DEFAULT_SUBPREFIX
+            + f"\nResponse keys: {sorted(resp)}")
+    return f"{paths[0]['uri'].rstrip('/')}/{DEFAULT_SUBPREFIX}"
 
 
 # --------------------------------------------------------------------------
