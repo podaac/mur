@@ -79,28 +79,198 @@ def _credentials_payload(maap) -> Dict:
     }, resp
 
 
-def workspace_session(maap):
-    """A boto3 Session whose credentials refresh themselves.
+def _credentials_from_command(command: str) -> Dict:
+    """Refresh credentials by running a shell command that prints JSON.
+
+    The escape hatch for a host that cannot install maap-py or reach the MAAP
+    API -- a production NAS box, typically. The command is re-run on every
+    refresh, not once, which is what keeps a multi-hour upload alive: anything
+    that can mint fresh credentials works, including an ssh back to a
+    workspace that runs maap-py there.
+
+    Accepts either MAAP's own response shape or a flat AWS-style object, so a
+    command can pipe `maap.aws.workspace_bucket_credentials()` straight
+    through without reshaping it.
+    """
+    import subprocess
+
+    out = subprocess.run(command, shell=True, check=True,
+                         capture_output=True, text=True).stdout
+    data = json.loads(out)
+    creds = data.get("credentials", data)
+
+    def pick(*names):
+        for n in names:
+            if creds.get(n):
+                return creds[n]
+        return None
+
+    payload = {
+        "access_key": pick("aws_access_key_id", "AccessKeyId", "access_key"),
+        "secret_key": pick("aws_secret_access_key", "SecretAccessKey", "secret_key"),
+        "token": pick("aws_session_token", "SessionToken", "token"),
+        "expiry_time": pick("expires_at", "expiration", "Expiration", "expiry_time"),
+    }
+    missing = [k for k, v in payload.items() if not v and k != "token"]
+    if missing:
+        raise ValueError(
+            f"--credentials-command output is missing {missing}. Expected MAAP's "
+            f"workspace_bucket_credentials() response or a flat AWS credentials object."
+        )
+    return payload, data
+
+
+def make_session(args, maap=None):
+    """A boto3 Session, however this host is able to get credentials.
+
+    Three sources, in precedence order:
+
+      --credentials-command   any command printing JSON; re-run on refresh
+      maap-py                 the workspace case; self-refreshing
+      the standard AWS chain  env vars, profile, or an instance role
+
+    Only the first two need refresh wiring. The standard chain already
+    refreshes itself for roles, and for static keys there is nothing to
+    refresh.
+    """
+    import boto3
+
+    if args.credentials_command:
+        return _refreshable_session(
+            lambda: _credentials_from_command(args.credentials_command)[0],
+            method="mur-credentials-command")
+
+    if maap is not None:
+        return _refreshable_session(
+            lambda: _credentials_payload(maap)[0], method="maap-workspace")
+
+    if args.aws_profile:
+        return boto3.Session(profile_name=args.aws_profile)
+    return boto3.Session()
+
+
+def _refreshable_session(fetch, *, method: str):
+    """Wrap a credentials fetcher so botocore re-mints before expiry.
 
     botocore checks expiry before signing every request, so a refresh lands
-    between multipart parts and is invisible to an in-flight upload.
+    between multipart parts and is invisible to an in-flight upload -- which
+    is the whole reason this is not `aws s3 sync`.
     """
     import boto3
     from botocore.credentials import RefreshableCredentials
     from botocore.session import get_session
 
-    def fetch():
-        payload, _ = _credentials_payload(maap)
-        return payload
-
-    initial = fetch()
     session = get_session()
     session._credentials = RefreshableCredentials.create_from_metadata(
-        metadata=initial,
-        refresh_using=fetch,
-        method="maap-workspace",
-    )
+        metadata=fetch(), refresh_using=fetch, method=method)
     return boto3.Session(botocore_session=session)
+
+
+def workspace_session(maap):
+    """Backwards-compatible shim for the maap-py path."""
+    return _refreshable_session(
+        lambda: _credentials_payload(maap)[0], method="maap-workspace")
+
+
+# Everything the UPLOAD path imports. --verify additionally needs the
+# orchestrator's resolvers and their imports, which is a much larger set --
+# so verify from the workspace, where the whole repo already lives, rather
+# than dragging it onto a production host.
+BUNDLE_FILES = (
+    "utils/upload_static_resources.py",
+    "static_resources_layout.py",
+    "landice_static_files.py",
+    "mrva_static_files.py",
+)
+
+
+def make_bundle(dest_dir: str) -> int:
+    """Copy the few files the uploader needs into a directory ready to scp.
+
+    The static data lives on a production host that has no checkout of this
+    repo and may have no way to get one. The upload path deliberately imports
+    only these four files so that copying them across is the whole install.
+    """
+    import shutil
+
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    out = pathlib.Path(dest_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    for rel in BUNDLE_FILES:
+        src = repo / rel
+        if not src.is_file():
+            print(f"ERROR: {src} is missing", file=sys.stderr)
+            return 1
+        # Flatten utils/ -- the script inserts its parent on sys.path, so a
+        # flat directory resolves the sibling imports correctly.
+        shutil.copy2(src, out / pathlib.Path(rel).name)
+        print(f"  {rel}")
+
+    readme = out / "README.txt"
+    readme.write_text(BUNDLE_README)
+    print(f"  README.txt\n\nBundle written to {out}")
+    print("\nNext:")
+    print(f"  scp -r {out} <prod-host>:~/mur-upload/")
+    print("  then follow README.txt there.")
+    return 0
+
+
+BUNDLE_README = """\
+MUR static-resources uploader (portable bundle)
+===============================================
+
+These four files are everything the UPLOAD path needs. Run them with any
+Python 3.8+ that has boto3:
+
+    pip install --user boto3
+
+CREDENTIALS
+-----------
+This host probably cannot install maap-py or reach the MAAP API. Credentials
+are temporary and a 141 GB upload outlives them, so they must be REFRESHABLE,
+not copied over once. Use --credentials-command: it is re-run on every
+refresh, so anything that can mint fresh credentials works.
+
+If you can ssh to a MAAP workspace from here:
+
+    --credentials-command "ssh maap-workspace \\
+        python -c \\"import json;from maap.maap import MAAP;\\
+        print(json.dumps(MAAP().aws.workspace_bucket_credentials()))\\""
+
+If this host has its own AWS role or profile, use --aws-profile instead.
+
+Either way you must pass --dest explicitly, because discovering the workspace
+URI needs maap-py. Get it by running this in a workspace:
+
+    python utils/upload_static_resources.py --check
+
+RUNNING
+-------
+    # see the plan; moves nothing
+    python upload_static_resources.py --from-prod-layout --dry-run \\
+        --include-optional --dest s3://<bucket>/<user>/mur/static-resources
+
+    # ~1.6 GiB, minutes. Unblocks landice testing.
+    python upload_static_resources.py --from-prod-layout --include-optional \\
+        --no-seasonal --dest s3://... --credentials-command "..."
+
+    # ~141 GB. Resumable: re-run the same command after any interruption.
+    nohup python upload_static_resources.py --from-prod-layout --seasonal-only \\
+        --dest s3://... --credentials-command "..." \\
+        --ledger ~/mur_static_ledger.jsonl > ~/mur_upload.log 2>&1 &
+
+Source locations default to bundle_prod_static.sh's contract and can be
+overridden:  GRIDS_DIR, ICE_DIR, SEASONAL_DIR, POLARCAP_FILE
+
+VERIFYING
+---------
+Run the verify pass from the WORKSPACE, not here -- it imports the pipeline's
+own resolvers to confirm every href the orchestrator will ask for actually
+resolves:
+
+    python utils/upload_static_resources.py --verify-only --include-optional
+"""
 
 
 def check_environment(args) -> int:
@@ -169,7 +339,7 @@ def check_environment(args) -> int:
 
     # 4. Region. The uploader never hardcodes it, but knowing it makes the
     #    curl reachability test from a production host possible.
-    s3 = workspace_session(maap).client("s3")
+    s3 = make_session(args, maap).client("s3")
     try:
         loc = s3.get_bucket_location(Bucket=bucket).get("LocationConstraint")
         print(f"    region           {loc or 'us-east-1'}")
@@ -512,6 +682,9 @@ def parse_args(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__.split("TYPICAL SEQUENCE")[-1],
     )
+    p.add_argument("--bundle", metavar="DIR",
+                   help="Copy the files the uploader needs into DIR, ready to scp "
+                        "to the host where the static data lives, then exit.")
     p.add_argument("--check", action="store_true",
                    help="Verify credentials, destination and write access, then "
                         "exit. Run this first, from the workspace.")
@@ -548,6 +721,13 @@ def parse_args(argv=None):
     p.add_argument("--verify", action="store_true", help="Verify after uploading.")
     p.add_argument("--verify-only", action="store_true", help="Verify and exit.")
 
+    p.add_argument("--credentials-command", metavar="CMD",
+                   help="Shell command printing JSON credentials. Re-run on every "
+                        "refresh, so a multi-hour upload survives expiry on a host "
+                        "that cannot install maap-py. See --help epilog.")
+    p.add_argument("--aws-profile",
+                   help="Use this AWS profile instead of maap-py. No refresh wiring; "
+                        "only suitable for static keys or an instance role.")
     p.add_argument("--concurrency", type=int, default=8,
                    help="Parts in flight per file (default: %(default)s).")
     p.add_argument("--part-size-mb", type=int, default=64,
@@ -557,6 +737,9 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+
+    if args.bundle:
+        return make_bundle(args.bundle)
 
     if args.check:
         return check_environment(args)
@@ -587,10 +770,20 @@ def main(argv=None) -> int:
         print("\nDry run: nothing uploaded.")
         return 0
 
-    maap = _maap_client()
+    # maap-py is only required when nothing else can supply credentials, and
+    # only it can discover the destination automatically.
+    maap = None
+    if not (args.credentials_command or args.aws_profile):
+        maap = _maap_client()
+    elif not args.dest:
+        print("ERROR: --dest is required with --credentials-command/--aws-profile, "
+              "since the workspace URI cannot be discovered without maap-py.\n"
+              "       Run --check in a workspace to find it.", file=sys.stderr)
+        return 2
+
     dest = args.dest or default_destination(maap)
     bucket, prefix = split_s3_uri(dest)
-    s3 = workspace_session(maap).client("s3")
+    s3 = make_session(args, maap).client("s3")
     print(f"Destination  : {dest}")
 
     if args.verify_only:
