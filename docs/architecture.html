@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Architecture · MUR SST</title>
-<meta name="description" content="How the MUR pipeline is structured: four MATLAB containers on a shared base image and the explicit-input contract they follow.">
+<title>Architecture — MUR SST</title>
+<meta name="description" content="The four MUR processing containers, the shared MATLAB base image, the explicit-input contract they follow, and how the pipeline is put together.">
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
@@ -15,7 +15,8 @@
     <strong>MUR SST</strong>
     <span>Multi-scale Ultra-high Resolution analysis</span>
   </a>
-  <nav><div class="nav-group">Start here</div>
+  <nav>
+    <div class="nav-group">Start here</div>
     <a href="index.html">Overview</a>
     <a href="quickstart.html">Quick start</a>
     <a href="architecture.html" aria-current="page">Architecture</a>
@@ -23,16 +24,22 @@
     <a href="algorithm.html">The MRVA algorithm</a>
     <a href="lifecycle.html">Data lifecycle</a>
     <a href="sequence.html">Daily execution</a>
+    <a href="mrva-internals.html">MRVA internals</a>
     <div class="nav-group">Operating it</div>
+    <a href="configuration.html">Configuration</a>
     <a href="static-data.html">Static input data</a>
+    <a href="input-contract.html">Input contract</a>
     <a href="sensors.html">Adding a sensor</a>
-    <a href="maap.html">Running on MAAP</a></nav>
-  <div class="nav-group">Reference</div>
-  <nav>
-    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">Configuration reference</a>
-    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">Input contract</a>
-    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/LANDICE_ENCODING.md">Land/ice encoding</a>
-    <a href="https://github.com/podaac/mur/blob/HEAD/mrva/docs/OVERVIEW.md">MRVA internals</a>
+    <a href="maap.html">Running on MAAP</a>
+    <div class="nav-group">Containers</div>
+    <a href="container-landice.html">Land/ice</a>
+    <a href="container-l2p.html">L2P</a>
+    <a href="container-iquam.html">iQUAM</a>
+    <a href="container-mrva.html">MRVA</a>
+    <div class="nav-group">Reference</div>
+    <a href="landice-encoding.html">Land/ice encoding</a>
+    <a href="future.html">Future enhancements</a>
+    <div class="nav-group">Project</div>
     <a href="https://github.com/podaac/mur">Source on GitHub</a>
   </nav>
 </aside>
@@ -40,8 +47,22 @@
   <div class="content">
     <h1>Architecture</h1>
     <p class="lede">Four MATLAB containers on a shared base image, driven by a Python orchestrator that resolves every input path before any container starts.</p>
-
-    <h2>Four containers, one base image</h2>
+    <nav class="toc" aria-label="On this page">
+    <b>On this page</b>
+    <ul>
+      <li><a href="#four-containers-one-base-image">Four containers, one base image</a></li>
+      <li><a href="#core-components">What each container does</a></li>
+      <li><a href="#the-container-pattern">The container pattern</a></li>
+      <li><a href="#the-explicit-input-contract">The explicit-input contract</a></li>
+      <li><a href="#orchestration">Orchestration</a></li>
+      <li><a href="#file-naming-conventions">File naming conventions</a></li>
+      <li><a href="#file-locations">Where files live</a></li>
+      <li><a href="#technology-stack">Technology stack</a></li>
+      <li><a href="#performance-characteristics">Performance characteristics</a></li>
+      <li><a href="#migration-status">Migration status</a></li>
+    </ul>
+    </nav>
+    <h2 id="four-containers-one-base-image">Four containers, one base image</h2>
     <p>Each processing stage is a separate Docker image. All four compile
     MATLAB code against a shared base, <code>mur-matlab-base:r2024b</code>,
     which is built once and supplies the common toolchain &mdash; so the base
@@ -77,8 +98,94 @@
     MATLAB Compiler licence &mdash; and ships only the compiled binaries plus
     the MATLAB Runtime on a slim Debian base. Running the pipeline therefore
     needs no MATLAB licence at all; only rebuilding does.</p>
+    <h2 id="core-components">What each container does</h2>
+    <h3 id="1-landice-mask-generation-landicelandice">1. Land/Ice Mask Generation (<a href="https://github.com/podaac/mur/tree/develop/landice">landice/</a>)</h3>
+    <p><strong>Purpose:</strong> Create land and sea ice masks for the analysis domain</p>
+    <p><strong>Input:</strong></p>
+    <ul>
+    <li>OSI-SAF sea ice concentration data</li>
+    <li>Static land masks</li>
+    </ul>
+    <p><strong>Output:</strong></p>
+    <ul>
+    <li><code>.gds</code> files: Land/ice masks with bitwise encoding</li>
+    <li><code>.bip</code> files: Ice SST point data</li>
+    </ul>
+    <p><strong>Technology:</strong> Containerized MATLAB (R2024b Runtime)</p>
+    <p><strong>Processing:</strong> Generates masks for both p01 (0.01°) and p011 (0.011°) resolutions</p>
+    <p>See <a href="landice-encoding.html">land/ice encoding</a> for the mask bit layout.</p>
+    <h3 id="2-l2p-satellite-data-processing-l2pl2p">2. L2P Satellite Data Processing (<a href="https://github.com/podaac/mur/tree/develop/l2p">l2p/</a>)</h3>
+    <p><strong>Purpose:</strong> Convert GHRSST L2P satellite data into MRVA-compatible format</p>
+    <p><strong>Supported Sensors:</strong></p>
+    <ul>
+    <li><strong>AMSR2R</strong> - Microwave radiometer (all-weather, ~25km resolution)</li>
+    <li><strong>MODISA</strong> - MODIS Aqua infrared (~1km resolution)</li>
+    <li><strong>MODIST</strong> - MODIS Terra infrared (~1km resolution)</li>
+    <li><strong>AVMTAG</strong> - AVHRR MetOp-A infrared (~1-4km resolution)</li>
+    <li><strong>AVMTBG</strong> - AVHRR MetOp-B infrared (~1-4km resolution)</li>
+    </ul>
+    <p><strong>Input:</strong> GHRSST L2P NetCDF files from PO.DAAC</p>
+    <p><strong>Output:</strong> <code>.bic.gz</code> files (Binary Input with Confidence)</p>
+    <p><strong>Technology:</strong> Containerized MATLAB with sensor-specific configurations</p>
+    <p><strong>Key Features:</strong></p>
+    <ul>
+    <li>Quality filtering by confidence thresholds</li>
+    <li><strong>Nighttime-only observations</strong> (avoids diurnal warming effects)</li>
+    <li>Sensor-specific scale parameters (La/Lb)</li>
+    <li>Stability latency handling (2-3 day data maturity)</li>
+    <li>Bias correction and error estimation</li>
+    </ul>
+    <p><strong>Note:</strong> MUR uses nighttime observations from infrared sensors to measure <strong>foundation temperature</strong> and avoid solar-induced diurnal warming. See <a href="future.html">future enhancements</a> for the daytime-data discussion.</p>
+    <p>See <a href="sensors.html">adding a sensor</a> for the integration workflow.</p>
+    <h3 id="3-iquam-buoy-data-processing-iquamiquam">3. iQUAM Buoy Data Processing (<a href="https://github.com/podaac/mur/tree/develop/iquam">iquam/</a>)</h3>
+    <p><strong>Purpose:</strong> Process in-situ buoy/ship observations for MRVA</p>
+    <p><strong>Input:</strong> NOAA iQUAM monthly NetCDF files</p>
+    <p><strong>Output:</strong> <code>.bii</code> files (Binary IQUAM Instrument format)</p>
+    <p><strong>Technology:</strong> Containerized MATLAB orchestrator</p>
+    <p><strong>Key Features:</strong></p>
+    <ul>
+    <li>Quality control filtering (quality_level &gt;= 5)</li>
+    <li>Platform type handling (ships, buoys, drifters, etc.)</li>
+    <li>Monthly file caching for performance</li>
+    <li>Temporal aggregation (±3 days)</li>
+    </ul>
+    <h3 id="4-pipeline-orchestrator-run-mur-pipelinepyrun-mur-pipelinepy">4. Pipeline Orchestrator (<a href="https://github.com/podaac/mur/blob/develop/run_mur_pipeline.py">run_mur_pipeline.py</a>)</h3>
+    <p><strong>Purpose:</strong> Coordinate all preprocessing steps for a given analysis date</p>
+    <p><strong>Functionality:</strong></p>
+    <ul>
+    <li>NRT/REA mode detection</li>
+    <li>Temporal window calculation</li>
+    <li>Component sequencing</li>
+    <li>Container execution management</li>
+    <li>L2P download purge (on-demand cleanup of old DOY directories)</li>
+    </ul>
+    <p><strong>Status:</strong> Coordinates all four stages (landice, iquam, l2p, mrva)</p>
+    <h2 id="the-container-pattern">The container pattern</h2>
+    <h3 id="container-architecture-pattern">Multi-stage build</h3>
+    <p>All preprocessing containers follow a common pattern:</p>
+    <p><strong>Multi-Stage Build:</strong></p>
+    <pre><code class="language-dockerfile"># Stage 1: Builder (compile MATLAB code)
+    FROM mathworks/matlab:r2024b AS builder
+    RUN matlab -batch "mcc -m wrapper.m ..."
 
-    <h2>The explicit-input contract</h2>
+    # Stage 2: Runtime (minimal execution environment)
+    FROM mathworks/matlab-runtime:r2024b
+    COPY --from=builder /build/wrapper /app/</code></pre>
+    <p><strong>Execution:</strong></p>
+    <pre><code class="language-bash">docker run --rm \
+      --platform linux/amd64 \
+      --shm-size=512M \
+      -v /input:/input:ro \
+      -v /output:/output \
+      ghcr.io/podaac/mur/&lt;module&gt;:latest \
+      &lt;args...&gt;</code></pre>
+    <p><strong>Key Requirements:</strong></p>
+    <ul>
+    <li><code>--shm-size=512M</code> for MATLAB Runtime shared memory</li>
+    <li>Volume mounts for input/output data</li>
+    <li>Explicitly named flags for every input &mdash; never a scanned directory</li>
+    </ul>
+    <h2 id="the-explicit-input-contract">The explicit-input contract</h2>
     <p>No container discovers its own inputs. Nothing scans a directory,
     builds a path from a root, or infers a sensor or date by parsing a
     filename. Every input arrives as an explicit named flag whose value the
@@ -103,7 +210,7 @@
 
     <div class="note">
       <p>The manifest schema and the reasoning behind it are specified in the
-      <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">explicit input contract</a>,
+      <a href="input-contract.html">explicit input contract</a>,
       which code comments cite by section number.</p>
     </div>
 
@@ -115,8 +222,7 @@
     supplied path actually exists <em>before</em> MATLAB starts, so a
     misconfigured path fails immediately and by name rather than surfacing as
     an opaque read error deep inside a long run.</p>
-
-    <h2>Orchestration</h2>
+    <h2 id="orchestration">Orchestration</h2>
     <p>Two orchestrators implement the same contract against different
     execution backends:</p>
     <ul>
@@ -128,11 +234,127 @@
           <a href="maap.html">Running on MAAP</a> for what is and is not
           wired up yet.</li>
     </ul>
-
+    <h2 id="file-naming-conventions">File naming conventions</h2>
+    <h3 id="regions">Regions</h3>
+    <p>Analysis regions are identified by short codes:</p>
+    <ul>
+    <li><code>G10</code> - Global 1km (10km in legacy notation)</li>
+    <li><code>S01</code> - Southern Ocean 1km</li>
+    <li>Additional regions as configured</li>
+    </ul>
+    <h3 id="date-formats">Date formats</h3>
+    <ul>
+    <li><code>YYYY</code> - 4-digit year (e.g., 2025)</li>
+    <li><code>DDD</code> - Day of year (001-366)</li>
+    <li><code>YYYYDDD</code> - Combined year and day (e.g., 2025042)</li>
+    </ul>
+    <h3 id="file-extensions">File extensions</h3>
+    <ul>
+    <li><code>.gds</code> - Grid Data Static (land/ice masks)</li>
+    <li><code>.bip</code> - Binary Ice Points (ice SST observations)</li>
+    <li><code>.bic.gz</code> - Binary Input with Confidence (L2P satellite, compressed)</li>
+    <li><code>.bii</code> - Binary IQUAM Instrument (buoy data)</li>
+    <li><code>.nc</code> - NetCDF (input and final output)</li>
+    </ul>
+    <p><strong>Example:</strong> <code>G10_MODISA_2025_042.bic.gz</code></p>
+    <ul>
+    <li>Region: G10 (Global 1km)</li>
+    <li>Sensor: MODISA (MODIS Aqua)</li>
+    <li>Date: 2025, day 42 (February 11)</li>
+    </ul>
+    <h2 id="file-locations">Where files live</h2>
+    <p>Every path is resolved by the orchestrator from <code>config.json</code>; nothing is
+    hardcoded. The operational layout the pipeline was modelled on looked like
+    this, and is a useful shape to copy:</p>
+    <h3 id="input-data-example-production-paths">Input data</h3>
+    <pre><code>/nas2/source/osi-saf/ice/YYYY/    - Ice concentration data
+    /nas2/source/podaac/SENSOR/YYYY/  - L2P granules (per sensor)
+    /nas2/source/iquam/YYYY/          - iQUAM monthly files</code></pre>
+    <h3 id="preprocessed-data">Preprocessed data</h3>
+    <pre><code>/nas2/gds/YYYY/                   - Land/ice masks
+    /nas2/bip/YYYY/                   - Ice SST points
+    /nas2/bic/SENSOR/YYYY/            - L2P processed (per sensor)
+    /nas2/bii/YYYY/                   - iQUAM processed</code></pre>
+    <h3 id="output-products">Output products</h3>
+    <pre><code>/nas2/output/YYYY/                - Final MUR NetCDF files
+    /nas2/coef/YYYY/                  - MRVA coefficient files</code></pre>
+    <p>See <a href="configuration.html">configuration</a> for the key that sets each one.</p>
+    <h2 id="technology-stack">Technology stack</h2>
+    <h3 id="core-dependencies">Core dependencies</h3>
+    <ul>
+    <li><strong>Python 3.11+</strong> - Pipeline orchestration</li>
+    <li><strong>Docker</strong> - Container runtime</li>
+    <li><strong>MATLAB R2024b Runtime</strong> - Compiled application execution</li>
+    <li><strong>uv</strong> - Python package and environment management</li>
+    </ul>
+    <h3 id="data-access-tools">Data access tools</h3>
+    <ul>
+    <li><strong>podaac-data-subscriber</strong> - PO.DAAC L2P data downloads</li>
+    <li><strong>wget/curl</strong> - OSI-SAF ice data retrieval</li>
+    <li><strong>netCDF4</strong> - NetCDF file manipulation</li>
+    </ul>
+    <h3 id="development-tools">Development tools</h3>
+    <ul>
+    <li><strong>MATLAB R2024b</strong> - Code development and compilation</li>
+    <li><strong>MATLAB Compiler</strong> - Standalone executable generation</li>
+    </ul>
+    <h2 id="performance-characteristics">Performance characteristics</h2>
+    <h3 id="processing-time-single-day-nrt-mode">Processing time (single day, NRT mode)</h3>
+    <ul>
+    <li>Land/Ice: ~2-5 minutes</li>
+    <li>L2P MODISA: ~10-20 minutes (200-300 granules)</li>
+    <li>L2P MODIST: ~10-20 minutes (200-300 granules)</li>
+    <li>L2P AMSR2R: ~5-10 minutes (30-50 granules)</li>
+    <li>L2P AVMTBG: ~5-10 minutes (40-80 granules)</li>
+    <li>iQUAM: ~5-15 minutes (cached monthly files)</li>
+    <li><strong>Total Preprocessing:</strong> ~40-80 minutes</li>
+    </ul>
+    <p><strong>MRVA Analysis:</strong> ~30-90 minutes (NRT, L0=6); longer for REA (coarser starting scale, L0=2)</p>
+    <h3 id="resource-requirements">Resource requirements</h3>
+    <ul>
+    <li><strong>Memory:</strong> 8&ndash;16 GB for the preprocessing stages. MRVA is the
+    real constraint &mdash; the orchestrator launches it with a 72 GB limit, and it has
+    been observed peaking around 65 GB.</li>
+    <li><strong>Disk I/O:</strong> Fast storage recommended (SSD preferred)</li>
+    <li><strong>Network:</strong> Stable connection for PO.DAAC downloads</li>
+    <li><strong>Docker:</strong> <code>--shm-size=512M</code> minimum for containers</li>
+    </ul>
+    <h3 id="parallelization">Parallelization</h3>
+    <p>Components can run in parallel:</p>
+    <ul>
+    <li>Each L2P sensor processes independently</li>
+    <li>Land/Ice and iQUAM can run concurrently</li>
+    <li>Pipeline orchestrator coordinates sequencing</li>
+    </ul>
+    <h2 id="migration-status">Migration status</h2>
+    <h3 id="current-state">Current state</h3>
+    <ul>
+    <li>✅ Land/Ice mask generation</li>
+    <li>✅ L2P satellite processing (5 sensors: AMSR2R, MODISA, MODIST, AVMTAG, AVMTBG)</li>
+    <li>✅ iQUAM buoy processing</li>
+    <li>✅ MRVA multi-scale analysis</li>
+    <li>✅ NetCDF4 output generation (full MUR + MUR25 sibling product)</li>
+    <li>✅ Pipeline orchestrator (<code>run_mur_pipeline.py</code>)</li>
+    </ul>
+    <p>All four containers take their inputs as explicit named flags (local path or <code>s3://</code> href) rather than bind-mounted directories — see the <a href="input-contract.html">input contract</a>.</p>
+    <h3 id="legacy-system">Legacy system</h3>
+    <p>The original <code>nrtMRVA.py</code> system used:</p>
+    <ul>
+    <li>Python wrappers calling MATLAB via subprocess</li>
+    <li>Direct MATLAB license dependency</li>
+    <li>Monolithic processing script</li>
+    </ul>
+    <h3 id="benefits-of-containerized-approach">What containerizing bought</h3>
+    <ul>
+    <li><strong>Licensing:</strong> No MATLAB license required in production</li>
+    <li><strong>Modularity:</strong> Independent container updates</li>
+    <li><strong>Testing:</strong> Isolated component testing</li>
+    <li><strong>Deployment:</strong> Simplified production deployment</li>
+    <li><strong>Consistency:</strong> Identical behavior across environments</li>
+    </ul>
     <footer>
-      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. Deeper
-      reference material stays as Markdown in the repository and is linked
-      from each page.</p>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. This site is
+      the documentation &mdash; there is no separate Markdown copy to fall out of date.</p>
     </footer>
   </div>
 </main>

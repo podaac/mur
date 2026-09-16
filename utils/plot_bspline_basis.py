@@ -10,6 +10,10 @@ B-splines are mathematical basis functions with key properties:
 
 The SST field is represented as: SST(x,y) = Σ c_ij * B_i(x) * B_j(y)
 where c_ij are the coefficients we solve for.
+
+Regenerates the figures on the algorithm page of the documentation site
+(docs/assets/figures/). Four of the five are used there; bspline_2d.png is
+generated for reference but not published.
 """
 
 import numpy as np
@@ -316,8 +320,10 @@ def plot_multiscale_bsplines():
 if __name__ == '__main__':
     import os
 
-    # Create output directory if needed
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # The site reads these from docs/assets/figures/.
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script_dir = os.path.join(repo_root, 'docs', 'assets', 'figures')
+    os.makedirs(script_dir, exist_ok=True)
 
     print("Generating B-spline visualization figures...")
 

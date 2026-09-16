@@ -47,7 +47,7 @@ FROM debian:bookworm-slim
 # awscli: used by common/bin/localize.sh (sourced by entrypoint.sh below) to
 # fetch s3:// input hrefs (direct-value flags and manifest entries) to local
 # disk before MATLAB runs -- see
-# docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md section 4.
+# docs/input-contract.html section 4.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libc6 \
@@ -152,8 +152,7 @@ LABEL downloads="Handled separately by cron jobs (not in container)"
 #
 # Run — every input is an explicit named flag; --granules-manifest lists
 # exactly which granule files this run needs (a JSON manifest, path or
-# s3:// href -- see docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md
-# section 3), localized to local disk by common/bin/localize.sh before
+# s3:// href -- see docs/input-contract.html section 3), localized to local disk by common/bin/localize.sh before
 # MATLAB runs, so the manifest's entries may themselves be local paths
 # (bind-mounted) or s3:// hrefs (MAAP):
 #   docker run --rm \

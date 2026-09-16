@@ -177,6 +177,61 @@ tbody tr:hover { background: var(--bg-soft); }
 .stat b { display: block; font-size: 1.5rem; letter-spacing: -0.02em; color: var(--accent-fg); }
 .stat span { font-size: 0.82rem; color: var(--fg-muted); }
 
+/* ---------- on-page table of contents ---------- */
+
+.toc {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  padding: 1rem 1.25rem;
+  margin: 0 0 2.25rem;
+  font-size: 0.9rem;
+}
+.toc b {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  margin-bottom: 0.6rem;
+}
+.toc ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  columns: 2;
+  column-gap: 2rem;
+}
+.toc li { margin: 0.2rem 0; break-inside: avoid; }
+
+@media (max-width: 620px) {
+  .toc ul { columns: 1; }
+}
+
+/* ---------- figures ---------- */
+
+figure.figure {
+  margin: 1.75rem 0;
+  padding: 0;
+}
+figure.figure img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+}
+figure.figure figcaption {
+  margin-top: 0.6rem;
+  font-size: 0.84rem;
+  color: var(--fg-muted);
+}
+
+/* Anchored headings land clear of the top of the viewport. */
+h2[id], h3[id], h4[id] { scroll-margin-top: 1rem; }
+
 /* ---------- mermaid ---------- */
 
 /* Diagrams keep their original light palette — several carry explicit pastel

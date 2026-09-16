@@ -124,8 +124,8 @@ def resolve_mrva_landice_inputs(
 ) -> Dict[str, pathlib.Path]:
     """Resolve MRVA's three per-day landice-output inputs (mrva4com_container.m's
     landice_ice_p011_file/landice_grid_p01_file/landice_icefiles_p011_file)
-    from landice's own <root>/<year>/<file> output layout (documentation/
-    the configuration page's landice example). Global_ice may be
+    from landice's own <root>/<year>/<file> output layout (see the
+    configuration page's landice example). Global_ice may be
     gzip-compressed or not -- checks both, matching mrva4com_container.m's
     pre-refactor dual-check (now here, since the explicit-args contract
     puts existence decisions in Python, not the container)."""
@@ -677,8 +677,8 @@ class MUROrchestrator:
         logger.info(f"    → Processing {sensor} {data_day} → BIC")
 
         # Build the granules manifest -- container-side paths into the
-        # bind-mounted input_dir below, per documentation/
-        # 2026-07-27-explicit-input-contract-design.md section 3. Scoped to
+        # bind-mounted input_dir below, per docs/input-contract.html
+        # section 3. Scoped to
         # this one invocation only (not cumulative), written to a temp file.
         container_input_dir = "/data/l2p-input"
         manifest = build_l2p_granules_manifest(granule_files, container_input_dir)
@@ -1011,8 +1011,8 @@ class MUROrchestrator:
         sensors_config = config.get("sensors", {})
         active_sensors = config.get("active_sensors", list(sensors_config.keys()))
 
-        # Resolve every input as an explicit value (documentation/
-        # 2026-07-27-explicit-input-contract-design.md) instead of mounting
+        # Resolve every input as an explicit value
+        # (docs/input-contract.html) instead of mounting
         # whole directories for the container to scan.
         static_files = resolve_mrva_static_files(static_resources_dir, doy)
         landice_files = resolve_mrva_landice_inputs(landice_p011_dir, landice_p01_dir, year, doy)

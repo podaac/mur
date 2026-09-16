@@ -73,7 +73,7 @@ is reachable:
 cd mur/l2p
 docker build --platform linux/amd64 -t mur-l2p:latest -f Dockerfile ..
 ```
-See [documentation/PIPELINE_CONFIGURATION.md](documentation/PIPELINE_CONFIGURATION.md#manual-builds-advanced).
+See [Manual builds (advanced)](https://podaac.github.io/mur/configuration.html#manual-builds-advanced).
 
 ### Docker Execution
 ```bash

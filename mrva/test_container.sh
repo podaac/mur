@@ -76,7 +76,7 @@ test_basic() {
     # Test 5: Check directory structure
     # Inputs are no longer pre-created directories (explicit-args contract --
     # every input is now a named flag, localized/materialized at runtime by
-    # entrypoint.sh; see documentation/STATIC_DATA.md). Only output/working
+    # entrypoint.sh; see docs/static-data.html). Only output/working
     # paths are still pre-created in the image.
     echo "Test 5: Checking directory structure..."
     DIR_CHECK=$(docker run --rm --entrypoint /bin/bash mur-mrva:latest -c "ls -d /data/output /data/cache /data/logs 2>&1")
@@ -109,7 +109,7 @@ test_full() {
     echo "files, per-day landice outputs, and a --sensor-inputs-manifest covering"
     echo "BIC/iQuam fan-in) instead of the old bind-mounted /data/input/{bic,iquam,landice}"
     echo "directories + positional YEAR DOY MODE args this script still builds below."
-    echo "See mrva/README.md and mrva/bin/entrypoint.sh's usage() for the current"
+    echo "See docs/container-mrva.html and mrva/bin/entrypoint.sh's usage() for the current"
     echo "interface, or just use run_mur_pipeline.py, which builds all of this"
     echo "automatically (--execute mrva)."
     echo ""

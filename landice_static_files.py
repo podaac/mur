@@ -1,5 +1,5 @@
 """Canonical relative paths, under the static-resources root, for landice's
-six explicit static inputs (documentation/STATIC_DATA.md).
+six explicit static inputs (docs/static-data.html).
 
 Shared by run_mur_pipeline.py (joins against a local directory) and
 run_mur_maap.py (joins against an S3 prefix) so the mapping is defined once.

@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Data lifecycle · MUR SST</title>
-<meta name="description" content="MUR data lifecycle: sources, temporal windows, reprocessing rules and storage requirements.">
+<title>Data lifecycle — MUR SST</title>
+<meta name="description" content="MUR input sources, temporal windows, caching and reprocessing rules, coefficient file lifecycle and the annual storage footprint.">
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
@@ -15,7 +15,8 @@
     <strong>MUR SST</strong>
     <span>Multi-scale Ultra-high Resolution analysis</span>
   </a>
-  <nav><div class="nav-group">Start here</div>
+  <nav>
+    <div class="nav-group">Start here</div>
     <a href="index.html">Overview</a>
     <a href="quickstart.html">Quick start</a>
     <a href="architecture.html">Architecture</a>
@@ -23,16 +24,22 @@
     <a href="algorithm.html">The MRVA algorithm</a>
     <a href="lifecycle.html" aria-current="page">Data lifecycle</a>
     <a href="sequence.html">Daily execution</a>
+    <a href="mrva-internals.html">MRVA internals</a>
     <div class="nav-group">Operating it</div>
+    <a href="configuration.html">Configuration</a>
     <a href="static-data.html">Static input data</a>
+    <a href="input-contract.html">Input contract</a>
     <a href="sensors.html">Adding a sensor</a>
-    <a href="maap.html">Running on MAAP</a></nav>
-  <div class="nav-group">Reference</div>
-  <nav>
-    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">Configuration reference</a>
-    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">Input contract</a>
-    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/LANDICE_ENCODING.md">Land/ice encoding</a>
-    <a href="https://github.com/podaac/mur/blob/HEAD/mrva/docs/OVERVIEW.md">MRVA internals</a>
+    <a href="maap.html">Running on MAAP</a>
+    <div class="nav-group">Containers</div>
+    <a href="container-landice.html">Land/ice</a>
+    <a href="container-l2p.html">L2P</a>
+    <a href="container-iquam.html">iQUAM</a>
+    <a href="container-mrva.html">MRVA</a>
+    <div class="nav-group">Reference</div>
+    <a href="landice-encoding.html">Land/ice encoding</a>
+    <a href="future.html">Future enhancements</a>
+    <div class="nav-group">Project</div>
     <a href="https://github.com/podaac/mur">Source on GitHub</a>
   </nav>
 </aside>
@@ -40,73 +47,23 @@
   <div class="content">
     <h1>Data lifecycle</h1>
     <p class="lede">Where the inputs come from, how long they stay in flux, and what it all costs on disk.</p>
-
-    <h2>Sources and flow</h2>
-<figure class="diagram">
-<pre class="mermaid">
-flowchart TB
-    subgraph external[&quot;External Data Sources&quot;]
-        PODAAC[&quot;PO.DAAC&lt;br/&gt;L2P Satellite Files&quot;]
-        OSISAF[&quot;OSI-SAF&lt;br/&gt;Ice Concentration&quot;]
-        IQUAM_SRC[&quot;NOAA iQUAM&lt;br/&gt;Buoy Data&quot;]
-        PREV[&quot;Previous MUR Run&lt;br/&gt;(NRT mode)&quot;]
-    end
-
-    subgraph storage[&quot;Input Data Storage&quot;]
-        PODAAC_STOR[&quot;L2P granule store&lt;br/&gt;inputs/l2p/SENSOR/YYYY/DOY&quot;]
-        ICE_STOR[&quot;Sea ice&lt;br/&gt;fetched on demand&quot;]
-        IQUAM_STOR[&quot;iQUAM store&lt;br/&gt;monthly files&quot;]
-        COEF_STOR[&quot;Coefficient store&lt;br/&gt;output/csp/YYYY&quot;]
-    end
-
-    subgraph containers[&quot;Preprocessing Containers&quot;]
-        L2P_PROC[&quot;L2P Processor&lt;br/&gt;l2p2bic.m&quot;]
-        LANDICE_PROC[&quot;Land/Ice Generator&lt;br/&gt;makeicefiles.m&quot;]
-        IQUAM_PROC[&quot;iQUAM Processor&lt;br/&gt;makedailyiquam.m&quot;]
-        BG[&quot;Background Field&lt;br/&gt;(NRT only)&quot;]
-    end
-
-    subgraph preprocessed[&quot;Preprocessed Data Storage&quot;]
-        BIC[&quot;output/l2p/SENSOR/YYYY&lt;br/&gt;.bic files&quot;]
-        GDS[&quot;output/landice/YYYY&lt;br/&gt;.gds files&quot;]
-        BIP[&quot;output/landice/YYYY&lt;br/&gt;.bip files&quot;]
-        BII[&quot;output/iquam/YYYY&lt;br/&gt;.bii files&quot;]
-    end
-
-    subgraph analysis[&quot;Analysis &amp; Output&quot;]
-        MRVA[&quot;MRVA Algorithm&quot;]
-        OUTPUT[&quot;MUR SST Product&lt;br/&gt;NetCDF Output&quot;]
-    end
-
-    PODAAC --&gt;|&quot;Download&lt;br/&gt;(hourly cron)&quot;| PODAAC_STOR
-    OSISAF --&gt;|&quot;Download&lt;br/&gt;(on-demand)&quot;| ICE_STOR
-    IQUAM_SRC --&gt;|&quot;Download&lt;br/&gt;(monthly)&quot;| IQUAM_STOR
-    PREV --&gt;|&quot;Read&lt;br/&gt;(NRT)&quot;| COEF_STOR
-
-    PODAAC_STOR --&gt;|Process| L2P_PROC
-    ICE_STOR --&gt;|Process| LANDICE_PROC
-    IQUAM_STOR --&gt;|Process| IQUAM_PROC
-    COEF_STOR --&gt;|Read| BG
-
-    L2P_PROC --&gt; BIC
-    LANDICE_PROC --&gt; GDS
-    LANDICE_PROC --&gt; BIP
-    IQUAM_PROC --&gt; BII
-
-    BIC --&gt; MRVA
-    GDS --&gt; MRVA
-    BIP --&gt; MRVA
-    BII --&gt; MRVA
-    BG --&gt; MRVA
-
-    MRVA --&gt; OUTPUT
-
-    style MRVA fill:#e1f5ff,stroke:#0288d1,stroke-width:2px,stroke-dasharray: 5 5
-    style OUTPUT fill:#e1f5ff,stroke:#0288d1,stroke-width:2px,stroke-dasharray: 5 5
-</pre>
-<figcaption>External sources are downloaded to local storage, converted to compact binary by the preprocessing containers, and consumed together by MRVA.</figcaption>
-</figure>
-    <h2>The four inputs</h2>
+    <nav class="toc" aria-label="On this page">
+    <b>On this page</b>
+    <ul>
+      <li><a href="#the-four-inputs">The four inputs</a></li>
+      <li><a href="#why-data-is-reprocessed">Why data is reprocessed</a></li>
+      <li><a href="#how-the-data-moves">How the data moves</a></li>
+      <li><a href="#data-sources">Where each input comes from</a></li>
+      <li><a href="#temporal-windows">Temporal windows</a></li>
+      <li><a href="#download-and-caching-strategy">Download and caching</a></li>
+      <li><a href="#processing-modes">Processing modes</a></li>
+      <li><a href="#nrtrea-coefficient-file-lifecycle">The coefficient file lifecycle</a></li>
+      <li><a href="#storage-requirements">Storage requirements</a></li>
+      <li><a href="#data-reuse-and-access-patterns">Reuse and access patterns</a></li>
+      <li><a href="#quality-assurance">Quality assurance</a></li>
+    </ul>
+    </nav>
+    <h2 id="the-four-inputs">The four inputs</h2>
     <div class="table-wrap">
     <table>
       <thead><tr><th>Input</th><th>Source</th><th>Cadence</th><th>Window</th></tr></thead>
@@ -118,8 +75,7 @@ flowchart TB
       </tbody>
     </table>
     </div>
-
-    <h2>Why data is reprocessed</h2>
+    <h2 id="why-data-is-reprocessed">Why data is reprocessed</h2>
     <p>Satellite data does not arrive all at once. A granule for a given day
     may be delivered hours or days late, and near-real-time streams are
     superseded by better-calibrated versions. Each sensor therefore has a
@@ -130,63 +86,869 @@ flowchart TB
     they are left alone. The same logic governs the product: near-real-time
     output is always rewritten, while a reanalysis product that already
     exists is never regenerated.</p>
+    <h2 id="how-the-data-moves">How the data moves</h2>
+    <h3 id="data-flow-architecture">Data flow</h3>
+    <figure class="diagram">
+    <pre class="mermaid">
+    flowchart TB
+        subgraph external[&quot;External Data Sources&quot;]
+            PODAAC[&quot;PO.DAAC&lt;br/&gt;L2P Satellite Files&quot;]
+            OSISAF[&quot;OSI-SAF&lt;br/&gt;Ice Concentration&quot;]
+            IQUAM_SRC[&quot;NOAA iQUAM&lt;br/&gt;Buoy Data&quot;]
+            PREV[&quot;Previous MUR Run&lt;br/&gt;(NRT mode)&quot;]
+        end
 
-    <h2>A day in the life</h2>
-<figure class="diagram">
-<pre class="mermaid">
-gantt
-    title NRT Processing Timeline (Day 042)
-    dateFormat HH:mm
-    axisFormat %H:%M
+        subgraph storage[&quot;Input Data Storage&quot;]
+            PODAAC_STOR[&quot;/nas2/source/podaac/&lt;br/&gt;Hourly cron downloads&quot;]
+            ICE_STOR[&quot;/nas2/source/osi-saf/ice/&lt;br/&gt;On-demand download&quot;]
+            IQUAM_STOR[&quot;/nas2/source/iquam/&lt;br/&gt;Monthly files&quot;]
+            COEF_STOR[&quot;/nas2/coef/YYYY/&lt;br/&gt;Previous coefficients&quot;]
+        end
 
-    section Downloads
-    Hourly L2P cron jobs     :active, download, 00:00, 06:00
+        subgraph containers[&quot;Preprocessing Containers&quot;]
+            L2P_PROC[&quot;L2P Processor&lt;br/&gt;l2p2bic.m&quot;]
+            LANDICE_PROC[&quot;Land/Ice Generator&lt;br/&gt;makeicefiles.m&quot;]
+            IQUAM_PROC[&quot;iQUAM Processor&lt;br/&gt;makedailyiquam.m&quot;]
+            BG[&quot;Background Field&lt;br/&gt;(NRT only)&quot;]
+        end
 
-    section Preprocessing
-    Ice mask generation      :ice, 09:00, 5m
-    L2P day 042 (fresh)      :l2p042, after ice, 60m
-    L2P day 041 (reprocess)  :l2p041, after ice, 60m
-    iQUAM (cached)           :iquam, after ice, 1m
+        subgraph preprocessed[&quot;Preprocessed Data Storage&quot;]
+            BIC[&quot;/nas2/bic/SENSOR/YYYY/&lt;br/&gt;.bic.gz files&quot;]
+            GDS[&quot;/nas2/gds/YYYY/&lt;br/&gt;.gds files&quot;]
+            BIP[&quot;/nas2/bip/YYYY/&lt;br/&gt;.bip files&quot;]
+            BII[&quot;/nas2/bii/YYYY/&lt;br/&gt;.bii files&quot;]
+        end
 
-    section Analysis
-    MRVA processing          :crit, mrva, after l2p042, 1h
-    NetCDF generation        :netcdf, after mrva, 30m
+        subgraph analysis[&quot;Analysis &amp; Output&quot;]
+            MRVA[&quot;MRVA Algorithm&quot;]
+            OUTPUT[&quot;MUR SST Product&lt;br/&gt;NetCDF Output&quot;]
+        end
 
-    section Milestones
-    L2P data ready           :milestone, m1, 06:00, 0m
-    Processing starts        :milestone, m2, 09:00, 0m
-    Product available        :milestone, m3, 12:00, 0m
-</pre>
-<figcaption>Downloads run continuously; preprocessing and analysis run once the day's data has largely landed.</figcaption>
-</figure>
-    <h2>Storage</h2>
-<figure class="diagram">
-<pre class="mermaid">
-pie title Annual Storage Requirements (2.3 TB total)
-    &quot;L2P Input (1.5 TB)&quot; : 1500
-    &quot;L2P Preprocessed (300 GB)&quot; : 300
-    &quot;Final Products (310 GB)&quot; : 310
-    &quot;Ice Data (73 GB)&quot; : 73
-    &quot;iQUAM Input/Preprocessed (19 GB)&quot; : 19
-    &quot;Other (98 GB)&quot; : 98
-</pre>
-<figcaption>Annual storage, dominated by the raw L2P granules rather than by any pipeline output.</figcaption>
-</figure>
-    <p>The raw L2P archive dominates the footprint by a wide margin. The
-    pipeline includes a purge stage that removes downloaded granule
-    directories once they fall outside the rolling window, which is what
-    keeps that number bounded.</p>
+        PODAAC --&gt;|&quot;Download&lt;br/&gt;(hourly cron)&quot;| PODAAC_STOR
+        OSISAF --&gt;|&quot;Download&lt;br/&gt;(on-demand)&quot;| ICE_STOR
+        IQUAM_SRC --&gt;|&quot;Download&lt;br/&gt;(monthly)&quot;| IQUAM_STOR
+        PREV --&gt;|&quot;Read&lt;br/&gt;(NRT)&quot;| COEF_STOR
 
-    <div class="note">
-      <p>Per-sensor windows, latencies, caching rules and the full storage
-      breakdown are in
-      <a href="https://github.com/podaac/mur/blob/HEAD/documentation/DATA_LIFECYCLE.md">DATA_LIFECYCLE.md</a>.</p>
+        PODAAC_STOR --&gt;|Process| L2P_PROC
+        ICE_STOR --&gt;|Process| LANDICE_PROC
+        IQUAM_STOR --&gt;|Process| IQUAM_PROC
+        COEF_STOR --&gt;|Read| BG
+
+        L2P_PROC --&gt; BIC
+        LANDICE_PROC --&gt; GDS
+        LANDICE_PROC --&gt; BIP
+        IQUAM_PROC --&gt; BII
+
+        BIC --&gt; MRVA
+        GDS --&gt; MRVA
+        BIP --&gt; MRVA
+        BII --&gt; MRVA
+        BG --&gt; MRVA
+
+        MRVA --&gt; OUTPUT
+
+        style MRVA fill:#e1f5ff,stroke:#0288d1,stroke-width:2px,stroke-dasharray: 5 5
+        style OUTPUT fill:#e1f5ff,stroke:#0288d1,stroke-width:2px,stroke-dasharray: 5 5
+    </pre>
+    </figure>
+    <h3 id="key-principles">Key principles</h3>
+    <ol>
+    <li><strong>Temporal Windows:</strong> Data is collected over multi-day windows (±2-3 days)</li>
+    <li><strong>Caching:</strong> Preprocessed files are retained indefinitely, reused across runs</li>
+    <li><strong>Stability Latency:</strong> Respect data maturity periods before finalization</li>
+    <li><strong>Selective Reprocessing:</strong> Only reprocess data younger than stability threshold</li>
+    <li><strong>Separation of Concerns:</strong> Download operations separate from processing</li>
+    </ol>
+    <h2 id="data-sources">Where each input comes from</h2>
+    <h3 id="1-l2p-satellite-data-podaac">1. L2P Satellite Data (PO.DAAC)</h3>
+    <p><strong>Provider:</strong> NASA Physical Oceanography Distributed Active Archive Center (PO.DAAC)</p>
+    <p><strong>Format:</strong> GHRSST Level 2P NetCDF files</p>
+    <p><strong>Collections:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Sensor</th><th>Collection ID</th><th>Provider</th><th>Update Frequency</th><th>Resolution</th></tr></thead>
+    <tbody>
+    <tr><td><strong>AMSR2R</strong></td><td>AMSR2-REMSS-L2P-v8.2</td><td>Remote Sensing Systems</td><td>Orbital (~90 min)</td><td>~25 km</td></tr>
+    <tr><td><strong>MODISA</strong></td><td>MODIS_A-JPL-L2P-v2019.0</td><td>JPL</td><td>Orbital (~90 min)</td><td>~1 km</td></tr>
+    <tr><td><strong>MODIST</strong></td><td>MODIS_T-JPL-L2P-v2019.0</td><td>JPL</td><td>Orbital (~90 min)</td><td>~1 km</td></tr>
+    <tr><td><strong>AVMTBG</strong></td><td>AVHRRMTB_G-NAVO-L2P-v2.0</td><td>NAVO</td><td>Orbital (~100 min)</td><td>~1-4 km</td></tr>
+    </tbody>
+    </table>
     </div>
+    <p><strong>Download Method:</strong></p>
+    <ul>
+    <li>Tool: <code>podaac-data-subscriber</code> (Python)</li>
+    <li>Schedule: Hourly cron jobs (automated, separate from processing)</li>
+    <li>Authentication: NASA Earthdata Login</li>
+    <li>Protocol: HTTPS</li>
+    </ul>
+    <p><strong>Latency:</strong></p>
+    <ul>
+    <li>Standard products: 3-6 hours after observation</li>
+    <li>Real-time products: 1-3 hours after observation</li>
+    <li>Stability latency: 2-3 days (sensor-dependent)</li>
+    </ul>
+    <p><strong>Typical Daily Volume per Sensor:</strong></p>
+    <ul>
+    <li>MODISA: ~200-300 granules/day, ~1-2 GB</li>
+    <li>MODIST: ~200-300 granules/day, ~1-2 GB</li>
+    <li>AMSR2R: ~30-50 granules/day, ~500 MB</li>
+    <li>AVMTBG: ~40-80 granules/day, ~600 MB</li>
+    <li><strong>Total:</strong> ~4-5 GB/day (all sensors)</li>
+    </ul>
+    <h3 id="2-sea-ice-concentration-osi-saf">2. Sea Ice Concentration (OSI-SAF)</h3>
+    <p><strong>Provider:</strong> EUMETSAT Ocean and Sea Ice Satellite Application Facility</p>
+    <p><strong>Product:</strong> OSI-401-b (Global sea ice concentration)</p>
+    <p><strong>Format:</strong> NetCDF</p>
+    <p><strong>Resolution:</strong> ~10 km (EASE2 grid)</p>
+    <p><strong>Update Frequency:</strong> Daily</p>
+    <p><strong>Download Method:</strong></p>
+    <ul>
+    <li>Protocol: FTP or HTTP</li>
+    <li>Scheduling: On-demand during processing</li>
+    <li>Fallback: Up to 10 days backward if current day unavailable</li>
+    </ul>
+    <p><strong>Latency:</strong></p>
+    <ul>
+    <li>Typically available within 6-12 hours of observation</li>
+    <li>No stability latency (regenerated each run)</li>
+    </ul>
+    <p><strong>Daily Volume:</strong> ~200 MB/day</p>
+    <p><strong>Coverage:</strong> Global, focus on polar regions</p>
+    <h3 id="3-in-situ-buoy-data-noaa-iquam">3. In-Situ Buoy Data (NOAA iQUAM)</h3>
+    <p><strong>Provider:</strong> NOAA In-situ Quality Monitor (iQUAM)</p>
+    <p><strong>Format:</strong> NetCDF (monthly files)</p>
+    <p><strong>Platforms:</strong></p>
+    <ul>
+    <li>Ships (voluntary observing ships)</li>
+    <li>Moored buoys (TAO, PIRATA, RAMA)</li>
+    <li>Drifting buoys</li>
+    <li>Coastal stations</li>
+    <li>Argo floats (surface observations)</li>
+    <li>ISAR tropical moorings</li>
+    <li>High-resolution drifters</li>
+    <li>Underwater gliders</li>
+    </ul>
+    <p><strong>Download Method:</strong></p>
+    <ul>
+    <li>Protocol: HTTPS</li>
+    <li>Schedule: Monthly file download as needed</li>
+    <li>Caching: Strong (monthly .mat files in /tmp/makebic/)</li>
+    </ul>
+    <p><strong>Update Frequency:</strong> Monthly files updated daily with new observations</p>
+    <p><strong>File Size:</strong> ~50-200 MB per month</p>
+    <p><strong>Quality Levels:</strong></p>
+    <ul>
+    <li>Level 5: Highest quality (passed all checks)</li>
+    <li>MUR uses: quality_level &gt;= 5 only</li>
+    </ul>
+    <h3 id="4-background-field-nrt-mode-only">4. Background Field (NRT Mode Only)</h3>
+    <p><strong>Source:</strong> Previous day's MUR analysis</p>
+    <p><strong>Product:</strong> Coefficient file at scale L=6</p>
+    <p><strong>File:</strong> <code>mrva.c06</code> from previous day</p>
+    <p><strong>Purpose:</strong> Initialize NRT processing at medium resolution</p>
+    <p><strong>Size:</strong> ~50-100 MB</p>
+    <p><strong>Location:</strong> <code>/nas2/coef/YYYY/</code></p>
+    <h2 id="temporal-windows">Temporal windows</h2>
+    <h3 id="overview-1">Overview</h3>
+    <p>Different components use different temporal windows based on:</p>
+    <ul>
+    <li>Sensor characteristics (temporal decorrelation)</li>
+    <li>Data availability patterns</li>
+    <li>Computational efficiency</li>
+    </ul>
+    <h3 id="l2p-satellite-data">L2P Satellite Data</h3>
+    <p><strong>Temporal Window:</strong></p>
+    <pre><code>analysis_day ± dayrange
+
+    Where:
+      dayrange = 2 (typical)
+      Total window = 5 days</code></pre>
+    <p><strong>Example:</strong> Processing 2025-042 (February 11)</p>
+    <pre><code>Days collected: 040, 041, 042, 043, 044
+                  (Feb 9-13)</code></pre>
+    <p><strong>Stability Latency:</strong></p>
+    <pre><code>Sensor        Stability (days)   Meaning
+    ---------------------------------------------------------
+    MODISA        2                  Reprocess if age &lt; 2 days
+    MODIST        3                  Reprocess if age &lt; 3 days
+    AMSR2R        2                  Reprocess if age &lt; 2 days
+    AVMTBG        2                  Reprocess if age &lt; 2 days</code></pre>
+    <p><strong>Rewrite Logic (NRT):</strong></p>
+    <pre><code class="language-python">file_age = analysis_day - data_day
+    if file_age &lt; stability_latency:
+        rewrite = True   # Data still maturing
+    else:
+        rewrite = False  # Use cached .bic file</code></pre>
+    <p><strong>Processing Timeline:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Day</th><th>MODISA Stability=2</th><th>Action</th></tr></thead>
+    <tbody>
+    <tr><td>042 (today)</td><td>Age 0</td><td>Process (fresh)</td></tr>
+    <tr><td>041 (yesterday)</td><td>Age 1</td><td>Reprocess (age &lt; 2)</td></tr>
+    <tr><td>040 (2 days ago)</td><td>Age 2</td><td>Use cache (age &gt;= 2)</td></tr>
+    <tr><td>039 (3 days ago)</td><td>Age 3</td><td>Use cache (stable)</td></tr>
+    <tr><td>038 (4 days ago)</td><td>Age 4</td><td>Use cache (stable)</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="iquam-buoy-data">iQUAM Buoy Data</h3>
+    <p><strong>Temporal Window:</strong></p>
+    <pre><code>analysis_day ± buoydayrange
+
+    Where:
+      buoydayrange = 3 (typical)
+      Total window = 7 days</code></pre>
+    <p><strong>Example:</strong> Processing 2025-042</p>
+    <pre><code>Days collected: 039, 040, 041, 042, 043, 044, 045
+                  (Feb 8-14)</code></pre>
+    <p><strong>Stability Latency:</strong></p>
+    <pre><code>buoystablat = 2 days</code></pre>
+    <p><strong>NRT Mode Behavior:</strong></p>
+    <ul>
+    <li><strong>Never reprocess</strong> buoy files in NRT mode</li>
+    <li>Reason: Monthly files are large (~100 MB); processing is expensive</li>
+    <li>Strategy: First day processes, subsequent days use cache</li>
+    </ul>
+    <p><strong>REA Mode Behavior:</strong></p>
+    <ul>
+    <li>Respect stability latency (reprocess if age &lt; 2 days)</li>
+    <li>More expensive but ensures complete reanalysis</li>
+    </ul>
+    <h3 id="ice-concentration-data">Ice Concentration Data</h3>
+    <p><strong>Temporal Window:</strong></p>
+    <pre><code>Single day: analysis_day</code></pre>
+    <p><strong>No caching:</strong> Regenerated every run</p>
+    <p><strong>Fallback Logic:</strong></p>
+    <pre><code>Try: analysis_day
+    If unavailable, try: analysis_day - 1
+    If unavailable, try: analysis_day - 2
+    ...
+    Maximum fallback: 10 days</code></pre>
+    <p><strong>Rationale:</strong> Ice extent changes rapidly; always use freshest available</p>
+    <h2 id="download-and-caching-strategy">Download and caching</h2>
+    <h3 id="l2p-workflow">L2P Workflow</h3>
+    <h4 id="stage-1-automated-download-separate-from-processing">Stage 1: Automated Download (Separate from Processing)</h4>
+    <p><strong>Cron Jobs (Hourly):</strong></p>
+    <pre><code class="language-bash"># Run every hour
+    0 * * * * podaac-data-subscriber \
+        -c AMSR2-REMSS-L2P-v8.2 \
+        -d /nas2/source/podaac/AMSR2R/ \
+        --start-date &lt;TODAY&gt; \
+        --end-date &lt;TODAY&gt;</code></pre>
+    <p><strong>Download Directory Structure:</strong></p>
+    <pre><code>/nas2/source/podaac/
+    ├── AMSR2R/
+    │   └── YYYY/
+    │       └── DOY/
+    │           ├── granule_001.nc
+    │           ├── granule_002.nc
+    │           └── ...
+    ├── MODISA/
+    │   └── YYYY/DOY/...
+    ├── MODIST/
+    │   └── YYYY/DOY/...
+    └── AVMTBG/
+        └── YYYY/DOY/...</code></pre>
+    <p><strong>Advantages:</strong></p>
+    <ul>
+    <li>Continuous data accumulation</li>
+    <li>Processing independent of download failures</li>
+    <li>Multiple granules available before processing</li>
+    </ul>
+    <h4 id="stage-2-preprocessing-on-demand">Stage 2: Preprocessing (On-Demand)</h4>
+    <p><strong>Container Execution:</strong></p>
+    <pre><code class="language-bash">docker run --rm \
+      -v /nas2/source/podaac/MODISA:/input:ro \
+      -v /nas2/bic/MODISA:/output \
+      ghcr.io/podaac/mur-l2p:latest \
+      2025 042 MODISA G10 nrt 2</code></pre>
+    <p><strong>Output:</strong></p>
+    <pre><code>/nas2/bic/MODISA/2025/
+    ├── G10_MODISA_2025_040.bic.gz
+    ├── G10_MODISA_2025_041.bic.gz
+    ├── G10_MODISA_2025_042.bic.gz
+    ├── G10_MODISA_2025_043.bic.gz
+    ├── G10_MODISA_2025_044.bic.gz
+    └── L2Plist_G10_MODISA_2025_*.txt  (source tracking)</code></pre>
+    <p><strong>Caching Behavior:</strong></p>
+    <pre><code class="language-python">for day in [040, 041, 042, 043, 044]:
+        output_file = f"/nas2/bic/MODISA/2025/G10_MODISA_2025_{day:03d}.bic.gz"
+
+        if os.path.exists(output_file):
+            age = analysis_day - day
+            if age &gt;= stability_latency:
+                # Stable data, use cache
+                print(f"Using cached {output_file}")
+                continue
+            else:
+                # Still maturing, reprocess
+                print(f"Reprocessing {output_file} (age={age} &lt; {stability_latency})")
+
+        # Process all granules for this day
+        process_l2p_granules(day, sensor)</code></pre>
+    <h3 id="iquam-workflow">iQUAM Workflow</h3>
+    <h4 id="stage-1-monthly-file-download">Stage 1: Monthly File Download</h4>
+    <p><strong>On first access of each month:</strong></p>
+    <pre><code class="language-bash">wget https://www.star.nesdis.noaa.gov/pub/socd/mecb/iquam/v3/data/YYYY/YYYYMM.nc</code></pre>
+    <p><strong>Storage:</strong></p>
+    <pre><code>/nas2/source/iquam/
+    ├── 2025/
+    │   ├── 202501.nc  (~100 MB)
+    │   ├── 202502.nc
+    │   └── ...
+    └── 2024/
+        └── ...</code></pre>
+    <h4 id="stage-2-matlab-caching">Stage 2: MATLAB Caching</h4>
+    <p><strong>makedailyiquam.m internal cache:</strong></p>
+    <pre><code class="language-matlab">% Check for cached .mat file
+    matfile = sprintf('/tmp/makebic/iquam_%04d%02d.mat', year, month);
+    if exist(matfile, 'file')
+        % Load cached monthly data
+        load(matfile, 'iquam_data');
+    else
+        % Download and parse NetCDF
+        ncfile = download_iquam_month(year, month);
+        iquam_data = parse_iquam_netcdf(ncfile);
+        % Cache for future use
+        save(matfile, 'iquam_data');
+    end
+
+    % Extract observations for requested day ± 3 days
+    subset = filter_by_date(iquam_data, analysis_day, dayrange=3);</code></pre>
+    <h4 id="stage-3-daily-bii-files">Stage 3: Daily .bii Files</h4>
+    <p><strong>Output:</strong></p>
+    <pre><code>/nas2/bii/2025/
+    ├── G10_IQUAM0_2025_042.bii
+    ├── G10_IQUAM0_2025_043.bii
+    └── ...</code></pre>
+    <p><strong>NRT Mode:</strong> Never regenerate .bii files (expensive monthly file parsing)</p>
+    <p><strong>REA Mode:</strong> Respect stability latency, regenerate if needed</p>
+    <h3 id="ice-concentration-workflow">Ice Concentration Workflow</h3>
+    <p><strong>No caching - always regenerate:</strong></p>
+    <pre><code class="language-bash"># Download ice concentration for analysis day
+    docker run --rm \
+      -v /nas2/source/osi-saf:/input \
+      -v /nas2/gds:/output \
+      ghcr.io/podaac/mur-landice:latest \
+      2025 042 G10 p01
+
+    # If failed, try day - 1, day - 2, ... (up to 10 days back)</code></pre>
+    <p><strong>Output:</strong></p>
+    <pre><code>/nas2/gds/2025/
+    ├── G10_2025_042.gds  (land/ice mask)
+    └── ...
+
+    /nas2/bip/2025/
+    ├── G10_2025_042.bip  (ice SST points)
+    └── ...</code></pre>
+    <p><strong>Rationale for no caching:</strong></p>
+    <ul>
+    <li>Ice extent changes daily</li>
+    <li>File sizes small (~100 MB)</li>
+    <li>Processing fast (~2-5 minutes)</li>
+    </ul>
+    <h2 id="processing-modes">Processing modes</h2>
+    <h3 id="nrt-near-real-time-mode">NRT (Near Real-Time) Mode</h3>
+    <p><strong>Objectives:</strong></p>
+    <ul>
+    <li>Minimize processing time</li>
+    <li>Maximize cache utilization</li>
+    <li>Process current day as soon as data available</li>
+    </ul>
+    <p><strong>Characteristics:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Component</th><th>Cache Behavior</th><th>Rewrite Logic</th></tr></thead>
+    <tbody>
+    <tr><td><strong>L2P</strong></td><td>High cache hit</td><td>Only rewrite age &lt; stability</td></tr>
+    <tr><td><strong>iQUAM</strong></td><td>100% cache (NRT)</td><td>Never rewrite</td></tr>
+    <tr><td><strong>Ice</strong></td><td>Never cache</td><td>Always regenerate</td></tr>
+    <tr><td><strong>Background</strong></td><td>Use previous day</td><td>L=6 coefficients</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Timeline:</strong></p>
+    <figure class="diagram">
+    <pre class="mermaid">
+    gantt
+        title NRT Processing Timeline (Day 042)
+        dateFormat HH:mm
+        axisFormat %H:%M
+
+        section Downloads
+        Hourly L2P cron jobs     :active, download, 00:00, 06:00
+
+        section Preprocessing
+        Ice mask generation      :ice, 09:00, 5m
+        L2P day 042 (fresh)      :l2p042, after ice, 60m
+        L2P day 041 (reprocess)  :l2p041, after ice, 60m
+        iQUAM (cached)           :iquam, after ice, 1m
+
+        section Analysis
+        MRVA processing          :crit, mrva, after l2p042, 1h
+        NetCDF generation        :netcdf, after mrva, 30m
+
+        section Milestones
+        L2P data ready           :milestone, m1, 06:00, 0m
+        Processing starts        :milestone, m2, 09:00, 0m
+        Product available        :milestone, m3, 12:00, 0m
+    </pre>
+    </figure>
+    <p><strong>Processing Steps:</strong></p>
+    <ul>
+    <li><strong>00:00-06:00</strong> - Hourly cron downloads L2P granules throughout day</li>
+    <li><strong>06:00</strong> - Most L2P data for day 042 available</li>
+    <li><strong>09:00</strong> - Run MUR processing for day 042
+    <ul>
+    <li>Ice: Generate fresh (5 min)</li>
+    <li>L2P day 042: Process fresh (~60 min all sensors)</li>
+    <li>L2P day 041: Reprocess (age=1 &lt; stability=2)</li>
+    <li>L2P day 040: Use cache (age=2 &gt;= stability=2)</li>
+    <li>iQUAM: Use cached .bii files (&lt;1 min)</li>
+    <li>Background: Load day 041 coefficients (L=6)</li>
+    </ul>
+    </li>
+    <li><strong>10:30</strong> - MRVA: Run analysis (~30-90 min NRT, longer for REA)</li>
+    <li><strong>12:00</strong> - MUR product available (~3 hours total latency)</li>
+    </ul>
+    <p><strong>Cache Hit Rate Estimates (Day 042):</strong></p>
+    <pre><code>L2P (stability=2):
+      Day 042: 0% cache (fresh)
+      Day 041: 0% cache (reprocessed, age &lt; 2)
+      Day 040: 100% cache (stable, age &gt;= 2)
+      Day 039: 100% cache (stable)
+      Overall: ~40% cache hits
+
+    iQUAM:
+      All days: 100% cache (NRT skip rewrite)
+
+    Ice:
+      0% cache (always fresh)</code></pre>
+    <h3 id="rea-reanalysis-mode">REA (Reanalysis) Mode</h3>
+    <p><strong>Objectives:</strong></p>
+    <ul>
+    <li>Maximum accuracy</li>
+    <li>Complete reprocessing</li>
+    <li>Historical date processing</li>
+    </ul>
+    <p><strong>Characteristics:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Component</th><th>Cache Behavior</th><th>Rewrite Logic</th></tr></thead>
+    <tbody>
+    <tr><td><strong>L2P</strong></td><td>Respect stability</td><td>Rewrite if age &lt; stability</td></tr>
+    <tr><td><strong>iQUAM</strong></td><td>Respect stability</td><td>Rewrite if age &lt; 2 days</td></tr>
+    <tr><td><strong>Ice</strong></td><td>Never cache</td><td>Always regenerate</td></tr>
+    <tr><td><strong>Background</strong></td><td>No background</td><td>Start from L=2</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Timeline:</strong></p>
+    <pre><code>Day 042 (historical) processing:
+
+    - All data fully mature (processing weeks/months later)
+    - No stability latency issues
+    - All cache hits (unless explicitly forcing regeneration)
+    - Start from L=2 (coarse scale), no background field
+    - More iterations, higher accuracy
+    - Processing time: 2-4x longer than NRT</code></pre>
+    <p><strong>Cache Hit Rate (Historical Date):</strong></p>
+    <pre><code>If first time processing:
+      L2P: 0% cache (all fresh)
+      iQUAM: 0% cache (all fresh)
+      Ice: 0% cache (always fresh)
+
+    If reprocessing:
+      L2P: 100% cache (all stable)
+      iQUAM: 100% cache (all stable)
+      Ice: 0% cache (always fresh)</code></pre>
+    <h2 id="nrtrea-coefficient-file-lifecycle">The coefficient file lifecycle</h2>
+    <h3 id="overview-2">Overview</h3>
+    <p>In operational production, each date is processed <strong>twice</strong>:</p>
+    <ol>
+    <li><strong>NRT (Near Real-Time)</strong>: First pass, 1 day after observation</li>
+    <li><strong>REA (Reanalysis)</strong>: Second pass, 4 days after observation</li>
+    </ol>
+    <p>This dual-processing approach balances timeliness (NRT) with accuracy (REA), using a sophisticated coefficient file chain for continuity.</p>
+    <h3 id="coefficient-file-scales">Coefficient File Scales</h3>
+    <p>MRVA produces coefficient files at multiple B-spline scales (L values):</p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Scale (L)</th><th>Description</th><th>Grid Spacing</th><th>Purpose</th></tr></thead>
+    <tbody>
+    <tr><td>L=2</td><td>Coarsest</td><td>~100 km</td><td>REA starting point</td></tr>
+    <tr><td>L=6</td><td>Medium</td><td>~6 km</td><td>NRT starting point (background)</td></tr>
+    <tr><td>L=7-10</td><td>Fine</td><td>~3-0.4 km</td><td>Progressive refinement</td></tr>
+    <tr><td>L=11</td><td>Finest</td><td>~0.2 km</td><td>Final high-resolution</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="file-naming-convention">File Naming Convention</h3>
+    <pre><code>YYYYDDDHH_MRVA4_Global.cXX[.gz]
+
+    Where:
+      YYYY  = Year
+      DDD   = Day of year (001-366)
+      HH    = Analysis hour (typically 09)
+      XX    = Scale level (02-11)</code></pre>
+    <p><strong>Examples:</strong></p>
+    <pre><code>2025042009_MRVA4_Global.c06    # Scale 6, day 042, hour 09
+    2025042009_MRVA4_Global.c11    # Scale 11 (finest), day 042</code></pre>
+    <h3 id="nrt-mode-realtime1">NRT Mode (realtime=1)</h3>
+    <p><strong>Latency:</strong> 1 day after observation date</p>
+    <p><strong>Starting Scale:</strong> L0=7 (skips coarse scales)</p>
+    <p><strong>Coefficient Files Produced:</strong> <code>.c07</code>, <code>.c08</code>, <code>.c09</code>, <code>.c10</code>, <code>.c11</code></p>
+    <p><strong>Background Field:</strong> Looks for previous day's <code>.c06</code> file</p>
+    <p><strong>Directory:</strong> <code>coef/YYYY/nrt/</code> (with "nrt" suffix)</p>
+    <pre><code>coef/
+    └── 2025/
+        └── nrt/
+            ├── 2025041009_MRVA4_Global.c07
+            ├── 2025041009_MRVA4_Global.c08
+            ├── ...
+            ├── 2025042009_MRVA4_Global.c07
+            ├── 2025042009_MRVA4_Global.c08
+            └── ...</code></pre>
+    <h3 id="rea-mode-realtime0">REA Mode (realtime=0)</h3>
+    <p><strong>Latency:</strong> 4 days after observation date (allows complete data accumulation)</p>
+    <p><strong>Starting Scale:</strong> L0=2 (full multi-scale analysis)</p>
+    <p><strong>Coefficient Files Produced:</strong> <code>.c02</code>, <code>.c03</code>, <code>.c04</code>, <code>.c05</code>, <code>.c06</code>, <code>.c07</code>, <code>.c08</code>, <code>.c09</code>, <code>.c10</code>, <code>.c11</code></p>
+    <p><strong>Background Field:</strong> None (starts fresh from coarse scale)</p>
+    <p><strong>Directory:</strong> <code>coef/YYYY/</code> (no suffix)</p>
+    <pre><code>coef/
+    └── 2025/
+        ├── 2025038009_MRVA4_Global.c02  # Includes .c06
+        ├── 2025038009_MRVA4_Global.c03
+        ├── 2025038009_MRVA4_Global.c04
+        ├── 2025038009_MRVA4_Global.c05
+        ├── 2025038009_MRVA4_Global.c06  # ← Created by REA
+        ├── 2025038009_MRVA4_Global.c07
+        └── ...</code></pre>
+    <h3 id="the-c06-background-lookup">The .c06 Background Lookup</h3>
+    <p>When NRT runs, it attempts to use the previous day's <code>.c06</code> coefficient as a starting background field. This provides a "warm start" that helps maintain spatial coherence.</p>
+    <p><strong>Lookup Logic (trimbip3a.m):</strong></p>
+    <pre><code class="language-matlab">% Try to find previous day's .c06 file for background
+    MURcsp = sprintf('%s/%04d/YYYYDDDHH_MRVA4_Global.c06', coefdir, prev_year);
+
+    if exist(MURcsp, 'file')
+        % Use MUR reference - fast path
+        refcspfile = 'MUR.csp';
+        eval(sprintf('!ln -sf %s %s', MURcsp, refcspfile));
+    else
+        % Fallback: Use L4 AVHRR_OI reference or build from scratch
+        % Look for L4 GHRSST file...
+    end</code></pre>
+    <h3 id="the-key-insight-c06-is-only-created-by-rea">The Key Insight: .c06 Is Only Created by REA</h3>
+    <p><strong>Critical Understanding:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Mode</th><th>Creates .c06?</th><th>Uses .c06?</th></tr></thead>
+    <tbody>
+    <tr><td><strong>NRT</strong></td><td>❌ No (starts at L=7)</td><td>✅ Yes (from previous day)</td></tr>
+    <tr><td><strong>REA</strong></td><td>✅ Yes (runs L=2-11)</td><td>❌ No (starts from scratch)</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Timeline Implication:</strong></p>
+    <p>Since REA runs with a 4-day latency, the <code>.c06</code> file for day N is created 4 days after day N. This means:</p>
+    <ul>
+    <li>Day N+1 (NRT): Looks for day N's <code>.c06</code> → <strong>Not available yet</strong> (REA hasn't run)</li>
+    <li>Day N+2 (NRT): Looks for day N+1's <code>.c06</code> → <strong>Not available yet</strong></li>
+    <li>Day N+3 (NRT): Looks for day N+2's <code>.c06</code> → <strong>Not available yet</strong></li>
+    <li>Day N+4 (NRT): Looks for day N+3's <code>.c06</code> → <strong>Not available yet</strong></li>
+    <li>Day N+5 (NRT): Looks for day N+4's <code>.c06</code> → <strong>Available!</strong> (REA for day N+4 just ran)</li>
+    </ul>
+    <h3 id="steady-state-production-behavior">Steady-State Production Behavior</h3>
+    <p>In operational production with continuous NRT+REA processing:</p>
+    <pre><code>Timeline for Day 042:
+    ─────────────────────────────────────────────────────────────────
+    Day 042:  [Observations collected]
+    Day 043:  NRT for 042 runs → outputs .c07-.c11, looks for 041's .c06 (missing)
+    Day 046:  REA for 042 runs → outputs .c02-.c11 including .c06 ← FINAL PRODUCT
+    ─────────────────────────────────────────────────────────────────
+
+    Coefficient availability when NRT runs for day 046:
+      └── Looks for day 045's .c06 → Day 045 REA ran on day 049 → NOT YET AVAILABLE
+
+    Therefore: Most NRT runs fall back to building reference from scratch</code></pre>
+    <p><strong>This is expected behavior.</strong> The <code>.c06</code> background is a performance optimization, not a requirement. When unavailable, the system:</p>
+    <ol>
+    <li>Falls back to L4 AVHRR_OI data if available</li>
+    <li>Or builds the reference field from the current data</li>
+    </ol>
+    <p>Production logs confirm this with "not opened" messages for <code>.c06</code> files:</p>
+    <pre><code>Checking coef/2025/2025045009_MRVA4_Global.c06: not opened  ← Normal</code></pre>
+    <h3 id="when-c06-background-is-available">When .c06 Background IS Available</h3>
+    <p>The <code>.c06</code> background is available only when NRT runs immediately after a REA run for a nearby date. This happens in specific scenarios:</p>
+    <ol>
+    <li><strong>First NRT after catchup:</strong> If REA processing catches up (e.g., after an outage), subsequent NRT runs benefit from recently-created <code>.c06</code> files.</li>
+    <li><strong>Reprocessing:</strong> When reprocessing historical dates, REA runs first, making <code>.c06</code> available for any subsequent NRT testing.</li>
+    </ol>
+    <h3 id="practical-implications">Practical Implications</h3>
+    <p><strong>For Container Testing:</strong></p>
+    <p>If you only run NRT mode, you'll only see <code>.c07-.c11</code> files. This is correct. To generate <code>.c06</code> files, run in REA mode (<code>realtime=0</code>).</p>
+    <p><strong>For Pipeline Operations:</strong></p>
+    <ul>
+    <li>NRT products are interim/preliminary</li>
+    <li>REA products are the final, authoritative versions</li>
+    <li>Storage planning should account for both sets of coefficient files</li>
+    <li>Downstream consumers should prefer REA products when available</li>
+    </ul>
+    <h3 id="directory-structure-summary">Directory Structure Summary</h3>
+    <pre><code>coef/
+    └── YYYY/
+        ├── YYYYDDDHH_MRVA4_Global.c02   # REA only
+        ├── YYYYDDDHH_MRVA4_Global.c03   # REA only
+        ├── YYYYDDDHH_MRVA4_Global.c04   # REA only
+        ├── YYYYDDDHH_MRVA4_Global.c05   # REA only
+        ├── YYYYDDDHH_MRVA4_Global.c06   # REA only ← Key for NRT background
+        ├── YYYYDDDHH_MRVA4_Global.c07   # Both modes
+        ├── ...
+        ├── YYYYDDDHH_MRVA4_Global.c11   # Both modes (final resolution)
+        │
+        └── nrt/                         # NRT-specific outputs
+            ├── YYYYDDDHH_MRVA4_Global.c07
+            ├── ...
+            └── YYYYDDDHH_MRVA4_Global.c11</code></pre>
+    <h3 id="output-product-generation">Output Product Generation</h3>
+    <p>Both NRT and REA modes use the finest coefficient file (<code>.c11</code>) to generate the final MUR SST NetCDF product. The difference is:</p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Product</th><th>Source</th><th>Quality</th><th>Use Case</th></tr></thead>
+    <tbody>
+    <tr><td>NRT MUR</td><td><code>.c11</code> from NRT</td><td>Preliminary</td><td>Real-time applications</td></tr>
+    <tr><td>REA MUR</td><td><code>.c11</code> from REA</td><td>Final</td><td>Archives, reanalysis</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p>The REA product replaces/supersedes the NRT product for the same date.</p>
+    <h2 id="storage-requirements">Storage requirements</h2>
+    <h3 id="input-data">Input Data</h3>
+    <p><strong>Daily Accumulation:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Source</th><th>Daily Volume</th><th>Retention</th><th>Annual</th></tr></thead>
+    <tbody>
+    <tr><td>L2P (all sensors)</td><td>~4-5 GB</td><td>Indefinite</td><td>~1.5 TB</td></tr>
+    <tr><td>iQUAM (monthly)</td><td>~100 MB/month</td><td>Indefinite</td><td>~1.2 GB</td></tr>
+    <tr><td>Ice concentration</td><td>~200 MB</td><td>Indefinite</td><td>~73 GB</td></tr>
+    <tr><td><strong>Total Input</strong></td><td><strong>~4.7 GB/day</strong></td><td></td><td><strong>~1.6 TB/year</strong></td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="preprocessed-data">Preprocessed Data</h3>
+    <p><strong>Daily Output:</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Product</th><th>Daily Volume</th><th>Retention</th><th>Annual</th></tr></thead>
+    <tbody>
+    <tr><td>.bic files (all sensors)</td><td>~500-800 MB</td><td>Indefinite</td><td>~300 GB</td></tr>
+    <tr><td>.bii files (buoys)</td><td>~50 MB</td><td>Indefinite</td><td>~18 GB</td></tr>
+    <tr><td>.gds/.bip (ice)</td><td>~100 MB</td><td>Indefinite</td><td>~37 GB</td></tr>
+    <tr><td><strong>Total Preprocessed</strong></td><td><strong>~650-950 MB/day</strong></td><td></td><td><strong>~350 GB/year</strong></td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="final-products">Final Products</h3>
+    <p><strong>Daily Output (estimated):</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Product</th><th>Daily Volume</th><th>Retention</th><th>Annual</th></tr></thead>
+    <tbody>
+    <tr><td>MUR NetCDF</td><td>~500 MB</td><td>Indefinite</td><td>~183 GB</td></tr>
+    <tr><td>Coefficient files</td><td>~350 MB</td><td>Configurable</td><td>~128 GB</td></tr>
+    <tr><td><strong>Total Output</strong></td><td><strong>~850 MB/day</strong></td><td></td><td><strong>~310 GB/year</strong></td></tr>
+    </tbody>
+    </table>
+    </div>
+    <h3 id="total-storage-one-year">Total Storage (One Year)</h3>
+    <figure class="diagram">
+    <pre class="mermaid">
+    pie title Annual Storage Requirements (2.3 TB total)
+        &quot;L2P Input (1.5 TB)&quot; : 1500
+        &quot;L2P Preprocessed (300 GB)&quot; : 300
+        &quot;Final Products (310 GB)&quot; : 310
+        &quot;Ice Data (73 GB)&quot; : 73
+        &quot;iQUAM Input/Preprocessed (19 GB)&quot; : 19
+        &quot;Other (98 GB)&quot; : 98
+    </pre>
+    </figure>
+    <p><strong>Breakdown:</strong></p>
+    <ul>
+    <li>Input data:        1.6 TB (70%)</li>
+    <li>Preprocessed:      350 GB (15%)</li>
+    <li>Final products:    310 GB (13%)</li>
+    <li><strong>Total:</strong>         ~2.3 TB/year</li>
+    </ul>
+    <p><strong>Growth Rate:</strong> ~6.3 GB/day (all components)</p>
+    <p><strong>Recommendations:</strong></p>
+    <ul>
+    <li>Fast storage (SSD/NVMe) for active processing: 500 GB - 1 TB</li>
+    <li>Bulk storage for archives: 10+ TB for multi-year holdings</li>
+    <li>Backup strategy: Critical products only (reduce to ~500 GB/year)</li>
+    </ul>
+    <h2 id="data-reuse-and-access-patterns">Reuse and access patterns</h2>
+    <h3 id="multi-day-processing-windows">Multi-Day Processing Windows</h3>
+    <p><strong>Key Insight:</strong> Each day's data is used in multiple processing runs</p>
+    <p><strong>L2P Example (dayrange=2):</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Data Day</th><th>Used When Processing</th><th>Total Uses</th></tr></thead>
+    <tbody>
+    <tr><td>040</td><td>Days 038, 039, 040, 041, 042</td><td>5 times</td></tr>
+    <tr><td>041</td><td>Days 039, 040, 041, 042, 043</td><td>5 times</td></tr>
+    <tr><td>042</td><td>Days 040, 041, 042, 043, 044</td><td>5 times</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>iQUAM Example (buoydayrange=3):</strong></p>
+    <div class="table-wrap">
+    <table>
+    <thead><tr><th>Data Day</th><th>Used When Processing</th><th>Total Uses</th></tr></thead>
+    <tbody>
+    <tr><td>039</td><td>Days 036, 037, 038, 039, 040, 041, 042</td><td>7 times</td></tr>
+    </tbody>
+    </table>
+    </div>
+    <p><strong>Implication:</strong></p>
+    <ul>
+    <li>First access may download and process (expensive)</li>
+    <li>Subsequent accesses use cached files (fast)</li>
+    <li>High cache hit rates in operational NRT processing</li>
+    <li>Storage investment pays off through reuse</li>
+    </ul>
+    <h3 id="access-frequency">Access Frequency</h3>
+    <p><strong>Typical NRT Day (Day 042):</strong></p>
+    <pre><code>Ice Data:
+      Download day 042: 1 time
+      Process: 1 time
+      Reuse: 0 times (regenerated daily)
+
+    L2P Data (per sensor):
+      Download days 040-044: 5 days
+      Process day 042: 1 time (fresh)
+      Reprocess day 041: 1 time (age &lt; stability)
+      Read cached days 040, 039, 038: 3 times
+
+    iQUAM Data:
+      Download monthly file: 1 time per month
+      Read cached .bii files: 7 days (all from cache in NRT)</code></pre>
+    <h3 id="cache-efficiency-metrics">Cache Efficiency Metrics</h3>
+    <p><strong>NRT Mode (Operational):</strong></p>
+    <pre><code>L2P Cache Hit Rate: ~40-60%
+      - Fresh data: ~20% (current day + within stability window)
+      - Cached data: ~80% (outside stability window)
+
+    iQUAM Cache Hit Rate: 100% (NRT skip rewrite)
+
+    Ice Cache Hit Rate: 0% (no caching)
+
+    Overall Data Throughput:
+      - Fresh processing: ~2-3 GB/day
+      - Cached reads: ~2-3 GB/day
+      - Total: ~5 GB/day (vs ~50 GB if no caching)</code></pre>
+    <p><strong>REA Mode (Historical):</strong></p>
+    <pre><code>First Run:
+      Cache Hit Rate: 0% (all fresh)
+      Throughput: ~5 GB/day
+
+    Subsequent Runs (same date):
+      Cache Hit Rate: 95% (only ice regenerated)
+      Throughput: ~500 MB/day</code></pre>
+    <h2 id="quality-assurance">Quality assurance</h2>
+    <h3 id="input-data-validation">Input Data Validation</h3>
+    <p><strong>L2P Granules:</strong></p>
+    <ul>
+    <li>File count per day (expect 200-300 for MODIS)</li>
+    <li>Temporal coverage (should span 24 hours)</li>
+    <li>Spatial coverage (global vs regional gaps)</li>
+    <li>Quality flags (confidence levels)</li>
+    </ul>
+    <p><strong>iQUAM Observations:</strong></p>
+    <ul>
+    <li>Monthly file completeness</li>
+    <li>Quality level distribution (target: &gt;=5)</li>
+    <li>Platform type coverage</li>
+    <li>Temporal distribution</li>
+    </ul>
+    <p><strong>Ice Concentration:</strong></p>
+    <ul>
+    <li>File availability (fallback if needed)</li>
+    <li>Spatial extent (polar regions)</li>
+    <li>Concentration range (0-100%)</li>
+    </ul>
+    <h3 id="output-validation">Output Validation</h3>
+    <p><strong>L2P .bic Files:</strong></p>
+    <ul>
+    <li>File size sanity check (50-500 MB range)</li>
+    <li>Observation count statistics</li>
+    <li>SST range check (-2°C to 45°C)</li>
+    <li>L2Plist companion file generation</li>
+    </ul>
+    <p><strong>iQUAM .bii Files:</strong></p>
+    <ul>
+    <li>Observation count per day</li>
+    <li>Geographic distribution</li>
+    <li>Platform type representation</li>
+    </ul>
+    <p><strong>Ice .gds/.bip Files:</strong></p>
+    <ul>
+    <li>Mask value validation (1, 2, 3, 5, 7, 9, 11, 13, 15)</li>
+    <li>Ice extent reasonableness</li>
+    <li>Bitwise flag consistency</li>
+    </ul>
+    <h3 id="download-monitoring">Download Monitoring</h3>
+    <p><strong>Automated Checks:</strong></p>
+    <ul>
+    <li>Hourly cron job success/failure logs</li>
+    <li>Daily download reports (granule counts)</li>
+    <li>Missing data identification</li>
+    <li>Storage capacity monitoring</li>
+    </ul>
+    <p><strong>Alerts:</strong></p>
+    <ul>
+    <li>Download failures (&gt;2 hours of consecutive failures)</li>
+    <li>Unexpected file counts (e.g., &lt;50 MODIS granules in 24 hours)</li>
+    <li>Storage threshold exceeded (&gt;90% capacity)</li>
+    </ul>
+    <h3 id="cache-health">Cache Health</h3>
+    <p><strong>Metrics:</strong></p>
+    <ul>
+    <li>Cache hit rates per component</li>
+    <li>Disk usage trends</li>
+    <li>File age distribution</li>
+    <li>Orphaned file detection</li>
+    </ul>
+    <p><strong>Maintenance:</strong></p>
+    <ul>
+    <li>Periodic cache validation (file integrity)</li>
+    <li>Cleanup of incomplete downloads</li>
+    <li>Archival of old data to slower storage</li>
+    </ul>
+    <h3 id="l2p-download-purge">L2P Download Purge</h3>
+    <p>The pipeline includes a purge stage that removes old L2P download directories past a rolling window threshold, mirroring the production <code>mur_cron/purge/purge.py</code> behavior. This prevents unbounded growth of the L2P download area.</p>
+    <p><strong>Configuration:</strong></p>
+    <ul>
+    <li><code>purge.threshold_days</code>: Number of days after which DOY directories are deleted (default: 30)</li>
+    <li><code>purge.logs_dir</code>: Directory for dated purge log reports</li>
+    </ul>
+    <p><strong>Behavior:</strong></p>
+    <ul>
+    <li>Scans each active sensor's <code>{input_dir}/{sensor}/{year}/</code> directory</li>
+    <li>Removes DOY subdirectories where <code>DOY &lt; current_DOY - threshold_days</code></li>
+    <li>Operates only within the current year</li>
+    <li>Writes summary and detailed removal reports to a dated log file</li>
+    </ul>
+    <p><strong>Usage:</strong></p>
+    <pre><code class="language-bash"># Must be explicitly requested -- not part of the default pipeline run
+    uv run mur-pipeline --config config.json --execute purge</code></pre>
+    <p><strong>Note:</strong> The purge stage only affects raw L2P download directories (NetCDF granules from PO.DAAC). It does not touch preprocessed BIC files, which are retained indefinitely for reuse.</p>
 
     <footer>
-      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. Deeper
-      reference material stays as Markdown in the repository and is linked
-      from each page.</p>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. This site is
+      the documentation &mdash; there is no separate Markdown copy to fall out of date.</p>
     </footer>
   </div>
 </main>

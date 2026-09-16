@@ -10,34 +10,36 @@ The MUR workflow is made up of several components:
 
 ## Documentation
 
-**Start with the documentation site: <https://podaac.github.io/mur/>** — an
-overview of the system, a quick start, how the multi-scale analysis works, and
-guides for operating the pipeline. It is published from [`docs/`](docs/) via
-GitHub Pages.
+**Everything is on the documentation site: <https://podaac.github.io/mur/>** —
+an overview of the system, a quick start, how the multi-scale analysis works,
+the full configuration and input-contract references, per-container command
+lines, and the MRVA internals. It is published from [`docs/`](docs/) via GitHub
+Pages, and it is the documentation: there is no second Markdown copy to fall
+out of date.
 
-**Detailed reference material stays as Markdown in [`documentation/`](documentation/),
-next to the code it describes:**
+Where to start:
 
-- **[OVERVIEW.md](documentation/OVERVIEW.md)** - High-level system architecture and component overview
-- **[ALGORITHM_FLOW.md](documentation/ALGORITHM_FLOW.md)** - MRVA algorithm details and multi-scale processing
-- **[MUR_EXECUTION_SEQUENCE.md](documentation/MUR_EXECUTION_SEQUENCE.md)** - End-to-end execution sequence
-- **[DATA_LIFECYCLE.md](documentation/DATA_LIFECYCLE.md)** - Data flow, caching, and storage management
-- **[SENSOR_ADAPTATION.md](documentation/SENSOR_ADAPTATION.md)** - Guide for integrating new satellite sensors
-- **[PIPELINE_CONFIGURATION.md](documentation/PIPELINE_CONFIGURATION.md)** - Installation, configuration, and operation
-- **[INPUT_CONTRACT.md](documentation/INPUT_CONTRACT.md)** - The explicit named-flag and manifest contract every container implements
-- **[LANDICE_ENCODING.md](documentation/LANDICE_ENCODING.md)** - Land/ice mask encoding reference
-- **[STATIC_DATA.md](documentation/STATIC_DATA.md)** - Static data files and reference datasets
-- **[MAAP_EXECUTION.md](documentation/MAAP_EXECUTION.md)** - Current state of running on NASA's MAAP platform: what's real vs. stubbed, the actual OGC/WPS submission mechanism, and what's left to do
-- **[FUTURE_ENHANCEMENTS.md](documentation/FUTURE_ENHANCEMENTS.md)** - Planned features and considered enhancements
+- **[Overview](https://podaac.github.io/mur/)** - what MUR is and how the pipeline fits together
+- **[Quick start](https://podaac.github.io/mur/quickstart.html)** - build the images and process a day
+- **[Architecture](https://podaac.github.io/mur/architecture.html)** - the four containers and the contract they follow
+- **[The MRVA algorithm](https://podaac.github.io/mur/algorithm.html)** - multi-scale variational analysis, in depth
+- **[Data lifecycle](https://podaac.github.io/mur/lifecycle.html)** - sources, windows, caching and storage
+- **[Daily execution](https://podaac.github.io/mur/sequence.html)** - what a scheduled run does, NRT versus reanalysis
+- **[Configuration](https://podaac.github.io/mur/configuration.html)** - every key in `config.json`, and troubleshooting
+- **[Static input data](https://podaac.github.io/mur/static-data.html)** - the reference files you must stage yourself
+- **[Input contract](https://podaac.github.io/mur/input-contract.html)** - the named-flag and manifest schema
+- **[Adding a sensor](https://podaac.github.io/mur/sensors.html)** - integrating a new L2P instrument
+- **[Running on MAAP](https://podaac.github.io/mur/maap.html)** - cloud execution, and how far it is wired up
+- **[MRVA internals](https://podaac.github.io/mur/mrva-internals.html)** - the MATLAB and Fortran implementation
 
-**Component-specific documentation:**
+**Per-container reference:**
 
-- [Land/Ice Processing](landice/README.md)
-- [L2P Satellite Processing](l2p/README.md)
-- [iQUAM Buoy Processing](iquam/README.md)
-- [MRVA Processing](mrva/README.md)
-- [Data Viewer](dataviewer/README.md)
-- [MATLAB Base Image](matlab-base/README.md)
+- [Land/ice](https://podaac.github.io/mur/container-landice.html)
+- [L2P satellite processing](https://podaac.github.io/mur/container-l2p.html)
+- [iQUAM buoy processing](https://podaac.github.io/mur/container-iquam.html)
+- [MRVA analysis](https://podaac.github.io/mur/container-mrva.html)
+- [Data viewer](dataviewer/README.md)
+- [MATLAB base image](matlab-base/README.md)
 
 ## Quick Start
 
@@ -92,7 +94,7 @@ The script builds the `mur-matlab-base:r2024b` image first if it is missing, ver
 
 Prerequisite: copy `network.lic.example` to `network.lic` and point it at your MATLAB license server before the first build.
 
-For raw `docker build` invocations (CI images, one-off experiments, debugging the Dockerfiles themselves), see [Manual Builds (Advanced)](documentation/PIPELINE_CONFIGURATION.md#manual-builds-advanced). See [MATLAB Base Image](matlab-base/README.md) for base image details.
+For raw `docker build` invocations (CI images, one-off experiments, debugging the Dockerfiles themselves), see [Manual builds (advanced)](https://podaac.github.io/mur/configuration.html#manual-builds-advanced). See [MATLAB Base Image](matlab-base/README.md) for base image details.
 
 ### Production-Style Pipeline Orchestrator
 
@@ -113,7 +115,7 @@ mur-pipeline --config config.json --date 2024-08-08
 mur-pipeline --config config.json --all-stages --preprocess-only
 ```
 
-**L2P downloading is a separate stage, not run by default** — `l2p` only turns already-downloaded granules into BIC files; nothing downloads unless you run `--execute l2p-download` explicitly (normally via cron: `run_l2p_download_cron.sh`/`run_l2p_deepsync_cron.sh` at the repo root). See [documentation/PIPELINE_CONFIGURATION.md](documentation/PIPELINE_CONFIGURATION.md) for the full command-line reference.
+**L2P downloading is a separate stage, not run by default** — `l2p` only turns already-downloaded granules into BIC files; nothing downloads unless you run `--execute l2p-download` explicitly (normally via cron: `run_l2p_download_cron.sh`/`run_l2p_deepsync_cron.sh` at the repo root). See [Configuration](https://podaac.github.io/mur/configuration.html) for the full command-line reference.
 
 **Key Features:**
 
@@ -123,7 +125,7 @@ mur-pipeline --config config.json --all-stages --preprocess-only
 - **Stability latency**: Smart reprocessing only when data changes
 - **All four stages operational**: landice, iquam, l2p, and mrva all produce real output
 
-See [run_mur_pipeline.py](run_mur_pipeline.py) and [documentation/PIPELINE_CONFIGURATION.md](documentation/PIPELINE_CONFIGURATION.md) for full details.
+See [run_mur_pipeline.py](run_mur_pipeline.py) and [Configuration](https://podaac.github.io/mur/configuration.html) for full details.
 
 ## InputGen Operations
 
@@ -135,25 +137,25 @@ See this README for details: [InputGen README](inputgen/README.md)
 
 This component prepares landmask and sea ice boundary data used in downstream MUR processing. It generates and runs MATLAB scripts that apply land and ice masking operations to MUR SST inputs for the previous 9 days. Two grid resolutions (`p01` at 0.01° and `p011` at 0.011°) are supported. It is parallelized on the day which are arguments to the script. The InputGen operations produce the required date ranges to execute on.
 
-See this README for details: [Land Ice README](landice/README.md)
+See the [land/ice container reference](https://podaac.github.io/mur/container-landice.html) for details.
 
 ## iQUAM Buoy Operations
 
 This component downloads and processes in-situ buoy observations from the iQUAM (in situ Quality Monitor) dataset. These observations provide ground truth SST measurements used for bias correction and validation in the MRVA analysis.
 
-See this README for details: [iQUAM README](iquam/README.md)
+See the [iQUAM container reference](https://podaac.github.io/mur/container-iquam.html) for details.
 
 ## L2P Sensor Operations
 
 This component downloads (or loads) L2P Sensor data from Earthdata and combines the data in to a binary file to be read by the MRVA process. It is parallelized on the sensor and day which are arguments to the script. The InputGen operations produce the required sensor and date ranges to execute on.
 
-See this README for details: [L2P README](l2p/README.md)
+See the [L2P container reference](https://podaac.github.io/mur/container-l2p.html) for details.
 
 ## MRVA Processing
 
 The Multi-Resolution Variational Analysis (MRVA) is the core algorithm that combines all input data sources (land/ice masks, buoy observations, and satellite SST) to produce the final MUR SST product through multi-scale optimal interpolation.
 
-See this README for details: [MRVA README](mrva/README.md)
+See the [MRVA container reference](https://podaac.github.io/mur/container-mrva.html) for details.
 
 ## Docker Setup Guide
 

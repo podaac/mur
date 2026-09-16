@@ -2,7 +2,7 @@
 # common/bin/localize.sh
 #
 # Shared input-localization helper, sourced by every container's
-# entrypoint.sh (documentation/INPUT_CONTRACT.md
+# entrypoint.sh (docs/input-contract.html
 # section 4). Turns a flag value that may be a local path or an s3:// href
 # into a guaranteed-local path before the compiled MATLAB/Fortran code
 # touches it -- none of it understands s3:// natively.
@@ -37,7 +37,7 @@ localize_input() {
 
 # localize_manifest: materializes a manifest's files[] entries
 # ({"path": ..., "sensor": ..., "relative_path": ...}, matching
-# documentation/INPUT_CONTRACT.md
+# docs/input-contract.html
 # section 3) into a fresh scratch directory, and returns that directory.
 #
 # Each entry is placed at scratch_dir/name/<relative_path>, falling back to

@@ -18,7 +18,7 @@ function mrva4com_container(year, day, realtime, config_file)
 %                (optional JSON array), debug (optional). This is purely an
 %                internal handoff detail from entrypoint.sh -- the
 %                container's own CLI is still all named flags; see
-%                documentation/INPUT_CONTRACT.md.
+%                docs/input-contract.html.
 %
 % Container paths (mounted from host):
 %   /data/output/csp/    - Coefficient files output (CSP format)

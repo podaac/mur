@@ -45,7 +45,7 @@ FROM debian:bookworm-slim
 # libxt6, libxmu6: Required by MATLAB Runtime for X11 components even in headless mode
 # awscli: used by common/bin/localize.sh (sourced by entrypoint.sh below) to
 # fetch s3:// input hrefs to local disk before MATLAB runs -- see
-# docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md section 4.
+# docs/input-contract.html section 4.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libc6 \

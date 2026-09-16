@@ -15,7 +15,8 @@
     <strong>MUR SST</strong>
     <span>Multi-scale Ultra-high Resolution analysis</span>
   </a>
-  <nav><div class="nav-group">Start here</div>
+  <nav>
+    <div class="nav-group">Start here</div>
     <a href="index.html">Overview</a>
     <a href="quickstart.html" aria-current="page">Quick start</a>
     <a href="architecture.html">Architecture</a>
@@ -23,16 +24,22 @@
     <a href="algorithm.html">The MRVA algorithm</a>
     <a href="lifecycle.html">Data lifecycle</a>
     <a href="sequence.html">Daily execution</a>
+    <a href="mrva-internals.html">MRVA internals</a>
     <div class="nav-group">Operating it</div>
+    <a href="configuration.html">Configuration</a>
     <a href="static-data.html">Static input data</a>
+    <a href="input-contract.html">Input contract</a>
     <a href="sensors.html">Adding a sensor</a>
-    <a href="maap.html">Running on MAAP</a></nav>
-  <div class="nav-group">Reference</div>
-  <nav>
-    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">Configuration reference</a>
-    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/INPUT_CONTRACT.md">Input contract</a>
-    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/LANDICE_ENCODING.md">Land/ice encoding</a>
-    <a href="https://github.com/podaac/mur/blob/HEAD/mrva/docs/OVERVIEW.md">MRVA internals</a>
+    <a href="maap.html">Running on MAAP</a>
+    <div class="nav-group">Containers</div>
+    <a href="container-landice.html">Land/ice</a>
+    <a href="container-l2p.html">L2P</a>
+    <a href="container-iquam.html">iQUAM</a>
+    <a href="container-mrva.html">MRVA</a>
+    <div class="nav-group">Reference</div>
+    <a href="landice-encoding.html">Land/ice encoding</a>
+    <a href="future.html">Future enhancements</a>
+    <div class="nav-group">Project</div>
     <a href="https://github.com/podaac/mur">Source on GitHub</a>
   </nav>
 </aside>
@@ -84,7 +91,7 @@
     static-resource paths for your host. Each stage has its own block, and
     the sensor table lives under the <code>mrva</code> and <code>l2p</code>
     sections. The full key-by-key reference is in
-    <a href="https://github.com/podaac/mur/blob/HEAD/documentation/PIPELINE_CONFIGURATION.md">PIPELINE_CONFIGURATION.md</a>;
+    <a href="configuration.html">the configuration reference</a>;
     the static inputs you must stage yourself are covered in
     <a href="static-data.html">Static input data</a>.</p>
 
@@ -135,9 +142,8 @@
     </ul>
 
     <footer>
-      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. Deeper
-      reference material stays as Markdown in the repository and is linked
-      from each page.</p>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. This site is
+      the documentation &mdash; there is no separate Markdown copy to fall out of date.</p>
     </footer>
   </div>
 </main>

@@ -20,7 +20,6 @@ mrva/**/*.swp
 mrva/**/*~
 mrva/.git
 mrva/.gitignore
-mrva/README.md
 mrva/docs/
 
 # Exclude unnecessary files from common/

@@ -1,5 +1,5 @@
 """Canonical relative paths, under the static-resources root, for MRVA's
-static single-file inputs (documentation/STATIC_DATA.md), mirroring
+static single-file inputs (docs/static-data.html), mirroring
 landice_static_files.py's pattern so both orchestrators resolve the same
 layout one way.
 
@@ -13,10 +13,10 @@ next to the fixed-path table for that reason.
 Scope note: this only covers MRVA's static (non-per-sensor-fan-in) inputs.
 It does not include the BIC/iQuam/landice per-day fan-in inputs (those need
 the separate manifest mechanism -- see
-documentation/INPUT_CONTRACT.md) and it
+docs/input-contract.html) and it
 is not yet wired into mrva4com_container.m or entrypoint.sh, since MRVA's
 own explicit-args conversion (accepting named static-file flags at all)
-hasn't happened yet (documentation/MAAP_EXECUTION.md section 4: MRVA is
+hasn't happened yet (docs/maap.html section 4: MRVA is
 "Not yet converted, zero path args today").
 """
 

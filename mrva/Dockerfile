@@ -154,7 +154,7 @@ ENV MRVA_DEBUG_BUILD=${DEBUG}
 # awscli: used by common/bin/localize.sh (sourced by entrypoint.sh below) to
 # fetch s3:// input hrefs (direct-value flags and --sensor-inputs-manifest
 # entries) to local disk before MATLAB runs -- see
-# docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md section 4.
+# docs/input-contract.html section 4.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libc6 \
@@ -299,8 +299,7 @@ LABEL fortran-executables="mrva, samplegdscsp, spgrid, trimbip3, makehiresgrid, 
 # Run — every input is an explicit named flag; --sensor-inputs-manifest lists
 # exactly which BIC/iQuam files this run needs (a JSON manifest, path or
 # s3:// href, entries tagged with `sensor` and `relative_path` -- see
-# docs/superpowers/specs/2026-07-27-explicit-input-contract-design.md
-# section 3), localized to local disk by common/bin/localize.sh before
+# docs/input-contract.html section 3), localized to local disk by common/bin/localize.sh before
 # MATLAB runs:
 #   docker run --rm \
 #     --memory=64g \

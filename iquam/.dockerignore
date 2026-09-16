@@ -36,8 +36,6 @@ tests/
 .gitignore
 
 # Exclude documentation (not needed in container)
-README.md
-CONTAINER_SETUP.md
 *.md
 !Dockerfile
 
