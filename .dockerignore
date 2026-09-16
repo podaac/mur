@@ -1,0 +1,76 @@
+# MUR Docker Build - Parent Directory Context
+# This file applies when building from module directories with context set to parent (..)
+# Example: cd mur/iquam && docker build --platform linux/amd64 -f Dockerfile -t tag ..
+#
+# Strategy: Exclude unnecessary files to reduce build context size
+# Each module's Dockerfile will explicitly COPY only what it needs:
+#   - iquam: COPY iquam/*.m and common/julian.m
+#   - landice: COPY landice/src/*.m and common/julian.m
+
+# Exclude large files and archives
+*.tar
+*.tar.gz
+*.zip
+landice.tar.gz
+
+# Exclude unused modules
+# Each module's Dockerfile will COPY only what it needs
+# l2p/  # Now containerized - do not exclude
+inputgen/
+archive/
+input/
+
+# Exclude test data and output files (mount at runtime instead)
+**/tests/
+**/testing/
+**/build/
+**/out/
+**/*.bii
+**/*.mat
+**/*.nc
+**/*.mask
+**/*.gds
+
+# Exclude macOS files
+.DS_Store
+**/.DS_Store
+._*
+
+# Exclude Git files
+.git/
+.gitignore
+.gitattributes
+
+# Exclude editor files
+.vscode/
+.idea/
+**/*.swp
+**/*.swo
+**/*~
+
+# Exclude documentation (not needed in container)
+README.md
+AGENTS.md
+CLAUDE.md
+LICENSE
+**/*.md
+!**/Dockerfile
+
+# Exclude local development files
+**/*.log
+**/*.tmp
+.env
+.env.local
+
+# Exclude MATLAB temporary files
+**/*.asv
+**/*.m~
+
+# Exclude build artifacts
+**/*.o
+**/*.a
+**/*.so
+**/*.exe
+
+# Exclude shell scripts (not needed in most containers)
+**/*.sh

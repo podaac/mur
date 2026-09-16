@@ -1,0 +1,83 @@
+# L2P Docker Build - Minimal Include Strategy
+# This file controls what gets included when building with parent context:
+#   cd mur/l2p && docker build --platform linux/amd64 -t mur-l2p:latest -f Dockerfile ..
+#
+# Strategy: Exclude everything by default, then selectively include needed files
+
+# Exclude everything
+*
+
+# Include only necessary MATLAB source files from l2p/src
+!l2p/src/*.m
+
+# Include Dockerfile for reference
+!l2p/Dockerfile
+
+# Include common utilities (julian.m, fortwrite.m)
+!common/*.m
+
+# Exclude large test data and output files
+l2p/tests/
+l2p/testing/
+*.bic
+*.bic.gz
+*.mat
+*.nc
+*.nc.bz2
+*.gz
+*.tar
+*.zip
+
+# Exclude macOS files (these cause I/O errors during Docker build)
+.DS_Store
+**/.DS_Store
+._*
+
+# Exclude editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Exclude Git files
+.git/
+.gitignore
+.gitattributes
+
+# Exclude documentation (not needed in container)
+*.md
+!l2p/Dockerfile
+
+# Exclude local development files
+*.log
+*.tmp
+.env
+.env.local
+
+# Exclude MATLAB temporary files
+*.asv
+*.m~
+
+# Exclude build artifacts
+build/
+*.o
+*.a
+*.so
+*.exe
+
+# Exclude obsolete Python files (no longer used)
+l2p/src/*.py
+l2p/src/*.json
+l2p/requirements.txt
+l2p/.netrc
+
+# Exclude shell scripts (not needed in container)
+*.sh
+
+# Exclude other module directories (not needed for l2p build)
+iquam/
+landice/
+inputgen/
+archive/
+input/

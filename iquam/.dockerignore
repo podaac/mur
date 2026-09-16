@@ -1,0 +1,65 @@
+# IQUAM Docker Build - Minimal Include Strategy
+# Exclude everything by default, then selectively include needed files
+
+# Exclude everything
+*
+
+# Include only necessary MATLAB source files
+!*.m
+
+# Include Dockerfile for reference
+!Dockerfile
+
+# Exclude large test data and output files
+testing/
+tests/
+*.bii
+*.mat
+*.nc
+*.gz
+*.tar
+*.zip
+
+# Exclude macOS files (these cause I/O errors during Docker build)
+.DS_Store
+**/.DS_Store
+
+# Exclude editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Exclude Git files
+.git/
+.gitignore
+
+# Exclude documentation (not needed in container)
+README.md
+CONTAINER_SETUP.md
+*.md
+!Dockerfile
+
+# Exclude local development files
+*.log
+*.tmp
+.env
+.env.local
+
+# Exclude MATLAB temporary files
+*.asv
+*.m~
+
+# Exclude build artifacts
+build/
+*.o
+*.a
+*.so
+*.exe
+
+# Exclude shell scripts (not needed in container)
+*.sh
+
+# Exclude archive directory
+archive/
