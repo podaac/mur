@@ -292,9 +292,22 @@
     module images are published, the builder's licence file must not be:</p>
     <pre><code class="language-bash">docker run --rm --entrypoint sh mur-mrva:latest \
       -c 'find / -name "*.lic" -not -path "*/matlabruntime/*" 2>/dev/null | head'</code></pre>
-    <p>Empty output is what you want. A freshly pushed package is private and
-    unlinked from the repository; link it and set its visibility from the package
-    page afterwards.</p>
+    <p>Empty output is what you want.</p>
+    <p><strong>A package that did not exist before starts private.</strong> That is
+    a per-package setting, not a per-push one: set visibility once, on the package
+    page under
+    <a href="https://github.com/orgs/podaac/packages">the organisation's packages</a>,
+    and every later push to the same name keeps it. Until then an anonymous
+    <code>docker pull</code> gets a 403 while your own authenticated pull
+    succeeds, which makes the problem easy to miss &mdash;
+    <code>docker logout ghcr.io</code> before testing.</p>
+    <p>The repository link takes care of itself: each module's Dockerfile carries
+    <code>org.opencontainers.image.source</code>, so GHCR connects the package to
+    the repository when the image is published, and it appears under the
+    repository's Packages section. Packages are owned by the
+    <code>podaac</code> organisation, never by a repository &mdash; the
+    <code>mur/</code> in <code>mur/landice</code> is part of the package name, not
+    a repository scope.</p>
     <p><strong>Pull (on other machines):</strong></p>
     <pre><code class="language-bash">docker pull ghcr.io/podaac/mur/landice:latest
     docker pull ghcr.io/podaac/mur/l2p:latest

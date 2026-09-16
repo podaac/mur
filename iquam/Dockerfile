@@ -111,6 +111,11 @@ RUN chgrp -R 0 /data /opt/iquam && \
 ENTRYPOINT ["/opt/iquam/bin/entrypoint.sh"]
 
 # Labels for metadata
+# org.opencontainers.image.source connects the pushed package to the
+# repository on GHCR. Images are pushed by hand (no CI can reach the JPL
+# licence servers), so without this label a package lands unlinked and has
+# to be connected through the web UI.
+LABEL org.opencontainers.image.source="https://github.com/podaac/mur"
 LABEL description="IQUAM In-Situ SST Processing Module - NRT Mode"
 LABEL version="1.1"
 LABEL maintainer="MUR Team"

@@ -137,6 +137,11 @@ ENTRYPOINT ["/opt/l2p/bin/entrypoint.sh"]
 CMD []
 
 # Labels for metadata
+# org.opencontainers.image.source connects the pushed package to the
+# repository on GHCR. Images are pushed by hand (no CI can reach the JPL
+# licence servers), so without this label a package lands unlinked and has
+# to be connected through the web UI.
+LABEL org.opencontainers.image.source="https://github.com/podaac/mur"
 LABEL description="MUR L2P Satellite SST Processing Module - Container Wrapper"
 LABEL version="3.2"
 LABEL maintainer="MUR Team"
