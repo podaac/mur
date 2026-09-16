@@ -126,6 +126,19 @@ class MAAPClient:
         """
         raise NotImplementedError("MAAPClient.write_manifest: wire up boto3 put_object")
 
+    def copy_object(self, src_uri: str, dest_uri: str) -> str:
+        """Server-side copy within S3; returns `dest_uri`.
+
+        Used to promote a job's output from the DPS-chosen path to a
+        deterministic workspace key (mur_maap/paths.py). DPS decides where a
+        job's outputs land and that path is not reconstructable, so without
+        this a later run has no way to find yesterday's BIC or coefficient
+        except by re-finding the job that produced it.
+
+        TODO: boto3 s3.copy_object (or copy() for objects over 5 GB).
+        """
+        raise NotImplementedError("MAAPClient.copy_object: wire up boto3 copy_object")
+
     def submit_job(self, process_id: str, args: Dict[str, Any]) -> str:
         """Submit an OGC API Processes execute request for `process_id`.
 
@@ -234,6 +247,54 @@ class MAAPOrchestrator:
                 return candidate
         return None
 
+    def _promote_bic(self, sensor: str, data_day: datetime.date, job: str) -> str:
+        """Copy a fresh BIC from its DPS output path to the canonical key.
+
+        This is what makes the cache in _find_cached_bic real rather than
+        decorative. DPS chooses where a job's outputs land and that path is
+        not reconstructable from a naming convention, so a BIC left where DPS
+        put it is invisible to tomorrow's run -- which would then resubmit a
+        job to regenerate a file that already exists.
+
+        Promoting also makes the manifest href durable: it keeps resolving if
+        MRVA is resubmitted for this day later, whereas a DPS path is only
+        meaningful while you still hold the job id.
+        """
+        src = self.client.get_job_output(job, "bic")
+        dest = paths.href(
+            self.workspace_root,
+            paths.bic_key(sensor, data_day, compressed=src.endswith(".gz")),
+        )
+        return self.client.copy_object(src, dest)
+
+    def _promote_csp(self, process_date: datetime.date, job: str) -> Optional[str]:
+        """Copy MRVA's coefficient output to the canonical key, for tomorrow.
+
+        Returns None when the job produced no coefficient, which is not an
+        error -- absence just means tomorrow bootstraps.
+        """
+        try:
+            src = self.client.get_job_output(job, "csp")
+        except Exception as exc:                          # noqa: BLE001
+            logger.warning("No coefficient output for %s: %s", process_date, exc)
+            return None
+        dest = paths.href(self.workspace_root, paths.csp_key(process_date))
+        return self.client.copy_object(src, dest)
+
+    def _find_prior_csp(self, process_date: datetime.date, mode: str) -> Optional[str]:
+        """Yesterday's coefficient, so MRVA chains instead of bootstrapping.
+
+        NRT only: REA mode never used a prior coefficient (see
+        run_mur_pipeline.py's resolve_mrva_prior_csp). Returning None is a
+        valid, meaningful state -- mrva4com_container.m bootstraps when
+        --prior-csp-file is absent -- so this never guesses a path it has not
+        confirmed.
+        """
+        if mode != "nrt":
+            return None
+        candidate = paths.prior_csp_href(self.workspace_root, process_date)
+        return candidate if self.client.object_exists(candidate) else None
+
     def _build_sensor_inputs_manifest(
         self,
         process_date: datetime.date,
@@ -276,12 +337,11 @@ class MAAPOrchestrator:
                     })
                     continue
 
-                cached_href, job = bic_results.get((sensor, data_day), (None, None))
-                if job is not None:
-                    entry_href = self.client.get_job_output(job, "bic")
-                elif cached_href is not None:
-                    entry_href = cached_href
-                else:
+                # Every entry in bic_results is already a canonical href by
+                # this point -- either it came from the cache, or run_day
+                # promoted it after the job succeeded.
+                entry_href, _job = bic_results.get((sensor, data_day), (None, None))
+                if entry_href is None:
                     # MRVA's window reaches a day this run's L2P window didn't
                     # cover; fall back to whatever is already in the bucket.
                     entry_href = self._find_cached_bic(sensor, data_day)
@@ -388,6 +448,15 @@ class MAAPOrchestrator:
 
         self.client.wait_all([landice_job, iquam_job, *l2p_jobs])
 
+        # Promote every BIC this run produced from its DPS path to the
+        # canonical workspace key, so tomorrow's run can find it with a HEAD
+        # instead of resubmitting the job that made it.
+        for key, (cached_href, job) in list(bic_results.items()):
+            if job is None:
+                continue                       # already canonical: it came from the cache
+            sensor, data_day = key
+            bic_results[key] = (self._promote_bic(sensor, data_day, job), job)
+
         # Sensor-inputs manifest (BIC + IQUAM0 unified -- IQUAM0 has the
         # identical fan-in shape as the satellite sensors in
         # mrva4com_container.m's sensor table).
@@ -430,12 +499,6 @@ class MAAPOrchestrator:
             # bootstrapping when no prior coefficient exists), so omitting it
             # is safe. Closing this needs an `aws s3 sync` branch in
             # localize_input for prefix-shaped values.
-            #
-            # --prior-csp-file is likewise omitted: its cross-run lookup needs
-            # the STAC intermediate-artifact cataloging that hasn't been built
-            # yet, so MRVA bootstraps each day rather than chaining from the
-            # previous one (matches the documented "absent -> bootstrap"
-            # behavior) rather than guessing a DPS-controlled path.
         }
         # Conditional exactly as the local executor does it: absent means
         # "skip MUR25 product generation", so only pass it when it's really there.
@@ -443,9 +506,18 @@ class MAAPOrchestrator:
             mrva_args["mur25_grid_file"] = mrva_static_hrefs["mur25_grid"]
         if active_sensors := self.config.get("mrva", {}).get("active_sensors"):
             mrva_args["sensors"] = ",".join(active_sensors)
+        # Chain from yesterday's coefficient when one was promoted to the
+        # canonical key. Absent is still valid -- MATLAB bootstraps -- so this
+        # confirms the object exists rather than guessing a path.
+        prior_csp = self._find_prior_csp(process_date, mode)
+        if prior_csp is not None:
+            mrva_args["prior_csp_file"] = prior_csp
 
         mrva_job = self.client.submit_job("mur-mrva", mrva_args)
         self.client.wait_all([mrva_job])
+
+        # Promote this day's coefficient so tomorrow can chain from it.
+        self._promote_csp(process_date, mrva_job)
 
         netcdf_href = self.client.get_job_output(mrva_job, "netcdf")
         self.client.publish_stac_item(netcdf_href, process_date, mode)

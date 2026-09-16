@@ -102,3 +102,22 @@ def test_run_state_and_stac_keys():
 def test_leap_day_doy_is_366():
     leap = datetime.date(2024, 12, 31)
     assert paths.bic_key("AMSR2R", leap).endswith("Global_AMSR2R_2024_366.bic.gz")
+
+
+# --- CSP coefficients (cross-run chaining) ---------------------------------
+
+def test_csp_filename_matches_the_local_executors_convention():
+    """run_mur_pipeline.py's resolve_mrva_prior_csp looks for
+    <YYYYMMDD>09_MRVA4_Global.c06 under <csp_dir>/<year>/."""
+    assert paths.csp_filename(DAY) == "2026080609_MRVA4_Global.c06"
+    assert paths.csp_key(DAY) == "mur/csp/2026/2026080609_MRVA4_Global.c06"
+
+
+def test_prior_csp_href_points_at_the_previous_day():
+    assert paths.prior_csp_href(WS, DAY) == \
+        f"{WS}/mur/csp/2026/2026080509_MRVA4_Global.c06"
+
+
+def test_prior_csp_href_crosses_a_year_boundary():
+    assert paths.prior_csp_href(WS, datetime.date(2026, 1, 1)) == \
+        f"{WS}/mur/csp/2025/2025123109_MRVA4_Global.c06"

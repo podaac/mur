@@ -123,6 +123,7 @@ class FakeMAAPClient(MAAPClient):
         self.waited = []
         self.published = []
         self.written_manifests = []
+        self.copied = []
 
     def job_id_for(self, process_id, **match):
         """Job id of the single recorded submission for `process_id`,
@@ -162,6 +163,11 @@ class FakeMAAPClient(MAAPClient):
         self.submitted.append((process_id, args))
         self.job_ids.append(job_id)
         return job_id
+
+    def copy_object(self, src_uri, dest_uri):
+        self.copied.append((src_uri, dest_uri))
+        self.existing_objects.add(dest_uri)
+        return dest_uri
 
     def wait_all(self, job_ids):
         self.waited.append(list(job_ids))
@@ -363,8 +369,9 @@ def test_run_day_mrva_gets_named_static_and_landice_hrefs_not_raw_lists(orchestr
     # through unfetched and mrva's verify_inputs_exist rejects it as a missing
     # directory. Passing it breaks the job rather than enabling a fallback.
     assert "l4_reference_root" not in mrva_args
-    # Prior-CSP cross-run lookup isn't implemented yet (depends on
-    # unimplemented STAC cataloging) -- must be omitted, not guessed.
+    # No prior coefficient has been promoted for 2026-08-05 in this test, and
+    # absence is a valid state -- MATLAB bootstraps. It must be omitted rather
+    # than guessed at a path that was never confirmed to exist.
     assert "prior_csp_file" not in mrva_args
 
 
@@ -453,6 +460,8 @@ def test_maap_client_stub_methods_raise_not_implemented():
     with pytest.raises(NotImplementedError):
         client.write_manifest("mur/manifests/x.json", {"files": []})
     with pytest.raises(NotImplementedError):
+        client.copy_object("s3://bucket/a", "s3://bucket/b")
+    with pytest.raises(NotImplementedError):
         client.submit_job("mur-landice", {})
     with pytest.raises(NotImplementedError):
         client.wait_all(["job-0"])
@@ -460,3 +469,90 @@ def test_maap_client_stub_methods_raise_not_implemented():
         client.get_job_output("job-0", "netcdf")
     with pytest.raises(NotImplementedError):
         client.publish_stac_item("s3://bucket/out.nc", datetime.date.today(), "nrt")
+
+
+# --- promotion to canonical keys -------------------------------------------
+#
+# DPS chooses where a job's outputs land and that path is not reconstructable,
+# so an artifact left where DPS put it is invisible to tomorrow's run. These
+# assert the promotion that makes the BIC cache and prior-CSP chaining real.
+
+def test_fresh_bics_are_promoted_to_canonical_keys(orchestrator):
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    client = orchestrator.client
+
+    assert client.copied, "no BIC was promoted"
+    for src, dest in client.copied:
+        if "/mur/bic/" not in dest:
+            continue
+        assert dest.startswith(f"{WORKSPACE_ROOT}/mur/bic/")
+        # The canonical key must end in the real filename, or the promoted
+        # object is invisible to mrva4com_container.m's per-sensor scan.
+        assert dest.rsplit("/", 1)[-1].startswith("Global_")
+
+
+def test_manifest_points_at_canonical_keys_not_dps_paths(orchestrator):
+    """A DPS path is only meaningful while you still hold the job id, so the
+    manifest has to reference the durable location."""
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    _, manifest = orchestrator.client.written_manifests[-1]
+
+    for entry in manifest["files"]:
+        if entry["sensor"] == "IQUAM0":
+            continue        # iquam is same-run only; no cross-run reuse
+        assert entry["path"].startswith(f"{WORKSPACE_ROOT}/mur/bic/"), entry
+
+
+def test_a_cached_bic_is_not_promoted_again():
+    cached = f"{WORKSPACE_ROOT}/mur/bic/AMSR2R/2026/Global_AMSR2R_2026_218.bic.gz"
+    client = FakeMAAPClient(existing_objects={cached})
+    orch = MAAPOrchestrator(
+        _single_sensor_config(), client, today_fn=lambda: datetime.date(2026, 8, 9)
+    )
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    assert not [d for _, d in client.copied if "/mur/bic/" in d]
+
+
+def test_second_run_reuses_the_first_runs_promoted_bic():
+    """The whole point of promotion: yesterday's output is findable today."""
+    client = FakeMAAPClient()
+    config = _single_sensor_config()
+    day = datetime.date(2026, 8, 6)
+
+    first = MAAPOrchestrator(config, client, today_fn=lambda: datetime.date(2026, 8, 9))
+    first.run_day(day, mode="nrt")
+    submitted_first = len([p for p, _ in client.submitted if p == "mur-l2p"])
+    assert submitted_first == 1
+
+    # A separate invocation, with no memory of the first beyond the bucket.
+    second = MAAPOrchestrator(config, client, today_fn=lambda: datetime.date(2026, 8, 9))
+    second.run_day(day, mode="nrt")
+    submitted_total = len([p for p, _ in client.submitted if p == "mur-l2p"])
+    assert submitted_total == submitted_first, "second run resubmitted a cached BIC"
+
+
+# --- prior-coefficient chaining --------------------------------------------
+
+def test_mrva_chains_from_a_promoted_prior_coefficient(orchestrator):
+    prior = f"{WORKSPACE_ROOT}/mur/csp/2026/2026080509_MRVA4_Global.c06"
+    orchestrator.client.existing_objects.add(prior)
+
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    mrva_args = orchestrator.client.submitted[-1][1]
+    assert mrva_args["prior_csp_file"] == prior
+
+
+def test_rea_mode_never_chains_from_a_prior_coefficient(orchestrator):
+    """REA never used one -- see run_mur_pipeline.py's resolve_mrva_prior_csp."""
+    orchestrator.client.existing_objects.add(
+        f"{WORKSPACE_ROOT}/mur/csp/2026/2026080509_MRVA4_Global.c06")
+
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="rea")
+    assert "prior_csp_file" not in orchestrator.client.submitted[-1][1]
+
+
+def test_this_days_coefficient_is_promoted_for_tomorrow(orchestrator):
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    dests = [d for _, d in orchestrator.client.copied if "/mur/csp/" in d]
+    assert dests == [f"{WORKSPACE_ROOT}/mur/csp/2026/2026080609_MRVA4_Global.c06"]

@@ -91,6 +91,32 @@ def bic_relative_path(sensor: str, data_day: datetime.date, filename: str) -> st
     return f"{sensor}/{data_day.year}/{filename}"
 
 
+# --- CSP coefficients (MRVA output, next day's --prior-csp-file) -----------
+
+def csp_filename(process_date: datetime.date) -> str:
+    """The name MRVA gives its L=6 coefficient file.
+
+    Mirrors run_mur_pipeline.py's resolve_mrva_prior_csp, which looks for
+    `<YYYYMMDD>09_MRVA4_Global.c06` under `<csp_dir>/<year>/`.
+    """
+    return f"{process_date.strftime('%Y%m%d')}09_MRVA4_Global.c06"
+
+
+def csp_key(process_date: datetime.date) -> str:
+    return f"{MUR_ROOT}/csp/{process_date.year}/{csp_filename(process_date)}"
+
+
+def prior_csp_href(workspace_root: str, process_date: datetime.date) -> str:
+    """Canonical href for the coefficient MRVA should chain from.
+
+    Only meaningful in NRT mode -- REA never used a prior coefficient (see
+    resolve_mrva_prior_csp). Absence is a valid state: mrva4com_container.m
+    bootstraps instead.
+    """
+    prior_day = process_date - datetime.timedelta(days=1)
+    return href(workspace_root, csp_key(prior_day))
+
+
 # --- iQuam (IQUAM0 fan-in input) -------------------------------------------
 
 def iquam_filename(data_day: datetime.date) -> str:
