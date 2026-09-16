@@ -292,7 +292,23 @@ def check_environment(args) -> int:
     print("MUR static-resources upload: environment check\n")
     ok = True
 
-    # 1. maap-py, and the right major version. Below v5 none of the OGC calls
+    # 1. The user-specific token. maap-py carries two: `maap_token` is
+    #    service-level and fetched automatically, while MAAP_PGT identifies
+    #    YOU -- and the workspace bucket is your bucket, so off-workspace the
+    #    API cannot resolve it without this. Inside a workspace the hub
+    #    usually sets it already.
+    pgt = os.environ.get("MAAP_PGT")
+    if pgt:
+        print(f"  MAAP_PGT           set ({len(pgt)} chars)")
+    else:
+        print("  MAAP_PGT           not set")
+        print("                     Fine inside a workspace if credentials still")
+        print("                     issue below. Elsewhere you need it:")
+        print("                       in a workspace terminal:  echo $MAAP_PGT")
+        print("                       or: https://console.maap-project.org/profile/tokens")
+        print("                     then: export MAAP_PGT='<value>'")
+
+    # 2. maap-py, and the right major version. Below v5 none of the OGC calls
     #    exist, and the failure mode is a confusing AttributeError much later.
     # Probe maap.maap specifically, not the top-level name: an unrelated
     # package called "maap" imports fine and then fails confusingly later.
@@ -321,7 +337,7 @@ def check_environment(args) -> int:
         print("                        image ships the non-OGC v4 stack")
         ok = False
 
-    # 2. Credentials.
+    # 3. Credentials.
     try:
         maap = _maap_client()
         payload, resp = _credentials_payload(maap)
@@ -338,7 +354,7 @@ def check_environment(args) -> int:
         return 1
     print(f"  credentials        OK, expire {payload['expiry_time']}")
 
-    # 3. What those credentials actually grant. The workspace path is always
+    # 4. What those credentials actually grant. The workspace path is always
     #    first; anything after it is an org-shared bucket.
     print("\n  authorized paths")
     for i, path in enumerate(resp["authorized_s3_paths"]):
@@ -351,7 +367,7 @@ def check_environment(args) -> int:
     print(f"    bucket           {bucket}")
     print(f"    prefix           {prefix}")
 
-    # 4. Region. The uploader never hardcodes it, but knowing it makes the
+    # 5. Region. The uploader never hardcodes it, but knowing it makes the
     #    curl reachability test from a production host possible.
     s3 = make_session(args, maap).client("s3")
     try:
@@ -360,7 +376,7 @@ def check_environment(args) -> int:
     except Exception as exc:                              # noqa: BLE001
         print(f"    region           could not determine ({exc})")
 
-    # 5. A real write. Read-only credentials, a prefix you cannot write to, or
+    # 6. A real write. Read-only credentials, a prefix you cannot write to, or
     #    a bucket policy that only permits certain key shapes all look fine
     #    until the first PUT -- so do one, then clean it up.
     probe_key = f"{prefix}/.upload-probe" if prefix else ".upload-probe"
@@ -375,7 +391,7 @@ def check_environment(args) -> int:
         print(f"                     FAILED: {exc}")
         ok = False
 
-    # 6. What to do next, with the values just discovered rather than
+    # 7. What to do next, with the values just discovered rather than
     #    placeholders to substitute by hand.
     print("\n  next")
     print("    Put this in your MAAP config so the orchestrator and the")
