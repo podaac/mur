@@ -1,0 +1,74 @@
+# OGC Application Package description for the MUR iquam module.
+# See maap/README.md for the generate -> validate -> deploy sequence.
+algorithm_description: >
+  MUR in-situ buoy (iQuam) preprocessing. Downloads the monthly NOAA STAR
+  iQuam NetCDF covering the requested window and writes one
+  Global_IQUAM0_YYYY_DDD.bii per day across +/- buoy-day-range around the
+  target day, for MRVA's in-situ fan-in.
+algorithm_name: mur-iquam
+algorithm_version: "1.0.0"
+algorithm_container_url: ghcr.io/podaac/mur/iquam-dps:1.0.0
+
+keywords: MUR, SST, in-situ, iQuam, buoy, GHRSST
+code_repository: https://github.com/podaac/mur
+citation: >
+  Chin, T.M., Vazquez-Cuervo, J., Armstrong, E.M. (2017). A multi-scale
+  high-resolution analysis of global sea surface temperature. Remote Sensing
+  of Environment, 200, 154-169.
+author: JPL PO.DAAC MUR Team
+contributor: JPL PO.DAAC MUR Team
+license: https://github.com/podaac/mur/blob/main/LICENSE
+release_notes: >
+  First MAAP OGC application package for iquam. --work-dir/--log-dir/
+  --output-dir became optional with runtime-relative defaults and are
+  deliberately NOT exposed as job inputs.
+
+run_command: /opt/iquam/bin/entrypoint.sh
+
+# 4 GiB / 1 core. iquam downloads one monthly NetCDF and writes small
+# .bii files; the local --memory=8g is a generous cap, not a measurement.
+ram_min: 4096
+cores_min: 1
+outdir_max: 1024   # a week of .bii files measures ~1.1 MB
+
+# Six inputs, not the nine flags the entrypoint accepts.
+# --work-dir/--log-dir/--output-dir are placement detail rather than science
+# parameters, and on DPS the caller cannot know the right value: CWL only
+# collects what lands under $(runtime.outdir). Exposing them would invite a
+# caller to point output somewhere DPS never stages out. They keep their
+# defaults inside the container.
+inputs:
+  - name: year
+    label: Year
+    doc: Four-digit analysis year.
+    type: string
+  - name: doy
+    label: Day of year
+    doc: Day of year, 1-366.
+    type: string
+  - name: mode
+    label: Processing mode
+    doc: "nrt (interim) or rea (final)."
+    type: string
+  - name: reference-date
+    label: Reference date
+    doc: >
+      YYYY-MM-DD date this run treats as "today", for stability and future-date
+      checks. Supplied by the orchestrator so it is never derived inside the
+      container, which keeps historical reprocessing reproducible.
+    type: string
+  - name: buoy-day-range
+    label: Buoy day range
+    doc: >
+      Half-width in days of the window processed around --doy. Must match
+      mrva.sensors.IQUAM0.day_range (3) or MRVA's fan-in manifest will
+      reference days this job never wrote.
+    type: string
+  - name: stability-latency
+    label: Stability latency
+    doc: Days after which a day is considered stable and not rewritten.
+    type: string
+
+outputs:
+  - name: output
+    type: Directory
