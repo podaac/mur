@@ -1,0 +1,120 @@
+{
+  "_comment": [
+    "MAAP/DPS configuration for run_mur_maap.py. Paths here are s3:// hrefs,",
+    "not local directories -- bucket mounts do not exist inside a DPS job.",
+    "Fill workspace_root and static_resources_dir from:",
+    "    python utils/upload_static_resources.py --check",
+    "which prints both, discovered from workspace_bucket_credentials()."
+  ],
+  "maap": {
+    "workspace_root": "s3://maap-ops-workspace/<username>",
+    "queue": "<queue name from MAAP ops>",
+    "granule_staging": "workspace",
+    "_granule_staging_note": "workspace = copy PO.DAAC granules into the workspace bucket first, because localize.sh's plain `aws s3 cp` cannot authenticate to a DAAC. direct = pass PO.DAAC hrefs straight through; only once DAAC creds are solved inside the container."
+  },
+  "landice": {
+    "static_resources_dir": "s3://maap-ops-workspace/<username>/mur/static-resources"
+  },
+  "iquam": {
+    "buoy_dayrange": 3,
+    "stable_latency": 2
+  },
+  "l2p": {
+    "active_sensors": [
+      "AMSR2R",
+      "MODISA",
+      "MODIST",
+      "AVMTAG",
+      "AVMTBG"
+    ],
+    "sensors": {
+      "AMSR2R": {
+        "collection_name": [
+          "AMSR2-REMSS-L2P-v8.2",
+          "AMSR2-REMSS-L2P_RT-v8.2"
+        ],
+        "region": "Global",
+        "day_range": [
+          2,
+          2
+        ],
+        "stable": 2
+      },
+      "MODISA": {
+        "collection_name": [
+          "MODIS_A-JPL-L2P-v2019.0"
+        ],
+        "region": "Global",
+        "day_range": [
+          2,
+          2
+        ],
+        "stable": 2
+      },
+      "MODIST": {
+        "collection_name": [
+          "MODIS_T-JPL-L2P-v2019.0"
+        ],
+        "region": "Global",
+        "day_range": [
+          2,
+          2
+        ],
+        "stable": 3
+      },
+      "AVMTAG": {
+        "collection_name": [
+          "AVHRRMTA_G-NAVO-L2P-v2.0"
+        ],
+        "region": "Global",
+        "day_range": [
+          2,
+          2
+        ],
+        "stable": 2
+      },
+      "AVMTBG": {
+        "collection_name": [
+          "AVHRRMTB_G-NAVO-L2P-v2.0"
+        ],
+        "region": "Global",
+        "day_range": [
+          2,
+          2
+        ],
+        "stable": 2
+      }
+    }
+  },
+  "mrva": {
+    "static_resources_dir": "s3://maap-ops-workspace/<username>/mur/static-resources",
+    "active_sensors": [
+      "IQUAM0",
+      "AMSR2R",
+      "MODISA",
+      "MODIST",
+      "AVMTAG",
+      "AVMTBG"
+    ],
+    "sensors": {
+      "IQUAM0": {
+        "day_range": 3
+      },
+      "AMSR2R": {
+        "day_range": 2
+      },
+      "MODISA": {
+        "day_range": 2
+      },
+      "MODIST": {
+        "day_range": 2
+      },
+      "AVMTAG": {
+        "day_range": 2
+      },
+      "AVMTBG": {
+        "day_range": 2
+      }
+    }
+  }
+}

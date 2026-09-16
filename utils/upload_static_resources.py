@@ -103,6 +103,110 @@ def workspace_session(maap):
     return boto3.Session(botocore_session=session)
 
 
+def check_environment(args) -> int:
+    """Prove the environment can actually do the upload, before moving 142 GiB.
+
+    Answers, in order, the things that silently go wrong: is maap-py the OGC
+    version, do credentials issue at all, which bucket and prefix do they
+    grant, how long do they last, and -- the one that a HEAD cannot tell you
+    -- can we really WRITE there.
+    """
+    print("MUR static-resources upload: environment check\n")
+    ok = True
+
+    # 1. maap-py, and the right major version. Below v5 none of the OGC calls
+    #    exist, and the failure mode is a confusing AttributeError much later.
+    # Probe maap.maap specifically, not the top-level name: an unrelated
+    # package called "maap" imports fine and then fails confusingly later.
+    try:
+        import maap.maap  # noqa: F401
+    except ImportError as exc:
+        print(f"  maap-py            NOT USABLE ({exc})")
+        print("                     Run this from a MAAP workspace started on an OGC")
+        print("                     image, e.g. mas.maap-project.org/root/"
+              "maap-workspaces/2i2c/pangeo:v6.0.0")
+        print("                     Elsewhere: pip install maap-py")
+        return 1
+
+    version = "unknown"
+    try:
+        from importlib.metadata import version as _dist_version
+        version = _dist_version("maap-py")
+    except Exception:                                     # noqa: BLE001
+        import maap as maap_pkg
+        version = getattr(maap_pkg, "__version__", "unknown")
+    print(f"  maap-py            {version}")
+
+    major = str(version).lstrip("v").split(".")[0]
+    if major.isdigit() and int(major) < 5:
+        print("                     !! need >= 5 for the OGC API; this workspace")
+        print("                        image ships the non-OGC v4 stack")
+        ok = False
+
+    # 2. Credentials.
+    try:
+        maap = _maap_client()
+        payload, resp = _credentials_payload(maap)
+    except Exception as exc:                              # noqa: BLE001
+        print(f"  credentials        FAILED: {exc}")
+        print("                     Outside a workspace you need a MAAP token from")
+        print("                     https://console.maap-project.org/profile/tokens")
+        return 1
+    print(f"  credentials        OK, expire {payload['expiry_time']}")
+
+    # 3. What those credentials actually grant. The workspace path is always
+    #    first; anything after it is an org-shared bucket.
+    print("\n  authorized paths")
+    for i, path in enumerate(resp["authorized_s3_paths"]):
+        marker = "workspace" if i == 0 else path.get("type", "org")
+        print(f"    [{i}] {path['uri']}  ({marker}, {path.get('access', '?')})")
+
+    dest = args.dest or default_destination(maap)
+    bucket, prefix = split_s3_uri(dest)
+    print(f"\n  destination        {dest}")
+    print(f"    bucket           {bucket}")
+    print(f"    prefix           {prefix}")
+
+    # 4. Region. The uploader never hardcodes it, but knowing it makes the
+    #    curl reachability test from a production host possible.
+    s3 = workspace_session(maap).client("s3")
+    try:
+        loc = s3.get_bucket_location(Bucket=bucket).get("LocationConstraint")
+        print(f"    region           {loc or 'us-east-1'}")
+    except Exception as exc:                              # noqa: BLE001
+        print(f"    region           could not determine ({exc})")
+
+    # 5. A real write. Read-only credentials, a prefix you cannot write to, or
+    #    a bucket policy that only permits certain key shapes all look fine
+    #    until the first PUT -- so do one, then clean it up.
+    probe_key = f"{prefix}/.upload-probe" if prefix else ".upload-probe"
+    print(f"\n  write probe        {probe_key}")
+    try:
+        s3.put_object(Bucket=bucket, Key=probe_key, Body=b"mur upload probe\n")
+        body = s3.get_object(Bucket=bucket, Key=probe_key)["Body"].read()
+        assert body == b"mur upload probe\n"
+        s3.delete_object(Bucket=bucket, Key=probe_key)
+        print("                     OK (wrote, read back, deleted)")
+    except Exception as exc:                              # noqa: BLE001
+        print(f"                     FAILED: {exc}")
+        ok = False
+
+    # 6. What to do next, with the values just discovered rather than
+    #    placeholders to substitute by hand.
+    print("\n  next")
+    print("    Put this in your MAAP config so the orchestrator and the")
+    print("    containers resolve the same layout:")
+    print(f'      "maap":    {{ "workspace_root": "{resp["authorized_s3_paths"][0]["uri"]}" }}')
+    print(f'      "landice": {{ "static_resources_dir": "{dest}" }}')
+    print(f'      "mrva":    {{ "static_resources_dir": "{dest}" }}')
+    print("\n    Then, fast path first (~1.6 GiB, minutes):")
+    print("      python utils/upload_static_resources.py \\")
+    print("          --from-prod-layout --include-optional --no-seasonal --verify")
+
+    print("\n" + ("CHECK PASSED" if ok else "CHECK FAILED"))
+    return 0 if ok else 1
+
+
 def default_destination(maap) -> str:
     """The workspace root, discovered rather than hardcoded.
 
@@ -408,7 +512,10 @@ def parse_args(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__.split("TYPICAL SEQUENCE")[-1],
     )
-    src = p.add_mutually_exclusive_group(required=True)
+    p.add_argument("--check", action="store_true",
+                   help="Verify credentials, destination and write access, then "
+                        "exit. Run this first, from the workspace.")
+    src = p.add_mutually_exclusive_group()
     src.add_argument("--source-root", type=pathlib.Path,
                      help="A static-resources/-shaped directory tree.")
     src.add_argument("--from-prod-layout", action="store_true",
@@ -450,6 +557,15 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+
+    if args.check:
+        return check_environment(args)
+
+    if not (args.source_root or args.from_prod_layout):
+        print("ERROR: one of --source-root or --from-prod-layout is required "
+              "(or --check to verify the environment first).", file=sys.stderr)
+        return 2
+
     entries = build_plan(args)
 
     if args.dry_run:
