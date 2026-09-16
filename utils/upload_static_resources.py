@@ -447,12 +447,37 @@ class Ledger:
 # upload
 # --------------------------------------------------------------------------
 
+def source_root_from_config(config_path) -> pathlib.Path:
+    """The static-resources root a pipeline config already points at.
+
+    Saves retyping a path that is maintained in one place, and keeps the
+    upload reading exactly the tree the local pipeline reads -- so what lands
+    in S3 is what local runs were validated against.
+    """
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    import mur_config
+
+    config = mur_config.load_config(config_path)
+    landice = config.get("landice", {}).get("static_resources_dir")
+    mrva = config.get("mrva", {}).get("static_resources_dir")
+    if not landice:
+        raise SystemExit(
+            f"{config_path} has no landice.static_resources_dir to read a source "
+            f"tree from. Pass --source-root explicitly.")
+    if mrva and mrva != landice:
+        print(f"WARNING: landice ({landice}) and mrva ({mrva}) point at different "
+              f"static-resources roots; using landice's.", file=sys.stderr)
+    return pathlib.Path(landice).expanduser()
+
+
 def build_plan(args) -> List[layout.Entry]:
     kwargs = dict(
         include_optional=args.include_optional,
         include_seasonal=not args.no_seasonal,
     )
-    if args.source_root:
+    if args.from_config:
+        kwargs["source_root"] = source_root_from_config(args.from_config)
+    elif args.source_root:
         kwargs["source_root"] = args.source_root
 
     entries = list(layout.iter_entries(**kwargs))
@@ -691,10 +716,17 @@ def parse_args(argv=None):
     src = p.add_mutually_exclusive_group()
     src.add_argument("--source-root", type=pathlib.Path,
                      help="A static-resources/-shaped directory tree.")
+    src.add_argument("--from-config", metavar="CONFIG",
+                     help="Read the source tree from a pipeline config's "
+                          "landice.static_resources_dir -- i.e. the same directory "
+                          "the local pipeline already reads. Use this when the tree "
+                          "is assembled (config.container.json's layout).")
     src.add_argument("--from-prod-layout", action="store_true",
-                     help="The scattered production tree, via GRIDS_DIR/ICE_DIR/"
-                          "SEASONAL_DIR/POLARCAP_FILE (same contract as "
-                          "bundle_prod_static.sh, legacy p011 fallback included).")
+                     help="The SCATTERED production tree (GRIDS_DIR/ICE_DIR/"
+                          "SEASONAL_DIR/POLARCAP_FILE, same contract as "
+                          "bundle_prod_static.sh). Only for a host where the files "
+                          "are still in their original NAS locations, NOT one where "
+                          "they are already under a static-resources/ root.")
 
     p.add_argument("--dest", help="s3://bucket/prefix root. Default: the workspace "
                                   "bucket from workspace_bucket_credentials().")
@@ -744,8 +776,9 @@ def main(argv=None) -> int:
     if args.check:
         return check_environment(args)
 
-    if not (args.source_root or args.from_prod_layout):
-        print("ERROR: one of --source-root or --from-prod-layout is required "
+    if not (args.source_root or args.from_prod_layout or args.from_config):
+        print("ERROR: one of --from-config, --source-root or --from-prod-layout "
+              "is required "
               "(or --check to verify the environment first).", file=sys.stderr)
         return 2
 

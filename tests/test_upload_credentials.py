@@ -140,3 +140,59 @@ def test_bundle_readme_documents_the_refresh_requirement(tmp_path):
     assert "--credentials-command" in readme
     assert "--dest" in readme
     assert "outlives" in readme      # why copied-once credentials do not work
+
+
+# --- source selection ------------------------------------------------------
+#
+# Three source modes exist because the static tree can be in two shapes, and
+# picking the wrong one produces a plan full of MISSING files rather than an
+# error that says what went wrong.
+
+def test_from_config_reads_the_pipeline_static_resources_dir(tmp_path):
+    """The assembled case: a static-resources/ root the local pipeline already
+    reads. Keeps the upload reading exactly the tree local runs validated
+    against, without retyping a path maintained elsewhere."""
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "landice": {"static_resources_dir": "/data1/jleach/testing/static-resources"},
+        "mrva": {"static_resources_dir": "/data1/jleach/testing/static-resources"},
+    }))
+    assert upload.source_root_from_config(config) == \
+        pathlib.Path("/data1/jleach/testing/static-resources")
+
+
+def test_from_config_accepts_the_maap_key_spelling(tmp_path):
+    """mur_config normalizes static_resources_root onto _dir, so a MAAP-shaped
+    config works here too."""
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "landice": {"static_resources_root": "/srv/static-resources"},
+    }))
+    assert upload.source_root_from_config(config) == pathlib.Path("/srv/static-resources")
+
+
+def test_from_config_expands_a_home_relative_path(tmp_path):
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "landice": {"static_resources_dir": "~/testing/static-resources"},
+    }))
+    assert "~" not in str(upload.source_root_from_config(config))
+
+
+def test_from_config_without_the_key_fails_with_a_usable_message(tmp_path):
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"landice": {}}))
+    with pytest.raises(SystemExit, match="static_resources_dir"):
+        upload.source_root_from_config(config)
+
+
+def test_from_config_warns_when_landice_and_mrva_disagree(tmp_path, capsys):
+    """They are two keys that must agree; a silent pick would upload one tree
+    and leave the other's files missing."""
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "landice": {"static_resources_dir": "/a"},
+        "mrva": {"static_resources_dir": "/b"},
+    }))
+    assert upload.source_root_from_config(config) == pathlib.Path("/a")
+    assert "different" in capsys.readouterr().err
