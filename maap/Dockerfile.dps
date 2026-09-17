@@ -1,29 +1,55 @@
 # DPS variant of a MUR module image.
 #
 # WHY THIS EXISTS
-#   The module images set ENTRYPOINT ["/opt/<module>/bin/entrypoint.sh"], which
-#   is right for `docker run <image> --year 2026 ...` as run_mur_pipeline.py
-#   invokes them. But CWL sets `baseCommand`, and Docker APPENDS the command to
-#   ENTRYPOINT rather than replacing it -- so a CWL job would execute
+#   1. ENTRYPOINT collides with CWL. The module images set
+#      ENTRYPOINT ["/opt/<module>/bin/entrypoint.sh"], which is right for
+#      `docker run <image> --year 2026 ...` as run_mur_pipeline.py invokes
+#      them. But CWL supplies `baseCommand`, and Docker APPENDS a command to
+#      ENTRYPOINT rather than replacing it -- so a CWL job would execute
 #
-#       entrypoint.sh /opt/landice/bin/entrypoint.sh --year 2026 ...
+#          entrypoint.sh /opt/landice/bin/entrypoint.sh --year 2026 ...
 #
-#   and every MUR entrypoint rejects unknown positional args with
-#   "ERROR: Unknown argument", exiting 1. (MAAP's own stac_clip reference
-#   Containerfile declares no ENTRYPOINT for exactly this reason.)
+#      and every MUR entrypoint rejects unknown positional args with
+#      "ERROR: Unknown argument", exiting 1. (MAAP's own stac_clip reference
+#      Containerfile declares no ENTRYPOINT for exactly this reason.)
 #
-#   Clearing ENTRYPOINT in a derived image is a metadata-only change: it adds
-#   no layer content, builds in about a second, and leaves the base image --
-#   and therefore local execution -- completely untouched.
+#   2. It refreshes the shell scripts. entrypoint.sh and localize.sh are
+#      COPY'd in the FINAL layer of every module image, after the MATLAB
+#      Runtime install -- so overwriting them here picks up changes without
+#      recompiling anything. That matters because an image built before the
+#      MUR_OUTPUT_ROOT stage-out fix writes to absolute paths CWL cannot
+#      collect, and would otherwise need a full MATLAB rebuild (licence
+#      server, ~30 minutes) just to change a bash script.
+#
+#   Both are metadata and text: the MATLAB Runtime, the compiled binaries and
+#   the Fortran executables are all inherited unchanged from the base image.
 #
 # BUILD
-#   See utils/build_dps_images.sh, which builds all four.
+#   Use utils/build_dps_images.sh, which builds all four with the right
+#   MODULE arg and repo-root context:
 #
 #     docker build -f maap/Dockerfile.dps \
 #       --build-arg BASE_IMAGE=ghcr.io/podaac/mur/landice:1.0.0 \
-#       -t ghcr.io/podaac/mur/landice-dps:1.0.0 maap/
+#       --build-arg MODULE=landice \
+#       -t ghcr.io/podaac/mur/landice-dps:1.0.0 .
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
+
+# Repeated after FROM: an ARG declared before it is out of scope afterwards.
+ARG MODULE
+
+# Refresh the entrypoint and the localization helper from the working tree.
+# iquam neither installs awscli nor sources localize.sh, so its copy is inert
+# -- a few KB, and it keeps this one Dockerfile serving all four modules.
+USER root
+COPY common/bin/localize.sh /opt/common/bin/localize.sh
+COPY ${MODULE}/bin/entrypoint.sh /opt/${MODULE}/bin/entrypoint.sh
+RUN chmod 0755 /opt/common/bin/localize.sh /opt/${MODULE}/bin/entrypoint.sh
+
+# Restore the unprivileged user the base image runs as. DPS may override the
+# UID anyway, which is why the entrypoints create their own directories and
+# mrva's stage-out has a copy fallback.
+USER matlab
 
 # CWL supplies the command via baseCommand; an ENTRYPOINT would prefix it.
 ENTRYPOINT []

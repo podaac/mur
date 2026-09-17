@@ -2,11 +2,18 @@
 #
 # Build (and optionally push) the DPS variants of the four MUR module images.
 #
-# These are metadata-only derived images that clear ENTRYPOINT so MAAP's CWL
-# `baseCommand` is executed directly rather than being appended to the base
-# image's entrypoint -- see maap/Dockerfile.dps for the full reasoning. They
-# add no layer content and build in about a second each, because every byte
-# already exists in the base image.
+# These derived images do two things, both cheap -- see maap/Dockerfile.dps:
+#
+#   1. Clear ENTRYPOINT, so MAAP's CWL `baseCommand` is executed directly
+#      rather than being appended to the base image's entrypoint.
+#   2. Refresh entrypoint.sh and localize.sh from the working tree. Those are
+#      COPY'd in the FINAL layer of every module image, so an image built
+#      before the MUR_OUTPUT_ROOT stage-out fix can be made CWL-ready here
+#      without recompiling any MATLAB.
+#
+# The MATLAB Runtime, compiled binaries and Fortran executables are inherited
+# unchanged, so each build takes seconds rather than a licence server and half
+# an hour.
 #
 # PREREQUISITE
 #   The base images must already exist at the same tag. Build and push them
@@ -71,12 +78,15 @@ for module in $MODULES; do
     docker pull --platform "$PLATFORM" "$base"
   fi
 
+  # Context is the repo root, not maap/, because the derived image refreshes
+  # entrypoint.sh and localize.sh from the working tree.
   docker build \
     --platform "$PLATFORM" \
     --build-arg "BASE_IMAGE=${base}" \
+    --build-arg "MODULE=${module}" \
     --file maap/Dockerfile.dps \
     --tag "$dps" \
-    maap/
+    .
 
   # A non-empty Entrypoint here means CWL's baseCommand would be appended to
   # it and every job would die on "ERROR: Unknown argument".
@@ -86,6 +96,16 @@ for module in $MODULES; do
     exit 1
   fi
   echo "    ok: ENTRYPOINT cleared"
+
+  # The point of refreshing the entrypoint is the stage-out fix; confirm it is
+  # really in the image rather than trusting the layer ordering.
+  if docker run --rm --entrypoint sh "$dps" -c \
+       'grep -q MUR_OUTPUT_ROOT /opt/'"$module"'/bin/entrypoint.sh' 2>/dev/null; then
+    echo "    ok: entrypoint carries the MUR_OUTPUT_ROOT stage-out fix"
+  else
+    echo "    WARNING: entrypoint has no MUR_OUTPUT_ROOT -- CWL will collect nothing" >&2
+    echo "             (is the working tree on a commit that includes it?)" >&2
+  fi
 
   if [ "$PUSH" -eq 1 ]; then
     docker push "$dps"
