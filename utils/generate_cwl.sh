@@ -174,5 +174,7 @@ echo "      r = maap.deploy_algorithm_from_cwl_file("
 # cannot drift from what was actually generated.
 version=$(sed -n 's/^algorithm_version: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' \
             "$REPO_ROOT/maap/landice/algorithm_config.yml" | head -1)
-echo "          file_path=f'~/mur/maap/cwl_workflows/process_mur-{m}_${version}.cwl')"
+# An absolute path, not ~: a tilde inside a Python string is literal, so
+# deploy_algorithm_from_cwl_file would be handed a path that does not exist.
+echo "          file_path=f'$OUT_DIR/process_mur-{m}_${version}.cwl')"
 echo "      print(m, r.status_code, r.json())"
