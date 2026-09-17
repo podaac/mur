@@ -22,6 +22,9 @@
 # REQUIREMENTS
 #   pip install cwltool ogc_ap_validator pyyaml
 #
+#   Set PYTHON= to choose the interpreter the generator runs under; it
+#   needs pyyaml. Default: python3.
+#
 # USAGE
 #   ./utils/generate_cwl.sh                  # generate + validate all four
 #   ./utils/generate_cwl.sh --modules mrva   # just one
@@ -30,6 +33,7 @@ set -euo pipefail
 
 GENERATOR_REPO="${GENERATOR_REPO:-https://github.com/MAAP-Project/ogc-app-pack-generator}"
 GENERATOR_DIR="${GENERATOR_DIR:-/tmp/ogc-app-pack-generator}"
+PYTHON="${PYTHON:-python3}"
 MODULES="landice iquam l2p mrva"
 VALIDATE_ONLY=0
 
@@ -55,14 +59,47 @@ if [ "$VALIDATE_ONLY" -eq 0 ]; then
 
   for module in $MODULES; do
     config="$REPO_ROOT/maap/$module/algorithm_config.yml"
-    echo "==> Generating CWL for $module"
+    version=$(sed -n 's/^algorithm_version: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$config" | head -1)
+    image=$(sed -n 's/^algorithm_container_url: *//p' "$config" | head -1)
+
+    echo "==> Generating CWL for $module ($version)"
     mkdir -p "$GENERATOR_DIR/data"
     cp "$config" "$GENERATOR_DIR/data/algorithm_config.yml"
+
+    # The generator always writes the SAME filename, so a stale one from the
+    # previous module would be copied silently if this run failed.
+    rm -f "$GENERATOR_DIR/cwl_workflows/process.cwl"
+
     ( cd "$GENERATOR_DIR" \
-        && python build_cwl_workflow.py --yaml-file data/algorithm_config.yml )
-    # The generator names files process_<name>_<version>.cwl.
-    find "$GENERATOR_DIR" -name "process_mur-${module}_*.cwl" \
-      -exec cp {} "$OUT_DIR/" \;
+        && "$PYTHON" build_cwl_workflow.py --yaml-file data/algorithm_config.yml )
+
+    # It writes cwl_workflows/process.cwl, NOT a versioned name -- the
+    # process_<name>_<version>.cwl convention is applied by the GitHub Action,
+    # not by this script. Rename on the way out so the deployment artifact
+    # still identifies itself.
+    src="$GENERATOR_DIR/cwl_workflows/process.cwl"
+    if [ ! -f "$src" ]; then
+      echo "ERROR: the generator produced no $src" >&2
+      echo "       (is pyyaml installed for $PYTHON?)" >&2
+      exit 1
+    fi
+    dest="$OUT_DIR/process_mur-${module}_${version}.cwl"
+    cp "$src" "$dest"
+
+    # Standalone, the generator leaves `dockerPull: null` -- building and
+    # tagging the image is the Action's job, so algorithm_container_url is
+    # never read here. Its README says to fix this by hand; do it instead,
+    # since the value is right there in the config.
+    "$PYTHON" - "$dest" "$image" <<'PATCH'
+import pathlib, re, sys
+path, image = pathlib.Path(sys.argv[1]), sys.argv[2]
+text = path.read_text()
+patched, n = re.subn(r'(dockerPull:)\s*null\b', r'\1 ' + image, text)
+if n == 0 and f'dockerPull: {image}' not in patched:
+    sys.exit(f"could not set dockerPull in {path}")
+path.write_text(patched)
+print(f"    dockerPull -> {image}")
+PATCH
   done
 fi
 
@@ -135,7 +172,7 @@ echo "  for m in ['iquam', 'landice', 'l2p', 'mrva']:   # cheapest first"
 echo "      r = maap.deploy_algorithm_from_cwl_file("
 # Read the version back from a config rather than hardcoding it, so this hint
 # cannot drift from what was actually generated.
-version=$(grep -m1 '^algorithm_version:' "$REPO_ROOT/maap/landice/algorithm_config.yml" \
-            | sed 's/.*: *//; s/"//g')
+version=$(sed -n 's/^algorithm_version: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' \
+            "$REPO_ROOT/maap/landice/algorithm_config.yml" | head -1)
 echo "          file_path=f'~/mur/maap/cwl_workflows/process_mur-{m}_${version}.cwl')"
 echo "      print(m, r.status_code, r.json())"
