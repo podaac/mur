@@ -19,6 +19,8 @@
 #   ./utils/build_and_push.sh                     # build only, no push
 #   ./utils/build_and_push.sh --push              # build and push
 #   ./utils/build_and_push.sh --push --tag v1.2.3 # with an explicit tag
+#   ./utils/build_and_push.sh --push --tag 1.0.0 --with-dps
+#                                                 # ...and the MAAP -dps variants
 #   ./utils/build_and_push.sh --modules landice   # one module
 #
 set -euo pipefail
@@ -29,11 +31,13 @@ BASE_IMAGE="mur-matlab-base:r2024b"
 PLATFORM="linux/amd64"
 MODULES="iquam l2p landice mrva"
 PUSH=0
+WITH_DPS=0
 TAG=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --push)    PUSH=1; shift ;;
+    --with-dps) WITH_DPS=1; shift ;;
     --tag)     TAG="$2"; shift 2 ;;
     --modules) MODULES="$2"; shift 2 ;;
     -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
@@ -101,6 +105,21 @@ for module in $MODULES; do
     docker push "${image}:${TAG}"
   fi
 done
+
+# The DPS variants must be rebuilt whenever their base is, or MAAP keeps
+# running whatever scripts the previous -dps layer captured. Chaining here
+# removes the chance of rebuilding one and forgetting the other.
+if [ "$WITH_DPS" -eq 1 ]; then
+  echo
+  echo "==> Building DPS variants"
+  # An explicit if, not `[ ... ] && ...`: under `set -e` a failing test in an
+  # AND-list is easy to misread, and this must never silently skip the push.
+  dps_args=(--tag "$TAG" --modules "$MODULES")
+  if [ "$PUSH" -eq 1 ]; then
+    dps_args+=(--push --verify)
+  fi
+  "$(dirname "$0")/build_dps_images.sh" "${dps_args[@]}"
+fi
 
 if [ "$PUSH" -eq 0 ]; then
   echo
