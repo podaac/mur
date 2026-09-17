@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Running on MAAP — MUR SST</title>
-<meta name="description" content="Running the MUR SST containers as MAAP DPS jobs: the explicit-args contract, manifest fan-in, and exactly which parts are implemented.">
+<title>Running on MAAP · MUR SST</title>
+<meta name="description" content="How the four MUR containers execute as OGC Application Packages on NASA MAAP.">
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
@@ -46,104 +46,304 @@
 <main>
   <div class="content">
     <h1>Running on MAAP</h1>
-    <p class="lede">The same container images, submitted as cloud jobs instead of local Docker &mdash; and an honest account of how far that is wired up.</p>
-    <nav class="toc" aria-label="On this page">
-    <b>On this page</b>
-    <ul>
-      <li><a href="#1-what-running-on-maap-means-for-this-pipeline">1. What &quot;running on MAAP&quot; means for this pipeline</a></li>
-      <li><a href="#2-current-state-whats-real-whats-a-stub">2. Current state — what&#x27;s real, what&#x27;s a stub</a></li>
-      <li><a href="#3-the-real-maap-submission-mechanism-confirmed-from-source-not-docs-prose">3. The real MAAP submission mechanism (confirmed from source, not docs prose)</a></li>
-      <li><a href="#4-the-explicit-args-contract-container-by-container">4. The explicit-args contract, container by container</a></li>
-      <li><a href="#5-fan-in-the-manifest-file-mechanism-implemented">5. Fan-in: the manifest-file mechanism (implemented)</a></li>
-      <li><a href="#6-cross-run-output-discovery-why-mrva-needs-more-than-explicit-args">6. Cross-run output discovery (why MRVA needs more than explicit args)</a></li>
-      <li><a href="#7-whats-needed-to-actually-run-something-on-maap">7. What&#x27;s needed to actually run something on MAAP</a></li>
-      <li><a href="#8-exercising-what-exists-today">8. Exercising what exists today</a></li>
-    </ul>
-    </nav>
-    <p>This page describes the current state of running the MUR SST pipeline on
-    NASA's MAAP platform: what is actually implemented versus stubbed, and the
-    real submission mechanism, confirmed against MAAP's own source rather than
-    taken from documentation prose.</p>
-    <div class="warn">
-    <p><strong>Read this before assuming anything here executes today: it doesn't,
-    end to end.</strong> <code>run_mur_maap.py</code>'s decision logic is real and
-    tested; the code that would actually talk to MAAP is a stub. See §2.</p>
+    <p class="lede">How the four containers execute as OGC Application Packages on
+    NASA's MAAP platform, and which parts of that are the platform's job rather
+    than ours.</p>
+
+    <div class="toc">
+      <b>On this page</b>
+      <ul>
+        <li><a href="#model">The execution model</a></li>
+        <li><a href="#contract">What a container receives</a></li>
+        <li><a href="#fanin">Fan-in: the manifest mechanism</a></li>
+        <li><a href="#stageout">Stage-out, and who chooses the path</a></li>
+        <li><a href="#catalog">Where generated files are catalogued</a></li>
+        <li><a href="#state">Surviving an idle-culled workspace</a></li>
+        <li><a href="#status">Current state</a></li>
+        <li><a href="#unverified">Still unverified</a></li>
+      </ul>
     </div>
-    <h2 id="1-what-running-on-maap-means-for-this-pipeline">1. What "running on MAAP" means for this pipeline</h2>
-    <p>Each of the four processing containers (<code>landice</code>, <code>l2p</code>, <code>iquam</code>, <code>mrva</code>) is meant to run as a MAAP DPS (Data Processing System) job — the same container image used for local Docker execution (<code>run_mur_pipeline.py</code>), invoked instead through MAAP's job-submission mechanism, with <code>run_mur_maap.py</code>'s <code>MAAPOrchestrator</code> in place of <code>run_mur_pipeline.py</code>'s <code>MUROrchestrator</code>.</p>
-    <p>The two orchestrators share the same decision logic on purpose (processing window, NRT/REA mode) — see <code>MAAPOrchestrator.calculate_processing_window()</code>/<code>is_nrt_mode()</code> in <code>run_mur_maap.py</code>, which mirror <code>MUROrchestrator</code>'s methods in <code>run_mur_pipeline.py</code>. What differs is how each one actually gets a container running: <code>run_mur_pipeline.py</code> shells out to <code>docker run</code>; <code>run_mur_maap.py</code> is meant to call MAAP's job-submission API instead.</p>
-    <h2 id="2-current-state-whats-real-whats-a-stub">2. Current state — what's real, what's a stub</h2>
-    <p><code>run_mur_maap.py</code> is a skeleton, by design (see its own module docstring). Concretely:</p>
-    <p><strong>Real and tested</strong> (<code>tests/test_run_mur_maap.py</code>, 20 tests, all against a <code>FakeMAAPClient</code>):</p>
-    <ul>
-    <li><code>MAAPOrchestrator.calculate_processing_window()</code> / <code>is_nrt_mode()</code> — the same NRT/REA window math as the local orchestrator</li>
-    <li><code>MAAPOrchestrator.run_day()</code> — per-day job sequencing: submits landice + iquam + per-sensor L2P jobs, waits for them, builds and publishes the L2P granules and MRVA sensor-inputs manifests, submits MRVA, waits, and publishes</li>
-    <li>BIC cache-skip logic (don't resubmit an L2P job if a fresh-enough BIC already exists)</li>
-    <li>The explicit-args resolution for landice (<code>resolve_landice_static_hrefs</code>), iquam (submitting <code>mode</code>/<code>reference_date</code>/<code>buoy_day_range</code>/<code>stability_latency</code> alongside <code>year</code>/<code>doy</code>), and mrva (<code>resolve_mrva_static_hrefs</code> plus landice-output hrefs via <code>get_job_output</code> against the same-run landice job)</li>
-    <li>The manifest mechanism itself (§5): <code>build_l2p_manifest_from_hrefs</code> and the MRVA sensor-inputs manifest builder, both exercised against <code>FakeMAAPClient.write_manifest</code></li>
-    </ul>
-    <p><strong>Stubs — every method on <code>MAAPClient</code> raises <code>NotImplementedError</code>:</strong></p>
-    <ul>
-    <li><code>stac_search</code>, <code>object_exists</code>, <code>list_objects</code> — no real STAC/S3 querying</li>
-    <li><code>write_manifest</code> — no real S3 write of manifest JSON</li>
-    <li><code>submit_job</code>, <code>wait_all</code>, <code>get_job_output</code> — no real job submission or polling</li>
-    <li><code>publish_stac_item</code> — no real STAC publish of the final product</li>
-    </ul>
-    <p><strong>Nothing executes on MAAP today.</strong> <code>MAAPOrchestrator.run()</code>/<code>run_day()</code> can be exercised right now only against the fake client in tests — never against a real MAAP endpoint. Getting from here to an actual MAAP run means implementing <code>MAAPClient</code>'s methods against <code>maap-py</code>, <code>pystac-client</code>, and <code>boto3</code> — that work hasn't started.</p>
-    <h2 id="3-the-real-maap-submission-mechanism-confirmed-from-source-not-docs-prose">3. The real MAAP submission mechanism (confirmed from source, not docs prose)</h2>
-    <p>An earlier deployment plan for this pipeline framed the MAAP target as "OGC Application Packages (CWL + Docker)." That framing describes where MAAP is <em>headed</em> (<code>docs.maap-project.org/en/ogc/</code>), not what is deployable today — that branch isn't public yet, which is why the plan has been retired in favour of this page. What's actually confirmed, by reading <code>maap-py</code>'s source directly (<code>maap/dps/DpsHelper.py</code>, <code>execute.xml</code>, <code>execute_inputs.xml</code>) rather than relying on docs:</p>
-    <ul>
-    <li><strong><code>maap.submitJob()</code> builds an OGC WPS 2.0 Execute XML request</strong>, not a CWL/OGC-API-Processes JSON body. Algorithms are registered the classic way (<code>algorithm_config.yml</code> + <code>maap.register_algorithm_from_yaml_file()</code>), matching real MAAP-Project example repos (<code>example-dps-stac-from-cog</code>).</li>
-    <li><strong>Every named input becomes exactly one <code>&lt;wps:LiteralValue&gt;</code></strong> — a single scalar string, built from a plain Python dict (<code>kwargs</code>), which can't hold duplicate keys. <strong>There is no repeated-flag or array-input mechanism at the transport level.</strong> A container that needs a variable-count list of files (see §5) cannot receive it as N separate arguments in one job submission.</li>
-    <li><strong>DPS jobs have direct S3 read access at runtime.</strong> Confirmed via a real production MAAP algorithm (<code>example-dps-stac-from-cog</code>) that passes a raw <code>s3://...</code> path as a plain string parameter and reads it directly (via <code>rio</code>/GDAL) — no special per-job credential handling beyond the default AWS region.</li>
-    <li><strong>DPS controls the output location, not the caller.</strong> A job's local <code>output/</code> folder gets auto-uploaded to a DPS-managed path (<code>dps_output/&lt;ALGO_ID&gt;/&lt;ALGO_VERSION&gt;/&lt;IDENTIFIER&gt;/...</code>, with DPS layering its own date/time organization even when the caller sets <code>IDENTIFIER</code>). There is no way to predict a job's output href from a naming convention — it has to be retrieved via <code>job.outputs</code> / <code>get_job_output()</code> after the job completes, or (for outputs from a <em>previous</em> process's job, where the job_id was never retained) via a durable catalog. See §6.</li>
-    </ul>
-    <p>This matters directly for the design below: it's why fan-in has to be a manifest file (§5), and why cross-run output lookups need a catalog rather than a predictable S3 path (§6).</p>
-    <h2 id="4-the-explicit-args-contract-container-by-container">4. The explicit-args contract, container by container</h2>
-    <p>Per the <a href="input-contract.html">input contract</a>, the common design:</p>
+
+    <p>For the step-by-step procedure &mdash; getting a token, staging the static
+    data, registering the algorithms, launching a day &mdash; see
+    <a href="maap-deployment.html">Deploying to MAAP</a>. This page is the
+    reference for <em>how it works</em>.</p>
+
+    <h2 id="model">The execution model</h2>
+
+    <p>MAAP runs an algorithm as an <strong>OGC Application Package</strong>: a
+    CWL workflow plus a container image. The same four images that
+    <code>run_mur_pipeline.py</code> drives with <code>docker run</code> locally
+    are executed by MAAP's DPS instead, with <code>run_mur_maap.py</code>'s
+    <code>MAAPOrchestrator</code> standing in for the local
+    <code>MUROrchestrator</code>.</p>
+
+    <p>The two orchestrators share their decision logic on purpose. The
+    processing window, NRT/REA mode, rewrite decisions and day-range iteration
+    all live in <code>mur_window.py</code>, imported by both, and
+    <code>tests/test_mur_window.py</code> compares the two classes across sixty
+    consecutive dates so they cannot drift. What differs is only the executor:
+    one shells out to Docker, the other submits jobs.</p>
+
+    <div class="warn">
+      <p>Earlier versions of this page described submission as WPS&nbsp;2.0
+      Execute XML and said the OGC branch was not public. Both are now
+      obsolete. maap-py&nbsp;5&nbsp;and later expose OGC API Processes:
+      <code>deploy_algorithm</code>,
+      <code>deploy_algorithm_from_cwl_file</code>,
+      <code>submit_job</code>, <code>get_job_status</code>,
+      <code>get_job_result</code> and <code>list_jobs</code>.</p>
+    </div>
+
+    <p>Pre-built images are supported directly. An
+    <code>algorithm_config.yml</code> that sets
+    <code>algorithm_container_url</code> needs no Dockerfile at registration
+    time, so the images built by <code>utils/build_and_push.sh</code> are
+    referenced as they are. The four configs live under <code>maap/</code>.</p>
+
+    <h3>Why a second image per module</h3>
+
+    <p>Each module image sets
+    <code>ENTRYPOINT ["/opt/&lt;module&gt;/bin/entrypoint.sh"]</code>, which is
+    right for <code>docker run &lt;image&gt; --year 2026 &hellip;</code>. But
+    Docker <em>appends</em> a command to an ENTRYPOINT rather than replacing it,
+    and CWL supplies its own <code>baseCommand</code> &mdash; so a CWL job would
+    execute</p>
+<pre><code>entrypoint.sh /opt/landice/bin/entrypoint.sh --year 2026 ...</code></pre>
+    <p>and every MUR entrypoint rejects unknown positional arguments. MAAP's own
+    reference application declares no ENTRYPOINT for the same reason.
+    <code>maap/Dockerfile.dps</code> derives a <code>-dps</code> image that
+    clears it. The change is metadata only: no layer content, no MATLAB Runtime
+    rebuild, and local execution keeps using the base image untouched.</p>
+
+    <h2 id="contract">What a container receives</h2>
+
+    <p>Every input is a named flag carrying a single scalar &mdash; there are no
+    array inputs, and no <code>File</code> or <code>Directory</code> types. Flag
+    values are <code>s3://</code> hrefs, which
+    <code>common/bin/localize.sh</code> fetches with <code>aws s3 cp</code>
+    before MATLAB starts. The container's own scanning and lookup logic is
+    unchanged from local execution, because it operates on a materialized
+    directory either way.</p>
+
     <div class="table-wrap">
     <table>
-    <thead><tr><th>Container</th><th>Status</th><th>Static/date inputs</th><th>Fan-in inputs</th></tr></thead>
-    <tbody>
-    <tr><td><strong>landice</strong></td><td>✅ Converted</td><td>6 explicit static files (<code>--landmask-p01-file</code>, etc.) + <code>--year</code>/<code>--doy</code>, named-args only</td><td>None</td></tr>
-    <tr><td><strong>iquam</strong></td><td>✅ Converted</td><td><code>--year</code>/<code>--doy</code>/<code>--mode</code>/<code>--reference-date</code> + 5 more, named-args only, no internal date computation</td><td>None</td></tr>
-    <tr><td><strong>l2p</strong></td><td>✅ Converted</td><td>No static files; <code>--sensor</code>/<code>--region</code>/<code>--year</code>/<code>--doy</code>/<code>--rewrite</code>, named-args only</td><td>Yes — <code>--granules-manifest</code> (§5)</td></tr>
-    <tr><td><strong>mrva</strong></td><td>✅ Converted</td><td>3 static files + 3 per-day landice-output files, all explicit named flags; <code>--year</code>/<code>--doy</code>/<code>--mode</code>/<code>--sensors</code></td><td>Yes — <code>--sensor-inputs-manifest</code> (§5, BIC + iQuam unified)</td></tr>
-    </tbody>
+      <thead><tr><th>Module</th><th>Static inputs</th><th>Fan-in</th><th>RAM / cores</th></tr></thead>
+      <tbody>
+        <tr><td><code>mur-landice</code></td><td>6 explicit files</td><td>&mdash;</td><td class="mono">6 GiB / 2</td></tr>
+        <tr><td><code>mur-iquam</code></td><td>none (downloads its own)</td><td>&mdash;</td><td class="mono">4 GiB / 1</td></tr>
+        <tr><td><code>mur-l2p</code></td><td>none</td><td><code>--granules-manifest</code></td><td class="mono">8 GiB / 2</td></tr>
+        <tr><td><code>mur-mrva</code></td><td>2 required + 1 optional, plus 3 landice outputs</td><td><code>--sensor-inputs-manifest</code></td><td class="mono">64 GiB / 16</td></tr>
+      </tbody>
     </table>
     </div>
-    <p>All four containers now share the same named-flag interface, working identically whether the caller is <code>run_mur_pipeline.py</code> (values are local bind-mounted paths) or <code>run_mur_maap.py</code> (values are S3 hrefs, once <code>MAAPClient</code> is real) — see the <a href="input-contract.html#6-local-vs-maap-whats-identical-what-legitimately-differs">input contract</a> for the local-vs-MAAP split of responsibilities. MRVA's compiled entry point (<code>mrva4com_container.m</code>) receives its many resolved values via one generated JSON config file rather than individual positional MATLAB parameters — purely an internal <code>entrypoint.sh</code>-to-binary handoff detail; the container's own CLI is unaffected.</p>
-    <h2 id="5-fan-in-the-manifest-file-mechanism-implemented">5. Fan-in: the manifest-file mechanism (implemented)</h2>
-    <p>Because WPS 2.0 Execute only supports one scalar value per named input (§3), a variable-count input (L2P's granules, MRVA's BIC + iQuam files) can't be N repeated flags on real MAAP — it's a single flag pointing at a manifest file:</p>
-    <pre><code class="language-json">{
-      "files": [
-        { "path": "s3://podaac-bucket/mur/bic/AMSR2R/2026/216.bic", "sensor": "AMSR2R", "relative_path": "AMSR2R/2026/Global_AMSR2R_2026_216.bic.gz" },
-        { "path": "s3://podaac-bucket/mur/bic/MODISA/2026/218.bic", "sensor": "MODISA", "relative_path": "MODISA/2026/Global_MODISA_2026_218.bic.gz" }
-      ]
-    }</code></pre>
-    <p>One schema, reused by every fan-in consumer — a single <code>--&lt;name&gt;-manifest &lt;href&gt;</code> flag; <code>common/bin/localize.sh</code>'s <code>localize_manifest</code> function fetches the manifest itself, then materializes every listed entry into a fresh scratch directory (<code>relative_path</code> if present, else <code>basename(path)</code>) before MATLAB runs — the container's own scan/lookup logic (<code>l2p2bic.m</code>'s sensor-pattern-priority <code>dir()</code>, <code>mrva4com_container.m</code>'s per-sensor directory construction) needs <strong>no changes at all</strong>, since it operates on that materialized directory exactly as it did on a bind-mounted one. Locally, <code>run_mur_pipeline.py</code> writes the same-schema manifest into a temp file and bind-mounts it plus the source directories; on MAAP, <code>run_mur_maap.py</code> writes it to S3 via <code>MAAPClient.write_manifest</code> (still a stub) and passes the href.</p>
-    <p><strong>Manifests are scoped per run, not cumulative</strong> — generated fresh for the one day/window a given invocation needs (from whatever Python already knows: a STAC search result, a download log, a same-run job output), never an ever-growing file. See the design doc §3 for the full reasoning, including why the manifest itself is also worth <em>publishing</em> to STAC (§6) so a later standalone replay doesn't need to reconstruct it (not implemented yet — see §6).</p>
-    <h2 id="6-cross-run-output-discovery-why-mrva-needs-more-than-explicit-args">6. Cross-run output discovery (why MRVA needs more than explicit args)</h2>
-    <p>Within one <code>run_day()</code> call, a job's output href is retrievable directly via <code>get_job_output(job_id, name)</code> — the orchestrator still holds the <code>job_id</code> it just got back from <code>submit_job()</code>, and this is how landice's per-day outputs and this run's fresh L2P jobs' BIC outputs feed into MRVA's flags/manifest today. That breaks down across process boundaries: a <em>different</em> invocation of <code>run_mur_maap.py</code> (yesterday's cron run, or a standalone replay of one stage) has no <code>job_id</code> to query, and DPS's output path isn't predictable (§3) — so there's no way to reconstruct "where did that file land" from a naming convention.</p>
-    <p>The design (§5 of the common design doc) is to register each intermediate artifact — and the manifest that bundled them for a given day — as a STAC item when it's produced, and search STAC instead of guessing a path or a job_id when a later run needs to find something that already exists. Two specific gaps remain because of this:</p>
+
+    <p>Only MRVA needs a large instance. Its figure is not arbitrary: the
+    analysis reaches L=9, whose working set the memory analysis puts at roughly
+    60&nbsp;GB, with <code>infoMatrix</code> alone at 53.71&nbsp;GB. DPS has no
+    swap, so a request below that produces an out-of-memory failure at the
+    finest level rather than a clean scheduling refusal &mdash; which is much
+    harder to read from a job log.</p>
+
+    <p>Two flags are deliberately not exposed.
+    <code>--l4-reference-root</code> names a <em>directory</em> tree, and
+    <code>localize.sh</code>'s <code>aws s3 cp</code> has no
+    <code>--recursive</code>, so an <code>s3://</code> value passes through
+    unfetched and <code>verify_inputs_exist</code> rejects it &mdash; passing it
+    breaks the job rather than enabling the bootstrap fallback it was meant to
+    provide. iQUAM's <code>--work-dir</code>, <code>--log-dir</code> and
+    <code>--output-dir</code> are placement detail the caller cannot know on
+    DPS, so they keep in-container defaults.</p>
+
+    <h2 id="fanin">Fan-in: the manifest mechanism</h2>
+
+    <p>L2P's granules and MRVA's BIC + iQUAM inputs are variable-count, which a
+    scalar flag cannot express. Each is instead a single
+    <code>--&lt;name&gt;-manifest</code> flag pointing at a JSON file; see
+    <a href="input-contract.html">Input contract</a> for the schema.
+    <code>localize_manifest</code> fetches the manifest, then materializes every
+    listed entry into a scratch directory using its
+    <code>relative_path</code>.</p>
+
+    <p>A CWL <code>Directory</code> input, which MAAP would stage in
+    automatically, was considered and rejected for three reasons:</p>
+
     <ul>
-    <li><strong>Skipped L2P jobs</strong> (a fresh-enough BIC already exists, per <code>object_exists</code>) fall back to a deterministic <code>bic_prefix</code> string rather than a real catalog lookup — works today because Python controls that S3 key convention directly, but is the same kind of naming-convention reliance §3 warns against for DPS-controlled paths specifically.</li>
-    <li><strong>MRVA's prior-day coefficient</strong> (<code>--prior-csp-file</code>) is left unset entirely rather than guessed — <code>run_mur_maap.py</code>'s <code>run_day()</code> omits it, which is a real, unclosed gap (<code>mrva4com_container.m</code> falls back to bootstrapping from L4 whenever it's absent, so this doesn't break anything, it just means MRVA always bootstraps on MAAP today instead of chaining from the previous day).</li>
+      <li><strong>There is no single prefix to stage.</strong> L2P's granules are
+      arbitrary hrefs across PO.DAAC collections; MRVA's fan-in spans roughly
+      thirty unrelated DPS output prefixes.</li>
+      <li><strong>It would over-fetch catastrophically.</strong> A
+      <code>Directory</code> on <code>seasonal/</code> would transfer the whole
+      ~141&nbsp;GB archive to read the one 396&nbsp;MB file that day needs.</li>
+      <li><strong>It cannot carry identity.</strong> The manifest's
+      <code>sensor</code> and <code>relative_path</code> fields reproduce the
+      <code>&lt;SENSOR&gt;/&lt;YEAR&gt;/&lt;file&gt;</code> layout
+      <code>mrva4com_container.m</code>'s per-sensor scan expects. A staged
+      directory arrives in whatever shape the producer happened to use.</li>
     </ul>
-    <p><strong>Not implemented yet</strong> — scoped into its own STAC-cataloging design pass, since MRVA (and L2P's cache-skip) are the only places that actually need cross-run lookup (landice and iquam are always resubmitted fresh every day).</p>
-    <h2 id="7-whats-needed-to-actually-run-something-on-maap">7. What's needed to actually run something on MAAP</h2>
-    <p>In rough dependency order:</p>
-    <ol>
-    <li><strong>Implement <code>MAAPClient</code>'s methods</strong> against real SDKs: <code>stac_search</code>/<code>object_exists</code>/<code>list_objects</code>/<code>write_manifest</code> via <code>pystac-client</code>/<code>boto3</code>, <code>submit_job</code>/<code>wait_all</code>/<code>get_job_output</code> via <code>maap-py</code>, <code>publish_stac_item</code> via the STAC Transaction API.</li>
-    <li><strong>Register each container as a MAAP algorithm</strong> (<code>algorithm_config.yml</code> + <code>maap.register_algorithm_from_yaml_file()</code>) — all four named-flag interfaces are ready for this now.</li>
-    <li><strong>Implement the STAC-cataloging piece</strong> (§6) to close the prior-CSP and cross-run BIC-reuse gaps.</li>
-    <li><strong>Confirm landice's real output names</strong> (<code>landice_ice_p011</code>, <code>landice_grid_p01</code>, <code>landice_icefiles_p011</code> — used by <code>run_mur_maap.py</code>'s <code>get_job_output</code> calls for MRVA's landice-output flags) against a real registered landice algorithm; these aren't confirmed against any actual DPS output-naming convention yet, and <code>landice_icefiles_p011</code> specifically isn't confirmed to be a real landice output file at all (flagged the same way in <code>run_mur_pipeline.py</code>'s <code>resolve_mrva_landice_inputs</code>).</li>
-    <li><strong>Confirm the DPS output-staging behavior in practice</strong> (§3's <code>dps_output/...</code> path) against a real registered algorithm, since this document's description of it is inferred from docs and one real CWL example, not yet exercised against this pipeline's own algorithms.</li>
-    </ol>
-    <h2 id="8-exercising-what-exists-today">8. Exercising what exists today</h2>
-    <p>Even though nothing runs on real MAAP yet, the real, tested decision logic can be exercised directly:</p>
-    <pre><code class="language-bash">uv run pytest tests/test_run_mur_maap.py -v</code></pre>
-    <p>This runs <code>MAAPOrchestrator.run()</code>/<code>run_day()</code> against <code>FakeMAAPClient</code> (a fake that just records what would have been submitted) — useful for confirming the per-day job sequencing, NRT/REA window math, and BIC skip-logic without needing any real MAAP access. It's the same pattern used throughout <code>run_mur_maap.py</code>'s test suite; see <code>tests/test_run_mur_maap.py</code>'s <code>FakeMAAPClient</code> class for the fake's shape if you're extending it.</p>
+
+    <h2 id="stageout">Stage-out, and who chooses the path</h2>
+
+    <p>CWL collects <code>glob: ./output*</code> relative to the job's working
+    directory. Anything written to an absolute path outside it is simply not
+    collected &mdash; a job would run to completion and stage out an empty
+    directory.</p>
+
+    <p>All four containers therefore derive their output root from
+    <code>MUR_OUTPUT_ROOT</code>, defaulting to <code>$PWD/output</code>.
+    <code>run_mur_pipeline.py</code> passes
+    <code>MUR_OUTPUT_ROOT=/data/output</code> so local behaviour is unchanged.
+    MRVA is the exception: its paths are compiled into
+    <code>mrva4com_container.m</code>, so until the next MATLAB rebuild the
+    entrypoint symlinks <code>/data/output/{csp,netcdf}</code> at the real
+    output directory, with a copy fallback if the symlink is refused. It logs
+    which branch fired.</p>
+
+    <div class="note">
+      <p><strong>Who controls a path.</strong> Anything <em>we</em> write &mdash;
+      static resources, manifests, promoted artifacts, STAC items &mdash; goes
+      to a key we choose. Anything <em>DPS</em> writes lands under
+      <code>dps_output/&lt;algorithm&gt;/&lt;tag&gt;/&lt;date&gt;/&lt;time&gt;/</code>,
+      where the job tag is the only caller-controlled component. That split is
+      what the promotion step below exists to bridge.</p>
+    </div>
+
+    <h2 id="catalog">Where generated files are catalogued</h2>
+
+    <p>Three layers, with different owners.</p>
+
+    <h3>1. Jobs &mdash; MAAP maintains this</h3>
+    <p><code>maap.list_jobs()</code> is a queryable record of every job ever
+    submitted, filterable by process, status, queue, tag and datetime range.
+    Nothing to maintain. This is why job tags are deterministic and
+    self-describing (<code>mur.&lt;run_id&gt;.&lt;role&gt;.&lt;key&gt;</code>)
+    &mdash; it makes that catalogue queryable by meaning rather than by opaque
+    id. But it is <em>job-shaped</em>, not product-shaped: finding a particular
+    BIC means first finding the job that produced it.</p>
+
+    <h3>2. Intermediates &mdash; deterministic keys, not STAC</h3>
+    <p>BIC files, iQUAM <code>.bii</code>, landice per-day outputs and the
+    <code>.c06</code> coefficient are promoted after their job succeeds: copied
+    from the DPS-chosen path to a canonical key under the workspace bucket
+    (<code>mur_maap/paths.py</code>). That converts a path we do not control
+    into one we do, at the one moment we still hold the job id.</p>
+
+    <p>Without it, the BIC cache is decorative &mdash; an artifact left where
+    DPS put it is invisible to tomorrow's run, whose only route back to it is a
+    job id a later invocation does not have. Promotion is what makes
+    <code>--prior-csp-file</code> work too: this day's coefficient lands at a
+    known key, and the next day's run chains from it instead of
+    bootstrapping.</p>
+
+    <p>These are deliberately <em>not</em> registered in STAC. They churn daily,
+    they are internal plumbing, and cataloguing them would mean thousands of
+    items nobody queries. A single S3 <code>HEAD</code> is cheaper and simpler
+    than a catalogue round-trip.</p>
+
+    <h3>3. The L4 granule &mdash; STAC</h3>
+    <p>The product is where discovery is the point.
+    <code>mur_maap/stac.py</code> builds the Item as a pure function, so the
+    metadata shape is testable without an endpoint or credentials. The Item id
+    carries the mode (<code>mur-l4-20260806-nrt</code>), because a day is first
+    produced as NRT and later reprocessed as REA &mdash; collapsing both onto
+    one id would let the reanalysis silently replace the interim.</p>
+
+    <p>The static resources are not catalogued either, for the same reason as
+    the intermediates: containers receive explicit hrefs built by joining a
+    configured root with a fixed relative path, so nothing ever searches for
+    them.</p>
+
+    <h2 id="state">Surviving an idle-culled workspace</h2>
+
+    <p>One analysis day is 28 jobs &mdash; landice, iQUAM, 25 L2P jobs across
+    five sensors and their day windows, then MRVA. That is far longer than any
+    idle timeout, and the JupyterHub server is culled when idle. The home
+    directory and the S3 buckets persist; a running process does not.</p>
+
+    <p>So the orchestrator persists submitted job ids and per-stage status, and
+    is re-enterable rather than blocking. Two fields carry the design:</p>
+
+    <ul>
+      <li><strong><code>reference_today</code> is frozen at run creation.</strong>
+      Recomputing it on resume would shift the NRT/REA boundary and every
+      rewrite decision mid-flight, days after the jobs were planned.</li>
+      <li><strong><code>config_fingerprint</code></strong> refuses a resume
+      against an edited config, which would silently change what already-
+      submitted jobs mean.</li>
+    </ul>
+
+    <p>If the state file itself is lost, every job tag is recomputable from the
+    plan alone, so <code>list_jobs(tag=&hellip;)</code> rebuilds it from live
+    MAAP truth.</p>
+
+    <h2 id="status">Current state</h2>
+
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Piece</th><th>State</th></tr></thead>
+      <tbody>
+        <tr><td>Shared window / config logic (<code>mur_window</code>, <code>mur_config</code>)</td><td>implemented</td></tr>
+        <tr><td>Stage-out fix across all four containers</td><td>implemented</td></tr>
+        <tr><td>Promotion to canonical keys; prior-coefficient chaining</td><td>implemented</td></tr>
+        <tr><td>L4 STAC Item construction</td><td>implemented</td></tr>
+        <tr><td>Four <code>algorithm_config.yml</code> + <code>-dps</code> images</td><td>implemented</td></tr>
+        <tr><td>Static-resources uploader and verifier</td><td>implemented</td></tr>
+        <tr><td>Generated CWL workflows</td><td>run <code>utils/generate_cwl.sh</code></td></tr>
+        <tr><td><code>MaapPyClient</code> &mdash; the real client</td><td>pending</td></tr>
+        <tr><td>Run state, polling and the <code>mur-maap</code> CLI</td><td>pending</td></tr>
+        <tr><td>Granule staging via <code>earthaccess</code></td><td>pending</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p><code>MAAPClient</code>'s methods are stubs that raise
+    <code>NotImplementedError</code>; the orchestrator's decision logic is real
+    and covered by <code>tests/test_run_mur_maap.py</code> against a fake
+    client. Everything above runs offline with no MAAP installed.</p>
+
+    <h2 id="unverified">Still unverified</h2>
+
+    <p>Each of these is an assumption that has not met a real endpoint. They are
+    listed rather than resolved because guessing would be worse than waiting.</p>
+
+    <ul>
+      <li><strong><code>get_job_result()</code>'s return shape</strong> &mdash;
+      a directory prefix, per-file hrefs, or a dict keyed by CWL output id. It
+      gates output matching, so one real landice job should be run and its
+      response recorded before any code is written against it.</li>
+      <li><strong>A queue offering 64&nbsp;GiB and 16 cores</strong> for MRVA.
+      Nothing else needs one. Worth confirming before registering anything,
+      since it is the cheapest question to ask and the most expensive to
+      discover late.</li>
+      <li><strong>DPS ephemeral disk.</strong> L2P materializes every granule to
+      scratch &mdash; a MODIS day is roughly 288 granules at ~20&nbsp;MB, and a
+      worst case exceeds 20&nbsp;GB. <code>outdir_max</code> does not reserve
+      scratch.</li>
+      <li><strong>Outbound egress from DPS workers.</strong> landice fetches
+      OSI-SAF sea ice; iQUAM fetches NOAA STAR.</li>
+      <li><strong>The runtime UID/GID</strong>, which decides whether MRVA's
+      symlink stage-out works or falls back to copying.</li>
+      <li><strong><code>submit_job(inputs=)</code>'s shape</strong> &mdash;
+      plain <code>{"name": value}</code> or OGC
+      <code>{"name": {"value": &hellip;}}</code>, and whether non-string scalars
+      are accepted.</li>
+      <li><strong><code>list_jobs(tag=)</code></strong> &mdash; exact or prefix
+      matching, and whether <code>dedup</code> keys on inputs or tag. Promotion
+      to canonical keys was chosen partly so cross-run lookup does not depend on
+      the answer.</li>
+    </ul>
+
+    <div class="note">
+      <p>One design decision is provisional rather than unverified. L2P granules
+      are copied into the workspace bucket before a job reads them, because
+      <code>localize.sh</code>'s plain <code>aws s3 cp</code> cannot
+      authenticate to a DAAC &mdash; every DAAC requires temporary S3
+      credentials via Earthdata Login. That costs duplicate storage. The cleaner
+      fix is teaching <code>localize.sh</code> to mint those credentials, but it
+      touches the file all four containers share and means rebuilding every
+      image, so a <code>maap.granule_staging</code> config switch leaves the
+      door open.</p>
+    </div>
 
     <footer>
       <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. This site is

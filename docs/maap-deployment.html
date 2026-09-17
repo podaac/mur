@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deploying to MAAP · MUR SST</title>
+<meta name="description" content="Step-by-step: stage the static data, publish the images, register the algorithms, run a day.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<button class="menu-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+<div class="layout">
+<aside class="sidebar">
+  <a class="brand" href="index.html">
+    <strong>MUR SST</strong>
+    <span>Multi-scale Ultra-high Resolution analysis</span>
+  </a>
+  <nav>
+    <div class="nav-group">Start here</div>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quick start</a>
+    <a href="architecture.html">Architecture</a>
+    <div class="nav-group">How it works</div>
+    <a href="algorithm.html">The MRVA algorithm</a>
+    <a href="lifecycle.html">Data lifecycle</a>
+    <a href="sequence.html">Daily execution</a>
+    <a href="mrva-internals.html">MRVA internals</a>
+    <div class="nav-group">Operating it</div>
+    <a href="configuration.html">Configuration</a>
+    <a href="static-data.html">Static input data</a>
+    <a href="input-contract.html">Input contract</a>
+    <a href="sensors.html">Adding a sensor</a>
+    <a href="maap.html" aria-current="page">Running on MAAP</a>
+    <div class="nav-group">Containers</div>
+    <a href="container-landice.html">Land/ice</a>
+    <a href="container-l2p.html">L2P</a>
+    <a href="container-iquam.html">iQUAM</a>
+    <a href="container-mrva.html">MRVA</a>
+    <div class="nav-group">Reference</div>
+    <a href="landice-encoding.html">Land/ice encoding</a>
+    <a href="future.html">Future enhancements</a>
+    <div class="nav-group">Project</div>
+    <a href="https://github.com/podaac/mur">Source on GitHub</a>
+  </nav>
+</aside>
+<main>
+  <div class="content">
+    <h1>Deploying to MAAP</h1>
+    <p class="lede">From a MAAP account to a processed day: staging ~142&nbsp;GiB of
+    static data, publishing the images, registering four algorithms, and
+    launching the first job.</p>
+
+    <div class="toc">
+      <b>On this page</b>
+      <ul>
+        <li><a href="#ask">0. Ask MAAP ops first</a></li>
+        <li><a href="#workspace">1. Start an OGC workspace</a></li>
+        <li><a href="#token">2. Get a token that works off-platform</a></li>
+        <li><a href="#static">3. Stage the static data</a></li>
+        <li><a href="#images">4. Build and publish the images</a></li>
+        <li><a href="#register">5. Generate, validate, deploy</a></li>
+        <li><a href="#firstjob">6. One landice job, by hand</a></li>
+        <li><a href="#day">7. A full day</a></li>
+      </ul>
+    </div>
+
+    <p>This is the procedure. For how any of it works &mdash; the CWL model, the
+    manifest fan-in, promotion, the catalogue split &mdash; see
+    <a href="maap.html">Running on MAAP</a>.</p>
+
+    <p>The order is a dependency chain, not a preference. Step&nbsp;3's fast path
+    gates the smoke test in step&nbsp;6, and step&nbsp;6 gates writing any client
+    code.</p>
+
+    <h2 id="ask">0. Ask MAAP ops first</h2>
+
+    <div class="warn">
+      <p><strong>Does any DPS queue offer 64&nbsp;GiB and 16 cores?</strong> MRVA
+      is the only module that needs a large instance &mdash; landice, iQUAM and
+      L2P all fit on small ones. If no queue reaches it, that is a blocking
+      finding for the whole migration, and it costs one email now versus
+      discovering it after three algorithms are already registered.</p>
+    </div>
+
+    <p>Three more worth putting in the same message:</p>
+    <ul>
+      <li><strong>Ephemeral disk</strong> on the worker. L2P materializes every
+      granule to scratch before MATLAB runs &mdash; a MODIS day is roughly 288
+      granules at ~20&nbsp;MB, and a worst case exceeds 20&nbsp;GB.
+      <code>outdir_max</code> does not reserve scratch.</li>
+      <li><strong>Outbound internet</strong> from workers. landice fetches
+      OSI-SAF sea ice; iQUAM fetches NOAA STAR.</li>
+      <li><strong>Queue names</strong> available to you.</li>
+    </ul>
+
+    <h2 id="workspace">1. Start an OGC workspace</h2>
+
+    <p>The image choice gates OGC entirely. The default ADE and standard Hub
+    images ship the non-OGC v4 stack; only custom images carry
+    maap-py&nbsp;&ge;&nbsp;5, Algorithm Registration&nbsp;&ge;&nbsp;v1 and
+    Jobs&nbsp;&ge;&nbsp;v2. The published workspace table has blank image-path
+    cells, so the container registry is the only authoritative source.</p>
+
+    <p>At <a href="https://hub.maap-project.org/">hub.maap-project.org</a>, log
+    in with NASA Earthdata, choose <strong>Other</strong> from the Environment
+    dropdown, and paste:</p>
+<pre><code>mas.maap-project.org/root/maap-workspaces/2i2c/pangeo:v6.0.0</code></pre>
+
+    <p>Then once, in the workspace terminal. The home directory persists across
+    sessions and across workspaces, so this survives restarts:</p>
+<pre><code>git clone &lt;mur repo&gt; ~/mur
+cd ~/mur &amp;&amp; pip install -e . --no-deps
+pip install 'boto3&gt;=1.34' earthaccess
+
+python -c "import mur_maap, maap; print('ok')"</code></pre>
+
+    <p><code>--no-deps</code> is deliberate: the image already pins numpy,
+    netCDF4 and matplotlib, and the orchestrator needs only stdlib plus boto3,
+    maap-py and earthaccess.</p>
+
+    <h2 id="token">2. Get a token that works off-platform</h2>
+
+    <p>Inside a workspace, authentication is ambient &mdash; <code>MAAP()</code>
+    just works. Anywhere else, maap-py needs <code>MAAP_PGT</code>. It is
+    <em>not</em> an AWS profile: maap-py exchanges that token for temporary AWS
+    credentials itself.</p>
+
+<pre><code># in the workspace, confirm what the environment already has
+printf %s "$MAAP_PGT" | wc -c
+printf %s "$MAAP_PGT" | sha256sum</code></pre>
+
+    <p>If that is empty, generate one at
+    <a href="https://console.maap-project.org/profile/tokens">console.maap-project.org/profile/tokens</a>,
+    which exists for off-platform automation.</p>
+
+    <div class="warn">
+      <p><strong>A MAAP token is <code>jwt:</code> followed by a JWT</strong>, and
+      a JWT always begins <code>eyJ</code> (base64 for <code>{"</code>).
+      Selecting a wrapped value with the mouse in a browser terminal can clip a
+      leading character, leaving <code>wt:eyJ&hellip;</code>. The value still
+      looks like a long opaque blob, the length is one short, and the server
+      answers only <code>{"message": "Invalid session or insufficient
+      permissions."}</code>. Compare length and hash at both ends rather than
+      eyeballing it; <code>--check</code> also flags a clipped prefix.</p>
+    </div>
+
+    <p>On the target host, keep it out of shell history:</p>
+<pre><code>read -rsp 'MAAP_PGT: ' MAAP_PGT &amp;&amp; export MAAP_PGT
+
+# or persist it, which is worth it if a long upload needs restarting
+umask 077
+printf 'export MAAP_PGT=%q\n' 'PASTE_HERE' &gt; ~/.maap-token
+source ~/.maap-token</code></pre>
+
+    <h2 id="static">3. Stage the static data</h2>
+
+    <p>377 objects, ~142&nbsp;GiB. Run the environment check first &mdash; it
+    proves the things that otherwise fail late:</p>
+
+<pre><code>python utils/upload_static_resources.py --check</code></pre>
+
+    <p>It reports whether <code>MAAP_PGT</code> is set and well-formed, whether
+    maap-py is&nbsp;&ge;&nbsp;5, which bucket and prefix your credentials grant,
+    when they expire, and &mdash; the one a <code>HEAD</code> cannot tell you
+    &mdash; whether a real write succeeds, by doing a put/get/delete round-trip
+    on a probe key. It finishes by printing the config values it discovered.</p>
+
+    <div class="note">
+      <p><code>GetBucketLocation</code> returning <code>AccessDenied</code> is
+      expected and harmless. The workspace session policy scopes you to your own
+      prefix rather than bucket metadata; uploads are unaffected.</p>
+    </div>
+
+    <h3>Pick the right source mode</h3>
+
+    <p>The static tree exists in two shapes, and choosing wrongly produces a
+    plan full of missing files rather than an error that explains itself.</p>
+
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Flag</th><th>Use when</th></tr></thead>
+      <tbody>
+        <tr><td><code>--from-config &lt;config&gt;</code></td><td>The tree is assembled under one root &mdash; the usual case. Reads <code>landice.static_resources_dir</code>, so the upload reads exactly the tree the local pipeline reads.</td></tr>
+        <tr><td><code>--source-root &lt;dir&gt;</code></td><td>Same shape, path given explicitly.</td></tr>
+        <tr><td><code>--from-prod-layout</code></td><td>The files are still scattered across their original NAS locations (<code>GRIDS_DIR</code>, <code>ICE_DIR</code>, <code>SEASONAL_DIR</code>, <code>POLARCAP_FILE</code>).</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3>Run it where the data is</h3>
+
+    <p>Uploading from the host that holds the data moves the bytes once and needs
+    no scratch disk. Going via an intermediate machine moves twice that and needs
+    142&nbsp;GiB free. Do not tar first &mdash; that produces a single
+    142&nbsp;GiB archive which then has to be unpacked somewhere to become
+    objects again.</p>
+
+<pre><code># look before moving anything: prints every resolved source path,
+# and flags whatever is missing
+python utils/upload_static_resources.py \
+    --from-config config.container.json --include-optional \
+    --dest s3://maap-ops-workspace/&lt;user&gt;/mur/static-resources --dry-run
+
+# then, under nohup so a dropped connection does not kill it
+nohup python utils/upload_static_resources.py \
+    --from-config config.container.json --include-optional \
+    --dest s3://maap-ops-workspace/&lt;user&gt;/mur/static-resources \
+    --ledger ~/mur_static_ledger.jsonl &gt; ~/mur_upload.log 2&gt;&amp;1 &amp;</code></pre>
+
+    <p>If that host cannot install maap-py or reach the MAAP API, credentials can
+    come from elsewhere. <code>--credentials-command</code> is re-run on every
+    refresh, so anything that mints fresh credentials works &mdash; including an
+    ssh back to a workspace. Copying a credential set across by hand cannot
+    work: they expire in about an hour and the upload takes several.</p>
+
+    <h3>Resuming</h3>
+
+    <p>Re-run the identical command. A ledger records each completed file and is
+    <code>fsync</code>'d per line, so a killed run loses at most the file in
+    flight; anything not in the ledger is checked with a <code>HEAD</code>.
+    There is no risk of a truncated object &mdash; S3 only materializes one when
+    the multipart upload completes, so a resume finds either a whole file or
+    nothing.</p>
+
+    <p>A killed run does leave the parts it had already uploaded. They are
+    invisible to a normal listing and billed as storage:</p>
+<pre><code>python utils/upload_static_resources.py ... --abort-stale-multiparts</code></pre>
+
+    <h3>Verify from the workspace</h3>
+
+<pre><code>python utils/upload_static_resources.py --verify-only --include-optional</code></pre>
+
+    <p>Three layers, of which the second is the one that matters: it calls the
+    orchestrator's own <code>resolve_landice_static_hrefs()</code> and
+    <code>resolve_mrva_static_hrefs()</code> against the real bucket for all 366
+    days, including the 366&nbsp;&rarr;&nbsp;365 fold. If that passes, the
+    orchestrator cannot fail on a missing static input, because the question was
+    answered by the same code that will ask it.</p>
+
+    <h2 id="images">4. Build and publish the images</h2>
+
+    <p>Two builds. The base images carry the MATLAB Runtime and need a Linux
+    x86-64 host with licence access. The <code>-dps</code> variants are metadata
+    only and take about a second each.</p>
+
+<pre><code># an explicit tag, not the default branch-and-hash: the CWL pins
+# dockerPull to an exact tag and algorithm_version must match it
+./utils/build_and_push.sh --push --tag 1.0.0
+
+./utils/build_dps_images.sh --tag 1.0.0 --push --verify</code></pre>
+
+    <p>A CWL <code>DockerRequirement</code> carries no registry credentials, so
+    DPS cannot pull a private package. <code>--verify</code> checks anonymous
+    pull; if it fails, make each package public in the registry's settings.</p>
+
+    <h2 id="register">5. Generate, validate, deploy</h2>
+
+<pre><code>pip install cwltool ogc_ap_validator pyyaml
+./utils/generate_cwl.sh</code></pre>
+
+    <p>That generates each workflow from
+    <code>maap/&lt;module&gt;/algorithm_config.yml</code>, cross-checks that
+    <code>dockerPull</code> is your image rather than a placeholder and that
+    <code>NetworkAccess</code> is present, then runs
+    <code>cwltool --validate --strict</code> and <code>ap-validator</code>. The
+    generated CWL is committed, because it is the deployment artifact and the
+    generator expects hand-edits.</p>
+
+    <p>Deploy from the workspace, cheapest first:</p>
+<pre><code>from maap.maap import MAAP
+maap = MAAP()
+
+for m in ['iquam', 'landice', 'l2p', 'mrva']:
+    r = maap.deploy_algorithm_from_cwl_file(
+        file_path=f'/home/jovyan/mur/maap/cwl_workflows/process_mur-{m}_1.0.0.cwl')
+    print(m, r.status_code, r.json())      # 202 == accepted
+
+maap.get_deployment_status(deployment_id).json()["status"]
+maap.list_algorithms().json()</code></pre>
+
+    <p>That order is not arbitrary. Each step proves exactly one new mechanism:
+    iQUAM has no static inputs and no S3 reads, so it proves registration and
+    stage-out; landice proves S3 static localization; L2P proves the manifest
+    fan-in and the scratch-disk assumption; MRVA proves the large queue.</p>
+
+    <h2 id="firstjob">6. One landice job, by hand</h2>
+
+    <div class="warn">
+      <p><strong>Stop here before writing client code.</strong>
+      <code>get_job_result()</code>'s return shape is undocumented &mdash; it may
+      be a directory prefix, per-file hrefs, or a dict keyed by CWL output id
+      &mdash; and three later pieces depend on which. Run one job, record the
+      response verbatim, then build against what it actually returns.</p>
+    </div>
+
+<pre><code>root = "s3://maap-ops-workspace/&lt;user&gt;/mur/static-resources"
+
+resp = maap.submit_job(
+    process_id="mur-landice:1.0.0",
+    queue="&lt;queue from MAAP ops&gt;",
+    tag="mur.smoke.landice",            # also organises dps_output/
+    inputs={
+        "year": "2026", "doy": "164",
+        "landmask-p01-file":         f"{root}/grids/maskGLOBp01deg.gds",
+        "gridindex-north-p01-file":  f"{root}/mat/p01/saf2north.mat",
+        "gridindex-south-p01-file":  f"{root}/mat/p01/saf2south.mat",
+        "landmask-p011-file":        f"{root}/grids/maskGlob1km.gds",
+        "gridindex-north-p011-file": f"{root}/mat/p011/saf2north.mat",
+        "gridindex-south-p011-file": f"{root}/mat/p011/saf2south.mat",
+    })
+job_id = resp.json()["id"]
+
+maap.get_job_status(job_id).json()
+
+import json; print(json.dumps(maap.get_job_result(job_id).json(), indent=2))</code></pre>
+
+    <p>Three things to confirm from that output: that <code>output/</code>
+    contains <code>p01/</code> and <code>p011/</code> with real files &mdash; if
+    it is empty, stage-out is wrong and nothing downstream can work; the real
+    names behind <code>landice_ice_p011</code>,
+    <code>landice_grid_p01</code> and <code>landice_icefiles_p011</code>; and
+    which subdirectory <code>icefiles_YYYY_DDD.txt</code> lands in.</p>
+
+    <p>Stage-out can be rehearsed locally first, without touching MAAP. Note the
+    <code>-w</code> and the absence of any <code>-v &hellip;:/output</code>
+    &mdash; that deliberately emulates CWL's &ldquo;working directory is the
+    output directory&rdquo; contract:</p>
+
+<pre><code>mkdir -p /tmp/cwl-smoke
+docker run --rm --platform linux/amd64 --user "$(id -u):$(id -g)" --group-add 0 \
+  -v /tmp/cwl-smoke:/tmp/cwl-smoke -w /tmp/cwl-smoke \
+  ghcr.io/podaac/mur/landice-dps:1.0.0 --year 2026 --doy 164 --landmask-p01-file ...
+
+ls -R /tmp/cwl-smoke/output      # empty here means empty on DPS</code></pre>
+
+    <h2 id="day">7. A full day</h2>
+
+    <p>One analysis day is 28 jobs: landice, iQUAM, 25 L2P jobs across five
+    sensors and their day windows, then MRVA. Far longer than any idle timeout,
+    which is why the run is checkpointed rather than blocking.</p>
+
+<pre><code># offline, no credentials needed: exercises every decision, path builder
+# and argument dict, and prints the full job table
+mur-maap run --config config.maap.json -p -1 --dry-run
+
+# --once does one non-blocking sweep and exits; exit code 2 means
+# "still running", so watch or cron drives it trivially
+mur-maap run --config config.maap.json -p -1 --preprocess-only --once
+mur-maap status --latest
+mur-maap resume --latest --once        # after each cull</code></pre>
+
+    <div class="note">
+      <p>The <code>mur-maap</code> CLI is designed but not yet implemented
+      &mdash; see <a href="maap.html#status">Current state</a>. Until it exists,
+      <code>MAAPOrchestrator</code> can be driven directly from a notebook once
+      <code>MAAPClient</code> is real.</p>
+    </div>
+
+    <p>Outputs accumulate under
+    <code>~/my-private-bucket/dps_output/&lt;algorithm&gt;/&lt;tag&gt;/&hellip;</code>,
+    which is a real path in the workspace filesystem &mdash; so the existing
+    viewer reads them with no changes:</p>
+
+<pre><code>mur-viewer ~/my-private-bucket/dps_output/mur-mrva/&lt;tag&gt;/.../*.nc --info
+mur-web-viewer                          # Streamlit on :8501</code></pre>
+
+    <footer>
+      <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. This site is
+      the documentation &mdash; there is no separate Markdown copy to fall out of date.</p>
+    </footer>
+  </div>
+</main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="assets/site.js"></script>
+</body>
+</html>
