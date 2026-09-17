@@ -495,7 +495,13 @@ def check_environment(args) -> int:
         loc = s3.get_bucket_location(Bucket=bucket).get("LocationConstraint")
         print(f"    region           {loc or 'us-east-1'}")
     except Exception as exc:                              # noqa: BLE001
-        print(f"    region           could not determine ({exc})")
+        if "GetBucketLocation" in str(exc) or "AccessDenied" in str(exc):
+            # The workspace session policy grants access to your prefix, not
+            # to bucket-level metadata. Uploads are unaffected.
+            print("    region           not readable (session policy scopes you to")
+            print("                     your prefix, not bucket metadata) -- harmless")
+        else:
+            print(f"    region           could not determine ({exc})")
 
     # 6. A real write. Read-only credentials, a prefix you cannot write to, or
     #    a bucket policy that only permits certain key shapes all look fine
@@ -520,9 +526,13 @@ def check_environment(args) -> int:
     print(f'      "maap":    {{ "workspace_root": "{resp["authorized_s3_paths"][0]["uri"]}" }}')
     print(f'      "landice": {{ "static_resources_dir": "{dest}" }}')
     print(f'      "mrva":    {{ "static_resources_dir": "{dest}" }}')
-    print("\n    Then, fast path first (~1.6 GiB, minutes):")
+    print("\n    Then, from the host holding the static data:")
+    print("      # tree already assembled under one root (the usual case):")
     print("      python utils/upload_static_resources.py \\")
-    print("          --from-prod-layout --include-optional --no-seasonal --verify")
+    print("          --from-config config.container.json --include-optional \\")
+    print(f"          --dest {dest} --dry-run")
+    print("      # or, if the files are still scattered across their NAS")
+    print("      # locations, swap --from-config for --from-prod-layout.")
 
     print("\n" + ("CHECK PASSED" if ok else "CHECK FAILED"))
     return 0 if ok else 1
