@@ -293,10 +293,16 @@ maap.list_algorithms().json()</code></pre>
       response verbatim, then build against what it actually returns.</p>
     </div>
 
+<p>The id <code>submit_job</code> takes is the numeric <code>processID</code>
+    from the catalogue &mdash; not the <code>id</code> field
+    (<code>"mur-landice"</code>), and not a tag-like <code>name:version</code>.
+    Re-registering at a new version mints a new <code>processID</code>, so look
+    it up rather than pinning one.</p>
+
 <pre><code>root = "s3://maap-ops-workspace/&lt;user&gt;/mur/static-resources"
 
 resp = maap.submit_job(
-    process_id="mur-landice:2.0.0",
+    process_id=LANDICE_PROCESS_ID,   # the numeric processID, e.g. 65
     queue="&lt;queue from MAAP ops&gt;",
     tag="mur.smoke.landice",            # also organises dps_output/
     inputs={
