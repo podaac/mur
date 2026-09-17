@@ -27,7 +27,7 @@ usage() {
     echo "    -v /local/static/maskGlob1km.gds:/input/landmask-p011.gds:ro \\"
     echo "    -v /local/static/saf2north-p011.mat:/input/gridindex-north-p011.mat:ro \\"
     echo "    -v /local/static/saf2south-p011.mat:/input/gridindex-south-p011.mat:ro \\"
-    echo "    -v /local/output:/output \\"
+    echo "    -v /local/output:/data/output \\"
     echo "    mur-landice:latest --year 2025 --doy 220 \\"
     echo "      --landmask-p01-file /input/landmask-p01.gds \\"
     echo "      --gridindex-north-p01-file /input/gridindex-north-p01.mat \\"

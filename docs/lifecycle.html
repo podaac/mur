@@ -361,7 +361,7 @@
     <p><strong>Container Execution:</strong></p>
     <pre><code class="language-bash">docker run --rm \
       -v /nas2/source/podaac/MODISA:/input:ro \
-      -v /nas2/bic/MODISA:/output \
+      -v /nas2/bic/MODISA:/data/output \
       ghcr.io/podaac/mur-l2p:latest \
       2025 042 MODISA G10 nrt 2</code></pre>
     <p><strong>Output:</strong></p>
@@ -430,7 +430,7 @@
     <pre><code class="language-bash"># Download ice concentration for analysis day
     docker run --rm \
       -v /nas2/source/osi-saf:/input \
-      -v /nas2/gds:/output \
+      -v /nas2/gds:/data/output \
       ghcr.io/podaac/mur-landice:latest \
       2025 042 G10 p01
 

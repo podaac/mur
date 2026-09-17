@@ -547,8 +547,8 @@
       -v /nas2/static-resources/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro \
       -v /nas2/static-resources/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro \
       -v /nas2/static-resources/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro \
-      -v /nas2/output/p011:/output/p011 \
-      -v /nas2/output/p01:/output/p01 \
+      -v /nas2/output/p011:/data/output/p011 \
+      -v /nas2/output/p01:/data/output/p01 \
       mur-landice:latest \
       --year 2025 --doy 042 \
       --landmask-p01-file /input/landmask-p01.gds \

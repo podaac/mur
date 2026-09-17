@@ -103,6 +103,17 @@ assert_eq "localize_all_inputs fetches only the s3:// flag, leaves local flags u
 assert_fails "localize_all_inputs fails when s3 fetch fails" \
     "$STUB_AWS_FAIL; parse_args $MIXED_FLAGS; localize_all_inputs"
 
+# --- the documented mount must be the one the container actually writes to ---
+#
+# usage() previously told the user to mount /output, a directory no image ever
+# created. It appeared to work only because `docker run -v` auto-creates a
+# mountpoint as root. With the output root defaulting to $PWD/output -- which
+# is /data/output, given WORKDIR /data -- following that advice writes nowhere
+# the user is looking.
+usage_mount=$(run_case 'usage' | grep -oE '\-v [^:]+:[^ ]*output[^ ]*' | head -1 | sed 's/.*://')
+assert_eq "usage() documents the mount the image actually provisions" \
+    "/data/output" "$usage_mount"
+
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
     echo "All tests passed."
