@@ -696,6 +696,60 @@ def print_plan(entries: Iterable[layout.Entry], dest: str, plan_json=None) -> in
     return sum(1 for e in missing if e.required)
 
 
+def abort_stale_multiparts(s3, bucket, prefix, *, older_than_hours=6, dry_run=False) -> int:
+    """Abort multipart uploads left behind by a killed run.
+
+    A file above the multipart threshold uploads in parts, and the object only
+    appears once CompleteMultipartUpload succeeds. So a process killed
+    mid-file (an ssh drop, SIGHUP, OOM) leaves no object -- which is good,
+    because it means a resume never mistakes a partial file for a complete
+    one -- but it does leave the uploaded parts sitting in the bucket. They
+    are invisible to list_objects and they are billed as storage until
+    aborted.
+
+    Only uploads older than `older_than_hours` are touched, so this is safe to
+    run while another upload of the same tree is in flight.
+    """
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - \
+        datetime.timedelta(hours=older_than_hours)
+
+    stale, skipped_recent = [], 0
+    try:
+        paginator = s3.get_paginator("list_multipart_uploads")
+        for page in paginator.paginate(Bucket=bucket, Prefix=f"{prefix}/" if prefix else ""):
+            for upload in page.get("Uploads", []):
+                if upload["Initiated"] < cutoff:
+                    stale.append(upload)
+                else:
+                    skipped_recent += 1
+    except Exception as exc:                              # noqa: BLE001
+        # The workspace session policy may not grant ListMultipartUploads.
+        # That is not fatal -- it just means orphans cannot be cleaned here.
+        print(f"  could not list multipart uploads ({exc})")
+        return 0
+
+    if not stale and not skipped_recent:
+        print("  no incomplete multipart uploads")
+        return 0
+    if skipped_recent:
+        print(f"  {skipped_recent} incomplete upload(s) newer than "
+              f"{older_than_hours}h left alone (possibly still running)")
+
+    for upload in stale:
+        age = datetime.datetime.now(datetime.timezone.utc) - upload["Initiated"]
+        hours = age.total_seconds() / 3600
+        if dry_run:
+            print(f"  would abort  {upload['Key']}  ({hours:.1f}h old)")
+            continue
+        try:
+            s3.abort_multipart_upload(Bucket=bucket, Key=upload["Key"],
+                                      UploadId=upload["UploadId"])
+            print(f"  aborted  {upload['Key']}  ({hours:.1f}h old)")
+        except Exception as exc:                          # noqa: BLE001
+            print(f"  FAILED to abort {upload['Key']}: {exc}")
+    return len(stale)
+
+
 def upload(entries, s3, bucket, prefix, args) -> int:
     from boto3.s3.transfer import TransferConfig
     from botocore.exceptions import ClientError
@@ -936,6 +990,13 @@ def parse_args(argv=None):
     p.add_argument("--aws-profile",
                    help="Use this AWS profile instead of maap-py. No refresh wiring; "
                         "only suitable for static keys or an instance role.")
+    p.add_argument("--abort-stale-multiparts", action="store_true",
+                   help="Before uploading, abort incomplete multipart uploads left "
+                        "by a previously killed run. They are invisible to a normal "
+                        "listing but are billed as storage.")
+    p.add_argument("--stale-multipart-hours", type=float, default=6.0,
+                   help="Age above which an incomplete upload counts as stale "
+                        "(default: %(default)s).")
     p.add_argument("--concurrency", type=int, default=8,
                    help="Parts in flight per file (default: %(default)s).")
     p.add_argument("--part-size-mb", type=int, default=64,
@@ -997,6 +1058,13 @@ def main(argv=None) -> int:
 
     if args.verify_only:
         return verify(entries, s3, bucket, prefix, dest, args)
+
+    if args.abort_stale_multiparts:
+        print("\nIncomplete multipart uploads")
+        abort_stale_multiparts(s3, bucket, prefix,
+                               older_than_hours=args.stale_multipart_hours,
+                               dry_run=args.dry_run)
+        print()
 
     rc = upload(entries, s3, bucket, prefix, args)
     if args.verify:

@@ -278,3 +278,73 @@ def test_whitespace_around_an_otherwise_valid_token_is_the_only_complaint():
 def test_an_unrecognized_shape_is_flagged_without_asserting_what_is_wrong():
     warnings = upload._token_shape_warnings("some-opaque-token")
     assert warnings and any("unrecognized" in w for w in warnings)
+
+
+# --- orphaned multipart uploads --------------------------------------------
+#
+# A file above the multipart threshold only becomes an object when
+# CompleteMultipartUpload succeeds, so a killed run leaves no partial object
+# (good: a resume can never mistake one for complete) but does leave uploaded
+# parts, which list_objects does not show and which are billed as storage.
+
+class _FakeS3:
+    def __init__(self, uploads, fail_list=False):
+        self._uploads = uploads
+        self._fail_list = fail_list
+        self.aborted = []
+
+    def get_paginator(self, name):
+        assert name == "list_multipart_uploads"
+        uploads = self._uploads
+        fail = self._fail_list
+
+        class _P:
+            def paginate(self, **kwargs):
+                if fail:
+                    raise RuntimeError("AccessDenied: ListMultipartUploads")
+                return [{"Uploads": uploads}]
+        return _P()
+
+    def abort_multipart_upload(self, Bucket, Key, UploadId):
+        self.aborted.append((Key, UploadId))
+
+
+def _upload_record(key, hours_old):
+    import datetime as dt
+    return {
+        "Key": key, "UploadId": f"uid-{key}",
+        "Initiated": dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours_old),
+    }
+
+
+def test_stale_multiparts_are_aborted():
+    s3 = _FakeS3([_upload_record("p/seasonal/mur_100.nc", 25)])
+    assert upload.abort_stale_multiparts(s3, "b", "p") == 1
+    assert s3.aborted == [("p/seasonal/mur_100.nc", "uid-p/seasonal/mur_100.nc")]
+
+
+def test_recent_multiparts_are_left_alone():
+    """Safe to run while another upload of the same tree is in flight --
+    aborting a live upload's parts would kill it."""
+    s3 = _FakeS3([_upload_record("p/seasonal/mur_101.nc", 0.5)])
+    assert upload.abort_stale_multiparts(s3, "b", "p") == 0
+    assert s3.aborted == []
+
+
+def test_the_age_threshold_is_configurable():
+    s3 = _FakeS3([_upload_record("p/x.nc", 3)])
+    assert upload.abort_stale_multiparts(s3, "b", "p", older_than_hours=6) == 0
+    assert upload.abort_stale_multiparts(s3, "b", "p", older_than_hours=1) == 1
+
+
+def test_dry_run_aborts_nothing():
+    s3 = _FakeS3([_upload_record("p/x.nc", 25)])
+    upload.abort_stale_multiparts(s3, "b", "p", dry_run=True)
+    assert s3.aborted == []
+
+
+def test_no_permission_to_list_is_not_fatal():
+    """The workspace session policy may not grant ListMultipartUploads; that
+    should not stop the upload itself."""
+    s3 = _FakeS3([], fail_list=True)
+    assert upload.abort_stale_multiparts(s3, "b", "p") == 0
