@@ -741,6 +741,12 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="Stage MUR static resources into a MAAP workspace S3 bucket.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        # Prefix matching turns an unknown flag into a confusing error about a
+        # DIFFERENT flag: on a checkout predating --check, argparse expanded it
+        # to --checksum and complained that it "expected one argument", which
+        # says nothing about the real problem (a stale copy). --verify and
+        # --verify-only can collide the same way. Require full names.
+        allow_abbrev=False,
         epilog=__doc__.split("TYPICAL SEQUENCE")[-1],
     )
     p.add_argument("--bundle", metavar="DIR",
