@@ -281,6 +281,40 @@ resolves:
 """
 
 
+def _token_shape_warnings(token: str):
+    """Catch a token that was mangled in transit.
+
+    A MAAP personal access token is `jwt:` followed by a JWT, and a JWT always
+    starts `eyJ` (base64 for '{"'). Copying one out of a terminal by mouse can
+    drop a leading character, which is invisible -- the value still looks like
+    a long opaque blob -- and produces a 401 that says only "Invalid session".
+    Checking the prefix turns that into an immediate answer.
+    """
+    import re
+
+    warnings = []
+    if token != token.strip():
+        warnings.append("!! has leading/trailing whitespace -- a copy-paste artifact.")
+
+    stripped = token.strip()
+    if stripped.startswith("jwt:"):
+        return warnings                       # expected shape
+
+    # The specific, easy-to-miss failure: the jwt: prefix lost characters off
+    # the front, leaving the JWT body intact behind a partial prefix.
+    truncated = re.match(r"^(j?w?t?):(eyJ)", stripped)
+    if truncated:
+        warnings.append(
+            f"!! starts {stripped[:4]!r} but a MAAP token starts 'jwt:' -- the "
+            f"leading character(s) were clipped when it was copied.")
+        warnings.append("   Re-copy it; do not hand-repair it, in case more is missing.")
+    elif stripped.startswith("eyJ"):
+        warnings.append("!! looks like a bare JWT with the 'jwt:' prefix missing.")
+    else:
+        warnings.append("   (unrecognized shape; a MAAP token normally starts 'jwt:')")
+    return warnings
+
+
 def _redact(value, keep=6):
     if not value:
         return repr(value)
@@ -377,6 +411,8 @@ def check_environment(args) -> int:
     pgt = os.environ.get("MAAP_PGT")
     if pgt:
         print(f"  MAAP_PGT           set ({len(pgt)} chars)")
+        for line in _token_shape_warnings(pgt):
+            print(f"                     {line}")
     else:
         print("  MAAP_PGT           not set")
         print("                     Fine inside a workspace if credentials still")

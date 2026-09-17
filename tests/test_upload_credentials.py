@@ -233,3 +233,48 @@ def test_maap_py_docstring_shape_is_accepted():
 def test_an_unrecognized_shape_names_the_keys_it_saw():
     with pytest.raises(ValueError, match="got keys"):
         upload._normalize_credentials({"nonsense": 1})
+
+
+# --- token shape -----------------------------------------------------------
+#
+# A MAAP personal access token is "jwt:" + a JWT, and a JWT always starts
+# "eyJ" (base64 for '{"'). Copying one out of a terminal by mouse can drop a
+# leading character; the result still looks like a long opaque blob and the
+# server answers only "Invalid session", so the shape check is what turns
+# that into an immediate answer.
+
+def test_a_well_formed_token_produces_no_warnings():
+    assert upload._token_shape_warnings("jwt:eyJhbGciOiJIUzI1NiJ9.body.sig") == []
+
+
+@pytest.mark.parametrize("clipped", ["wt:eyJabc.b.c", "t:eyJabc.b.c", ":eyJabc.b.c"])
+def test_a_clipped_jwt_prefix_is_identified(clipped):
+    warnings = upload._token_shape_warnings(clipped)
+    assert any("clipped" in w for w in warnings), warnings
+    assert any("jwt:" in w for w in warnings)
+
+
+def test_a_clipped_token_is_not_silently_repaired():
+    """Hand-repairing the prefix would hide the possibility that more than the
+    prefix was lost."""
+    warnings = upload._token_shape_warnings("wt:eyJabc.b.c")
+    assert any("Re-copy" in w for w in warnings)
+
+
+def test_a_bare_jwt_without_the_prefix_is_identified():
+    warnings = upload._token_shape_warnings("eyJhbGciOiJIUzI1NiJ9.body.sig")
+    assert any("prefix missing" in w for w in warnings)
+
+
+def test_whitespace_is_reported():
+    assert any("whitespace" in w for w in upload._token_shape_warnings("jwt:eyJa.b.c\n"))
+
+
+def test_whitespace_around_an_otherwise_valid_token_is_the_only_complaint():
+    warnings = upload._token_shape_warnings(" jwt:eyJa.b.c ")
+    assert len(warnings) == 1 and "whitespace" in warnings[0]
+
+
+def test_an_unrecognized_shape_is_flagged_without_asserting_what_is_wrong():
+    warnings = upload._token_shape_warnings("some-opaque-token")
+    assert warnings and any("unrecognized" in w for w in warnings)
