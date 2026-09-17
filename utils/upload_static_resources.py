@@ -281,6 +281,83 @@ resolves:
 """
 
 
+def _redact(value, keep=6):
+    if not value:
+        return repr(value)
+    v = str(value)
+    return f"{v[:keep]}...{v[-keep:]} ({len(v)} chars)"
+
+
+def _diagnose_auth(maap) -> None:
+    """Show what the server actually said, and what we actually sent.
+
+    maap-py calls raise_for_status(), which discards the response body -- and
+    that body is usually the only thing that distinguishes an expired token
+    from a wrong KIND of token. Re-issue the same request by hand to recover
+    it, and probe a simpler authenticated endpoint first to tell "auth is
+    broken generally" apart from "this one endpoint rejects me".
+    """
+    import requests
+
+    if maap is None:
+        print("                     (client construction failed; nothing to probe)")
+        return
+
+    print("\n  --- auth diagnosis ---")
+
+    header = maap._get_api_header()
+    print("  headers sent")
+    for key in ("token", "proxy-ticket"):
+        if key in header:
+            print(f"    {key:<14} {_redact(header[key])}")
+        else:
+            print(f"    {key:<14} ABSENT")
+
+    # A trailing newline from a copy-paste is invisible and produces exactly
+    # this failure, so check for it explicitly.
+    pgt = os.environ.get("MAAP_PGT", "")
+    if pgt != pgt.strip():
+        print("    !! MAAP_PGT has leading/trailing whitespace -- almost certainly")
+        print("       a copy-paste artifact. Re-export without it.")
+
+    # Simpler authenticated call: if this also fails, the token is the problem
+    # rather than the workspace-bucket endpoint specifically.
+    print("\n  probe: members/self (simpler authenticated endpoint)")
+    try:
+        r = requests.get(url=maap.config.member, headers=header, timeout=30)
+        print(f"    HTTP {r.status_code}")
+        if r.status_code == 200:
+            print("    -> general auth WORKS; the workspace-bucket endpoint is")
+            print("       rejecting this token specifically.")
+        else:
+            body = r.text.strip()
+            print(f"    body: {body[:400]}")
+            print("    -> general auth FAILS, so this is the token, not the endpoint.")
+    except Exception as exc:                              # noqa: BLE001
+        print(f"    request failed: {exc}")
+
+    # The real call, with the body preserved.
+    print("\n  probe: workspaceBucket (the call that failed)")
+    try:
+        r = requests.get(url=maap.config.workspace_bucket_credentials,
+                         headers=header, timeout=30)
+        print(f"    HTTP {r.status_code}")
+        print(f"    body: {r.text.strip()[:400]}")
+    except AttributeError:
+        print("    (endpoint attribute not found on this maap-py version)")
+    except Exception as exc:                              # noqa: BLE001
+        print(f"    request failed: {exc}")
+
+    print("\n  most likely causes, in order")
+    print("    1. The workspace's MAAP_PGT is a SESSION ticket, valid only in that")
+    print("       workspace. For use elsewhere, generate a token at")
+    print("       https://console.maap-project.org/profile/tokens -- that page")
+    print("       exists precisely for off-platform automation.")
+    print("    2. The token expired.")
+    print("    3. It was truncated or gained whitespace in transit. Compare")
+    print("       both ends:  printf %s \"$MAAP_PGT\" | wc -c")
+
+
 def check_environment(args) -> int:
     """Prove the environment can actually do the upload, before moving 142 GiB.
 
@@ -337,12 +414,20 @@ def check_environment(args) -> int:
         print("                        image ships the non-OGC v4 stack")
         ok = False
 
-    # 3. Credentials.
+    # 3. Credentials. Build the client and make the call in separate steps so
+    #    the diagnosis below can tell "could not construct a client" apart from
+    #    "the server rejected us".
+    maap = None
     try:
         maap = _maap_client()
         payload, resp = _credentials_payload(maap)
     except Exception as exc:                              # noqa: BLE001
         print(f"  credentials        FAILED: {exc}")
+        if args.debug:
+            _diagnose_auth(maap)
+        else:
+            print("                     Re-run with --debug to see the server's own")
+            print("                     error message and which headers were sent.")
         print("                     Inside a workspace this should just work.")
         print("                     Elsewhere, maap-py authenticates with a MAAP")
         print("                     token -- NOT an AWS profile; it mints temporary")
@@ -752,6 +837,9 @@ def parse_args(argv=None):
     p.add_argument("--bundle", metavar="DIR",
                    help="Copy the files the uploader needs into DIR, ready to scp "
                         "to the host where the static data lives, then exit.")
+    p.add_argument("--debug", action="store_true",
+                   help="With --check, show the server's own error body and which "
+                        "headers were sent.")
     p.add_argument("--check", action="store_true",
                    help="Verify credentials, destination and write access, then "
                         "exit. Run this first, from the workspace.")
