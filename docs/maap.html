@@ -101,6 +101,30 @@
     time, so the images built by <code>utils/build_and_push.sh</code> are
     referenced as they are. The four configs live under <code>maap/</code>.</p>
 
+    <h3>Deploying registers; it does not provision</h3>
+
+    <p>Deploying an application package creates a catalogue entry and nothing
+    else. No hardware is allocated, no image is pulled, no capacity is reserved.
+    The queue is chosen at <code>submit_job</code> rather than at deploy time,
+    and <code>ResourceRequirement</code>'s <code>ramMin</code>/<code>coresMin</code>
+    are a declaration the scheduler reads when a job arrives &mdash; not a
+    reservation held on the package's behalf.</p>
+
+    <p>A registered process carries a numeric <code>processID</code>, which is
+    what execution takes; the <code>id</code> field is the algorithm name.
+    Registering the same algorithm at a new version mints a new
+    <code>processID</code>, so it is looked up rather than pinned.</p>
+
+    <div class="warn">
+      <p><strong>A successful deployment says nothing about whether the
+      algorithm runs.</strong> <code>dockerPull</code> is a reference resolved
+      at job runtime, so a private package, a wrong tag or an unreachable
+      registry all register cleanly and fail on first execution. That is why
+      the first job is a deliberate smoke test rather than the start of a
+      backfill &mdash; it is the first moment anything actually tries to pull
+      the image.</p>
+    </div>
+
     <h3>Why a second image per module</h3>
 
     <p>Each module image sets
