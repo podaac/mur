@@ -19,7 +19,7 @@
 #   ./utils/build_and_push.sh                     # build only, no push
 #   ./utils/build_and_push.sh --push              # build and push
 #   ./utils/build_and_push.sh --push --tag v1.2.3 # with an explicit tag
-#   ./utils/build_and_push.sh --push --tag 1.0.0 --with-dps
+#   ./utils/build_and_push.sh --push --tag 2.0.0 --with-dps
 #                                                 # ...and the MAAP -dps variants
 #   ./utils/build_and_push.sh --modules landice   # one module
 #

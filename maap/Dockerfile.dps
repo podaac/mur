@@ -29,9 +29,9 @@
 #   MODULE arg and repo-root context:
 #
 #     docker build -f maap/Dockerfile.dps \
-#       --build-arg BASE_IMAGE=ghcr.io/podaac/mur/landice:1.0.0 \
+#       --build-arg BASE_IMAGE=ghcr.io/podaac/mur/landice:2.0.0 \
 #       --build-arg MODULE=landice \
-#       -t ghcr.io/podaac/mur/landice-dps:1.0.0 .
+#       -t ghcr.io/podaac/mur/landice-dps:2.0.0 .
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 

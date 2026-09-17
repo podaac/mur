@@ -1,7 +1,7 @@
 # OGC Application Package description for the MUR landice module.
 #
 # Consumed by MAAP-Project/ogc-app-pack-generator's build_cwl_workflow.py to
-# produce maap/cwl_workflows/process_mur-landice_1.0.0.cwl. See maap/README.md
+# produce maap/cwl_workflows/process_mur-landice_2.0.0.cwl. See maap/README.md
 # for the generate -> validate -> deploy sequence.
 #
 # algorithm_name must stay "mur-landice": run_mur_maap.py submits against that
@@ -12,13 +12,13 @@ algorithm_description: >
   (p01) and 0.011-degree (p011) cylindrical grids, emitting the ice BIP, the
   ice-flagged land mask, and the icefiles listing for each resolution.
 algorithm_name: mur-landice
-algorithm_version: "1.0.0"
+algorithm_version: "2.0.0"
 
 # Pre-built image, so no Dockerfile build is needed at registration time. This
 # is the "-dps" variant, which clears ENTRYPOINT so CWL's baseCommand runs
 # directly rather than being appended to it (see maap/Dockerfile.dps). It must
 # be anonymously pullable: a CWL DockerRequirement carries no credentials.
-algorithm_container_url: ghcr.io/podaac/mur/landice-dps:1.0.0
+algorithm_container_url: ghcr.io/podaac/mur/landice-dps:2.0.0
 
 keywords: MUR, SST, sea ice, OSI-SAF, land mask, GHRSST
 code_repository: https://github.com/podaac/mur

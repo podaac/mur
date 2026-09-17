@@ -20,24 +20,24 @@
 #   with utils/build_and_push.sh, which needs a Linux x86-64 host with MATLAB
 #   licence access:
 #
-#     ./utils/build_and_push.sh --push --tag 1.0.0
+#     ./utils/build_and_push.sh --push --tag 2.0.0
 #
 # THE IMAGES MUST BE ANONYMOUSLY PULLABLE
 #   A CWL DockerRequirement carries no registry credentials, so DPS cannot pull
 #   from a private package. After pushing, verify from a logged-out client:
 #
 #     docker logout ghcr.io
-#     docker pull ghcr.io/podaac/mur/landice-dps:1.0.0
+#     docker pull ghcr.io/podaac/mur/landice-dps:2.0.0
 #
 #   If that fails, make each package public:
 #     GitHub > podaac > Packages > mur/<module>-dps > Package settings
 #       > Change visibility > Public
 #
 # USAGE
-#   ./utils/build_dps_images.sh --tag 1.0.0              # build only
-#   ./utils/build_dps_images.sh --tag 1.0.0 --push       # build and push
-#   ./utils/build_dps_images.sh --tag 1.0.0 --modules landice
-#   ./utils/build_dps_images.sh --tag 1.0.0 --verify     # anonymous-pull check
+#   ./utils/build_dps_images.sh --tag 2.0.0              # build only
+#   ./utils/build_dps_images.sh --tag 2.0.0 --push       # build and push
+#   ./utils/build_dps_images.sh --tag 2.0.0 --modules landice
+#   ./utils/build_dps_images.sh --tag 2.0.0 --verify     # anonymous-pull check
 set -euo pipefail
 
 REGISTRY="${REGISTRY:-ghcr.io}"

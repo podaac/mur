@@ -245,9 +245,9 @@ nohup python utils/upload_static_resources.py \
 
 <pre><code># an explicit tag, not the default branch-and-hash: the CWL pins
 # dockerPull to an exact tag and algorithm_version must match it
-./utils/build_and_push.sh --push --tag 1.0.0
+./utils/build_and_push.sh --push --tag 2.0.0
 
-./utils/build_dps_images.sh --tag 1.0.0 --push --verify</code></pre>
+./utils/build_dps_images.sh --tag 2.0.0 --push --verify</code></pre>
 
     <p>A CWL <code>DockerRequirement</code> carries no registry credentials, so
     DPS cannot pull a private package. <code>--verify</code> checks anonymous
@@ -272,7 +272,7 @@ maap = MAAP()
 
 for m in ['iquam', 'landice', 'l2p', 'mrva']:
     r = maap.deploy_algorithm_from_cwl_file(
-        file_path=f'/home/jovyan/mur/maap/cwl_workflows/process_mur-{m}_1.0.0.cwl')
+        file_path=f'/home/jovyan/mur/maap/cwl_workflows/process_mur-{m}_2.0.0.cwl')
     print(m, r.status_code, r.json())      # 202 == accepted
 
 maap.get_deployment_status(deployment_id).json()["status"]
@@ -296,7 +296,7 @@ maap.list_algorithms().json()</code></pre>
 <pre><code>root = "s3://maap-ops-workspace/&lt;user&gt;/mur/static-resources"
 
 resp = maap.submit_job(
-    process_id="mur-landice:1.0.0",
+    process_id="mur-landice:2.0.0",
     queue="&lt;queue from MAAP ops&gt;",
     tag="mur.smoke.landice",            # also organises dps_output/
     inputs={
@@ -329,7 +329,7 @@ import json; print(json.dumps(maap.get_job_result(job_id).json(), indent=2))</co
 <pre><code>mkdir -p /tmp/cwl-smoke
 docker run --rm --platform linux/amd64 --user "$(id -u):$(id -g)" --group-add 0 \
   -v /tmp/cwl-smoke:/tmp/cwl-smoke -w /tmp/cwl-smoke \
-  ghcr.io/podaac/mur/landice-dps:1.0.0 --year 2026 --doy 164 --landmask-p01-file ...
+  ghcr.io/podaac/mur/landice-dps:2.0.0 --year 2026 --doy 164 --landmask-p01-file ...
 
 ls -R /tmp/cwl-smoke/output      # empty here means empty on DPS</code></pre>
 

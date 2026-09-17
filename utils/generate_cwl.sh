@@ -133,5 +133,9 @@ echo "  from maap.maap import MAAP"
 echo "  maap = MAAP()"
 echo "  for m in ['iquam', 'landice', 'l2p', 'mrva']:   # cheapest first"
 echo "      r = maap.deploy_algorithm_from_cwl_file("
-echo "          file_path=f'~/mur/maap/cwl_workflows/process_mur-{m}_1.0.0.cwl')"
+# Read the version back from a config rather than hardcoding it, so this hint
+# cannot drift from what was actually generated.
+version=$(grep -m1 '^algorithm_version:' "$REPO_ROOT/maap/landice/algorithm_config.yml" \
+            | sed 's/.*: *//; s/"//g')
+echo "          file_path=f'~/mur/maap/cwl_workflows/process_mur-{m}_${version}.cwl')"
 echo "      print(m, r.status_code, r.json())"
