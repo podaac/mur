@@ -470,12 +470,12 @@ class MAAPOrchestrator:
         mrva_static_hrefs = resolve_mrva_static_hrefs(
             self.config["mrva"]["static_resources_dir"], doy
         )
-        # Landice's own output naming isn't confirmed against a real
-        # registered algorithm yet (MAAPClient.get_job_output is still a
-        # stub); confirm all three names against one real landice job before
-        # relying on them. The files themselves are real -- icefiles_YYYY_DDD.txt
-        # is written by landice/src/readosisafice.m's write_file() -- but which
-        # output directory each lands in on DPS is not yet established.
+        # Confirmed against a real mur-landice job (2026/164): DPS stages out
+        # p01/<year>/ and p011/<year>/ directly (the container's output/ wrapper
+        # is flattened), and all three files are present -- including
+        # icefiles_YYYY_DDD.txt, which earlier notes doubted was a real output.
+        # get_job_result returns a DIRECTORY prefix rather than named outputs,
+        # so mur_maap/outputs.py matches filenames within it.
         landice_ice_p011_href = self.client.get_job_output(landice_job, "landice_ice_p011")
         landice_grid_p01_href = self.client.get_job_output(landice_job, "landice_grid_p01")
         landice_icefiles_p011_href = self.client.get_job_output(landice_job, "landice_icefiles_p011")

@@ -79,9 +79,7 @@ inputs:
     label: Landice icefiles listing (p011)
     doc: >
       s3:// href to this day's icefiles_<YYYY>_<DDD>.txt from mur-landice.
-      The file is real (written by landice/src/readosisafice.m's write_file),
-      but which output subdirectory it lands in on DPS is unconfirmed --
-      verify against one real landice job.
+      Confirmed present at p011/<year>/ in a real job's staged-out directory.
     type: string
   - name: sensor-inputs-manifest
     label: Sensor inputs manifest
