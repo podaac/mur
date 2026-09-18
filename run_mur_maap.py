@@ -28,6 +28,7 @@ is real and covered by tests/test_run_mur_maap.py against a fake client.
 """
 import datetime
 import logging
+import pathlib
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
@@ -610,6 +611,51 @@ def build_client(config: Dict, args):
     )
 
 
+def init_config(dest: str) -> int:
+    """Write a MAAP config, filling in what can be discovered.
+
+    The example ships <angle-bracket> placeholders for the two values that
+    vary per account. One of them -- the workspace root -- the credentials
+    call already knows, so asking a human to transcribe it is an invitation
+    to typo it. The queue genuinely has to come from MAAP ops.
+    """
+    import json
+    import shutil
+
+    target = pathlib.Path(dest)
+    if target.exists():
+        raise SystemExit(f"{target} already exists; not overwriting it.")
+
+    example = pathlib.Path(__file__).parent / "config.maap.example.json"
+    config = json.loads(example.read_text())
+
+    try:
+        from mur_maap.workspace import WorkspaceBucket
+        from maap.maap import MAAP
+
+        path = WorkspaceBucket(MAAP()).path()
+        config.setdefault("maap", {})["workspace_root"] = path.uri
+        static_root = f"{path.uri}/mur/static-resources"
+        config["landice"]["static_resources_dir"] = static_root
+        config["mrva"]["static_resources_dir"] = static_root
+        discovered = path.uri
+    except Exception as exc:                              # noqa: BLE001
+        discovered = None
+        print(f"Could not reach MAAP to discover the workspace root ({exc}).")
+        print("Writing the template with placeholders instead.")
+
+    target.write_text(json.dumps(config, indent=2) + "\n")
+    print(f"wrote {target}")
+    if discovered:
+        print(f"  workspace_root       {discovered}")
+        print(f"  static_resources_dir {discovered}/mur/static-resources")
+    print()
+    print("Still to fill in:")
+    print("  maap.queue   the DPS queue to submit to. Ask MAAP ops which you")
+    print("               may use; MRVA needs one with 64 GiB and 16 cores.")
+    return 0
+
+
 def parse_args(argv=None):
     import argparse
 
@@ -630,6 +676,10 @@ def parse_args(argv=None):
         allow_abbrev=False,
     )
     parser.add_argument("--config", required=True, help="MAAP config JSON.")
+    parser.add_argument("--init-config", action="store_true",
+                        help="Write --config from the shipped example, filling in "
+                             "the workspace root from your MAAP credentials, then "
+                             "exit.")
     parser.add_argument("--date", help="Treat this YYYY-MM-DD as the run day.")
     parser.add_argument("-p", "--process-days", default="-1",
                         help="Offset(s) from the run day: -1, or a range. A range "
@@ -671,7 +721,20 @@ def main(argv=None) -> int:
         level=logging.DEBUG if args.debug else logging.INFO,
     )
 
-    config = mur_config.load_config(args.config)
+    if args.init_config:
+        return init_config(args.config)
+
+    try:
+        config = mur_config.load_config(args.config)
+    except FileNotFoundError:
+        example = pathlib.Path(__file__).parent / "config.maap.example.json"
+        raise SystemExit(
+            f"{args.config} does not exist.\n\n"
+            f"  python run_mur_maap.py --config {args.config} --init-config\n\n"
+            f"writes one, discovering the workspace root from your MAAP\n"
+            f"credentials. It leaves maap.queue for you to fill in -- ask MAAP\n"
+            f"ops which queues you may use.\n\n"
+            f"Or copy {example.name} and edit it by hand.")
     if args.date:
         mur_date.set_simulated_date(datetime.date.fromisoformat(args.date))
 

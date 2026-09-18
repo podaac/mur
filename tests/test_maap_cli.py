@@ -87,3 +87,34 @@ def test_a_range_without_equals_is_rejected_by_argparse():
 def test_unknown_flags_are_not_abbreviation_matched():
     with pytest.raises(SystemExit):
         cli.parse_args(["--config", "x.json", "--nonsense"])
+
+
+# --- config bootstrap ------------------------------------------------------
+
+def test_a_missing_config_explains_how_to_make_one(capsys):
+    """A FileNotFoundError traceback says nothing about what to do; the repo
+    ships only the example, so a missing config is the expected first state."""
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--config", "definitely-not-here.json", "-p", "-1"])
+    msg = str(exc.value)
+    assert "--init-config" in msg
+    assert "config.maap.example.json" in msg
+
+
+def test_init_config_writes_a_usable_config(tmp_path, capsys):
+    """Without MAAP reachable it still writes the template rather than
+    failing -- the queue has to be filled in by hand either way."""
+    dest = tmp_path / "config.maap.json"
+    assert cli.main(["--config", str(dest), "--init-config"]) == 0
+
+    import json
+    written = json.loads(dest.read_text())
+    assert "maap" in written and "l2p" in written and "mrva" in written
+    assert "maap.queue" in capsys.readouterr().out
+
+
+def test_init_config_refuses_to_overwrite(tmp_path):
+    dest = tmp_path / "config.maap.json"
+    dest.write_text("{}")
+    with pytest.raises(SystemExit, match="already exists"):
+        cli.main(["--config", str(dest), "--init-config"])
