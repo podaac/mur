@@ -126,3 +126,44 @@ def test_missing_downloader_names_the_fix(monkeypatch):
     monkeypatch.setattr(granules.subprocess, "run", boom)
     with pytest.raises(granules.GranuleStagingError, match="pip install"):
         granules.download_day(["C"], DAY, pathlib.Path("/tmp/x"))
+
+
+# --- Earthdata credentials -------------------------------------------------
+
+def test_discovery_proceeds_without_any_earthdata_login(monkeypatch):
+    """CMR serves public collections anonymously, so requiring a .netrc for a
+    metadata search is an obstacle with no purpose."""
+    class FakeEA:
+        class _Boom(Exception): pass
+        def login(self, strategy=None): raise self._Boom("no credentials")
+        def search_data(self, **kw): return []
+    fake = FakeEA()
+    assert granules._try_login(fake) is False
+
+
+def test_login_is_used_when_it_is_available():
+    class FakeEA:
+        def __init__(self): self.used = None
+        def login(self, strategy=None):
+            if strategy != "netrc":
+                raise RuntimeError("not configured")
+            self.used = strategy
+    fake = FakeEA()
+    assert granules._try_login(fake) is True
+    assert fake.used == "netrc"
+
+
+def test_podaac_credentials_come_from_maap_not_a_netrc():
+    """MAAP proxies Earthdata OAuth, so a workspace reads DAAC data with the
+    MAAP token it already has."""
+    class FakeAWS:
+        def earthdata_s3_credentials(self, endpoint):
+            assert endpoint == granules.PODAAC_S3_CREDENTIALS
+            return {"accessKeyId": "AKIA", "secretAccessKey": "s",
+                    "sessionToken": "t", "expiration": "2026-09-18T12:00:00Z"}
+    class FakeMaap:
+        aws = FakeAWS()
+
+    creds = granules.podaac_credentials(FakeMaap())
+    assert creds["aws_access_key_id"] == "AKIA"
+    assert creds["aws_session_token"] == "t"

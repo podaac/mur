@@ -117,7 +117,11 @@ def discover_day(
             "earthaccess is required for direct granule discovery. "
             "pip install earthaccess") from None
 
-    earthaccess.login(strategy="netrc")
+    # Discovery is metadata, not data: CMR serves public collections
+    # anonymously, so a login is an optimization rather than a requirement.
+    # Try the usual sources and carry on without one -- demanding a .netrc
+    # for a search that does not need it is a needless obstacle.
+    _try_login(earthaccess)
 
     hrefs: List[str] = []
     for collection in collections:
@@ -137,6 +141,46 @@ def discover_day(
         logger.info("    %s %s: %d granule(s) in CMR",
                     collection, data_day, len(results))
     return sorted(set(hrefs))
+
+
+def _try_login(earthaccess) -> bool:
+    """Best-effort Earthdata login. False just means "searching anonymously"."""
+    for strategy in ("environment", "netrc"):
+        try:
+            earthaccess.login(strategy=strategy)
+            logger.debug("earthaccess login via %s", strategy)
+            return True
+        except Exception:                                 # noqa: BLE001
+            continue
+    logger.debug("no Earthdata login; searching CMR anonymously")
+    return False
+
+
+# PO.DAAC's Earthdata credential endpoint. maap.aws.earthdata_s3_credentials()
+# exchanges a MAAP token for temporary AWS credentials here, which is how a
+# workspace reads DAAC data without a .netrc of its own.
+PODAAC_S3_CREDENTIALS = "https://archive.podaac.earthdata.nasa.gov/s3credentials"
+
+
+def podaac_credentials(maap, endpoint: str = PODAAC_S3_CREDENTIALS) -> Dict:
+    """Temporary AWS credentials for reading PO.DAAC, via MAAP.
+
+    MAAP proxies Earthdata OAuth, so this needs only the MAAP token the
+    workspace already has -- no Earthdata username, password or .netrc.
+
+    Note where this does and does not help. It authenticates reads made HERE,
+    in the workspace. It does nothing for reads made inside a DPS job, which
+    runs as its own role and gets no credentials from this process -- that is
+    the question "direct" granule mode exists to answer.
+    """
+    creds = maap.aws.earthdata_s3_credentials(endpoint)
+    return {
+        "aws_access_key_id": creds.get("accessKeyId") or creds.get("aws_access_key_id"),
+        "aws_secret_access_key": (creds.get("secretAccessKey")
+                                  or creds.get("aws_secret_access_key")),
+        "aws_session_token": creds.get("sessionToken") or creds.get("aws_session_token"),
+        "expiration": creds.get("expiration") or creds.get("expires_at"),
+    }
 
 
 def staged_hrefs(client, sensor: str, data_day: datetime.date) -> List[str]:
