@@ -34,14 +34,36 @@ class FakeS3:
         return {"ContentLength": 10}
     def upload_file(self, filename, Bucket, Key):
         self.uploaded.append(Key); self.keys.append(Key)
+    def upload_fileobj(self, fileobj, Bucket, Key):
+        fileobj.read()                      # streaming: the body is consumed
+        self.uploaded.append(Key); self.keys.append(Key)
     def delete_object(self, Bucket, Key):
         self.deleted.append(Key); self.keys.remove(Key)
 
 
+class FakePodaacS3:
+    """Stands in for the PO.DAAC-authorized client staging reads from."""
+    def __init__(self, objects=None):
+        self.objects = objects or {}
+        self.read = []
+    def head_object(self, Bucket, Key):
+        from botocore.exceptions import ClientError
+        if Key not in self.objects:
+            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+        return {"ContentLength": self.objects[Key]}
+    def get_object(self, Bucket, Key):
+        self.read.append(Key)
+        import io
+        return {"Body": io.BytesIO(b"x" * self.objects.get(Key, 10))}
+
+
 class FakeClient:
-    def __init__(self, keys=()):
+    def __init__(self, keys=(), podaac=None):
         self._s3 = FakeS3(keys)
         self.workspace = self
+        self.maap = object()
+        # Pre-seeded so staging never tries to mint real credentials.
+        self._podaac_s3 = podaac if podaac is not None else FakePodaacS3()
     def s3(self): return self._s3
     def path(self): return WorkspacePath(BUCKET, USER)
     def list_objects(self, prefix):
@@ -77,11 +99,12 @@ def test_an_unknown_mode_is_rejected():
 
 # --- staging bookkeeping ---------------------------------------------------
 
-def test_already_staged_granules_are_not_redownloaded(monkeypatch):
-    """A resumed run should cost a listing, not a re-transfer."""
+def test_already_staged_granules_are_not_rediscovered(monkeypatch):
+    """A resumed run should cost a listing, not a re-transfer -- and not even
+    a CMR query."""
     client = FakeClient([f"{STAGED_PREFIX}/g1.nc", f"{STAGED_PREFIX}/g2.nc"])
     called = []
-    monkeypatch.setattr(granules, "download_day",
+    monkeypatch.setattr(granules, "discover_day",
                         lambda *a, **k: called.append(1) or [])
     got = granules.stage_day(client, "AMSR2R", ["C"], DAY)
     assert len(got) == 2
@@ -91,27 +114,48 @@ def test_already_staged_granules_are_not_redownloaded(monkeypatch):
 def test_a_day_with_no_granules_returns_empty_not_an_error(monkeypatch):
     """Real answer, not a failure -- L2P is simply not submitted for it."""
     client = FakeClient()
-    monkeypatch.setattr(granules, "download_day", lambda *a, **k: [])
+    monkeypatch.setattr(granules, "discover_day", lambda *a, **k: [])
     assert granules.stage_day(client, "AMSR2R", ["C"], DAY) == []
 
 
-def test_uploads_land_under_the_sensor_day_prefix(monkeypatch, tmp_path):
-    client = FakeClient()
-    f = tmp_path / "g1.nc"; f.write_bytes(b"x" * 10)
-    monkeypatch.setattr(granules, "download_day", lambda *a, **k: [f])
-    got = granules.stage_day(client, "AMSR2R", ["C"], DAY, workdir=tmp_path)
+def test_granules_stream_from_podaac_to_the_workspace_bucket(monkeypatch):
+    """No local disk and no .netrc: read with MAAP-minted PO.DAAC credentials,
+    write with the workspace credentials."""
+    podaac = FakePodaacS3({"MODIS/g1.nc": 10})
+    client = FakeClient(podaac=podaac)
+    monkeypatch.setattr(granules, "discover_day",
+                        lambda *a, **k: ["s3://podaac-ops-cumulus-protected/MODIS/g1.nc"])
+
+    got = granules.stage_day(client, "AMSR2R", ["C"], DAY)
     assert got == [f"s3://{BUCKET}/{STAGED_PREFIX}/g1.nc"]
+    assert podaac.read == ["MODIS/g1.nc"]
     assert client._s3.uploaded == [f"{STAGED_PREFIX}/g1.nc"]
 
 
-def test_an_identical_object_is_not_reuploaded(monkeypatch, tmp_path):
-    """Size-compared per object, so an interrupted upload resumes cheaply."""
-    client = FakeClient([f"{STAGED_PREFIX}/g1.nc"])
-    f = tmp_path / "g1.nc"; f.write_bytes(b"x" * 10)
-    monkeypatch.setattr(granules, "download_day", lambda *a, **k: [f])
+def test_staging_never_shells_out_to_the_subscriber(monkeypatch):
+    """The whole point: discovery already yields s3:// hrefs, so a separate
+    downloader needing its own credentials has no place in the path."""
+    monkeypatch.setattr(granules, "discover_day",
+                        lambda *a, **k: ["s3://podaac-ops/MODIS/g1.nc"])
+    def boom(*a, **k):
+        raise AssertionError("staging must not invoke a subprocess")
+    monkeypatch.setattr(granules.subprocess, "run", boom)
+
+    client = FakeClient(podaac=FakePodaacS3({"MODIS/g1.nc": 10}))
+    granules.stage_day(client, "AMSR2R", ["C"], DAY)
+
+
+def test_an_identical_object_is_not_recopied(monkeypatch):
+    """Size-compared per object, so an interrupted staging resumes cheaply."""
+    podaac = FakePodaacS3({"MODIS/g1.nc": 10})
+    client = FakeClient([f"{STAGED_PREFIX}/g1.nc"], podaac=podaac)
+    monkeypatch.setattr(granules, "discover_day",
+                        lambda *a, **k: ["s3://podaac-ops/MODIS/g1.nc"])
     monkeypatch.setattr(granules, "staged_hrefs", lambda *a, **k: [])
-    granules.stage_day(client, "AMSR2R", ["C"], DAY, workdir=tmp_path)
+
+    granules.stage_day(client, "AMSR2R", ["C"], DAY)
     assert client._s3.uploaded == []
+    assert podaac.read == []
 
 
 def test_purge_removes_a_staged_day():

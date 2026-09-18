@@ -61,7 +61,13 @@ def download_day(
     *,
     collection_filter: Optional[str] = None,
 ) -> List[pathlib.Path]:
-    """Fetch one day's granules for one sensor into `dest`.
+    """Fetch one day's granules to local disk with podaac-data-subscriber.
+
+    NOT used by staging, which streams S3-to-S3 and needs neither local disk
+    nor a .netrc. Kept because it is occasionally useful to have the granules
+    as files -- inspecting one, or reproducing a local run -- and because
+    run_mur_pipeline.py uses the same tool the same way.
+
 
     Mirrors run_mur_pipeline.py's date-range download: a bounded -sd/-ed
     window rather than the incremental mode, because staging is per analysis
@@ -229,10 +235,20 @@ def stage_day(
     collection_filter: Optional[str] = None,
     keep_local: bool = False,
 ) -> List[str]:
-    """Ensure this sensor/day's granules are in the bucket; return their hrefs.
+    """Copy this sensor-day's granules into the workspace bucket.
 
-    Returns an empty list when the day genuinely has no granules -- that is a
-    real answer, not an error. L2P is simply not submitted for it.
+    Discovery is the same CMR query direct mode uses, so there is one way of
+    finding granules rather than two. The copy then streams PO.DAAC's S3
+    object straight to the workspace bucket: read with credentials MAAP mints
+    from its own token, write with the workspace credentials.
+
+    Nothing touches local disk and no Earthdata .netrc is involved. A
+    server-side copy is not possible -- no single credential set can both read
+    PO.DAAC and write the workspace bucket -- so the bytes stream through this
+    process, but they are never buffered to a file.
+
+    Returns an empty list when the day genuinely has no granules: a real
+    answer, not an error. L2P is simply not submitted for it.
     """
     existing = staged_hrefs(client, sensor, data_day)
     if existing:
@@ -240,34 +256,69 @@ def stage_day(
                     sensor, data_day, len(existing))
         return existing
 
-    tmp = pathlib.Path(workdir) if workdir else pathlib.Path(
-        tempfile.mkdtemp(prefix=f"mur-granules-{sensor}-"))
+    sources = discover_day(collections, data_day,
+                           collection_filter=collection_filter)
+    if not sources:
+        logger.info("    %s %s: no granules", sensor, data_day)
+        return []
+
+    dest_bucket = client.workspace.path().bucket
+    prefix = client.workspace.path().key(
+        paths.granule_stage_prefix(sensor, data_day))
+    dest_s3 = client.workspace.s3()
+    source_s3 = _podaac_s3(client)
+
+    hrefs = []
+    copied = 0
+    for src in sources:
+        src_bucket, src_key = src[len("s3://"):].split("/", 1)
+        name = src_key.rsplit("/", 1)[-1]
+        key = f"{prefix}/{name}"
+
+        if _already_uploaded(dest_s3, dest_bucket, key, _source_size(
+                source_s3, src_bucket, src_key)):
+            hrefs.append(f"s3://{dest_bucket}/{key}")
+            continue
+
+        body = source_s3.get_object(Bucket=src_bucket, Key=src_key)["Body"]
+        dest_s3.upload_fileobj(body, dest_bucket, key)
+        hrefs.append(f"s3://{dest_bucket}/{key}")
+        copied += 1
+
+    logger.info("    %s %s: %d granule(s) staged (%d copied, %d already there)",
+                sensor, data_day, len(hrefs), copied, len(hrefs) - copied)
+    return hrefs
+
+
+def _podaac_s3(client):
+    """An S3 client authorized to read PO.DAAC, cached on the MUR client.
+
+    The credentials are temporary. They are fetched once per run rather than
+    per granule -- a day is hundreds of objects -- and re-fetched if a read
+    fails with an expired token.
+    """
+    cached = getattr(client, "_podaac_s3", None)
+    if cached is not None:
+        return cached
+
+    import boto3
+    creds = podaac_credentials(client.maap)
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=creds["aws_access_key_id"],
+        aws_secret_access_key=creds["aws_secret_access_key"],
+        aws_session_token=creds["aws_session_token"],
+    )
+    client._podaac_s3 = s3
+    return s3
+
+
+def _source_size(s3, bucket: str, key: str) -> int:
+    from botocore.exceptions import ClientError
     try:
-        local = download_day(collections, data_day, tmp / sensor,
-                             collection_filter=collection_filter)
-        if not local:
-            logger.info("    %s %s: no granules", sensor, data_day)
-            return []
-
-        bucket = client.workspace.path().bucket
-        prefix = client.workspace.path().key(
-            paths.granule_stage_prefix(sensor, data_day))
-        s3 = client.workspace.s3()
-
-        hrefs = []
-        for f in local:
-            key = f"{prefix}/{f.name}"
-            # Size-compare rather than re-upload: a resumed run should cost a
-            # HEAD per granule, not a re-transfer of gigabytes.
-            if not _already_uploaded(s3, bucket, key, f.stat().st_size):
-                s3.upload_file(str(f), bucket, key)
-            hrefs.append(f"s3://{bucket}/{key}")
-
-        logger.info("    %s %s: staged %d granule(s)", sensor, data_day, len(hrefs))
-        return hrefs
-    finally:
-        if not keep_local and workdir is None:
-            shutil.rmtree(tmp, ignore_errors=True)
+        return s3.head_object(Bucket=bucket, Key=key)["ContentLength"]
+    except ClientError:
+        return -1          # unknown: forces a copy rather than a false skip
 
 
 def _already_uploaded(s3, bucket: str, key: str, size: int) -> bool:
