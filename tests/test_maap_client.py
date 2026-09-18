@@ -241,11 +241,28 @@ def test_publish_stac_item_writes_an_item_to_the_bucket():
     assert item["id"] == "mur-l4-20260806-nrt"
 
 
-# --- the remaining gap -----------------------------------------------------
+# --- granule staging -------------------------------------------------------
 
-def test_stac_search_explains_why_it_is_unimplemented():
-    """L2P is the one stage that cannot run yet; the error should say so
-    rather than leaving a bare NotImplementedError."""
+def test_stac_search_needs_a_sensor_for_the_collections():
+    """Staged granules are keyed by sensor, and a collection list does not
+    identify one on its own -- AMSR2R alone has two collections."""
+    from mur_maap.client import GranuleSensorUnknown
     c, _, _ = make_client()
-    with pytest.raises(NotImplementedError, match="Earthdata Login"):
-        c.stac_search(["X"], None, None)
+    with pytest.raises(GranuleSensorUnknown, match="no sensor configured"):
+        c.stac_search(["AMSR2-REMSS-L2P-v8.2"], None, None)
+
+
+def test_stac_search_maps_collections_back_to_their_sensor():
+    import datetime
+    c, _, _ = make_client()
+    c.sensor_collections = {"AMSR2R": ["AMSR2-REMSS-L2P-v8.2"]}
+
+    staged = []
+    import mur_maap.granules as g
+    real = g.stage_day
+    g.stage_day = lambda client, sensor, cols, day, **kw: staged.append(sensor) or []
+    try:
+        c.stac_search(["AMSR2-REMSS-L2P-v8.2"], datetime.date(2026, 8, 6), None)
+    finally:
+        g.stage_day = real
+    assert staged == ["AMSR2R"]

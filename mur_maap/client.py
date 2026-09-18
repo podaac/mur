@@ -39,6 +39,10 @@ from .workspace import WorkspaceBucket, split_s3_uri
 
 logger = logging.getLogger(__name__)
 
+
+class GranuleSensorUnknown(RuntimeError):
+    pass
+
 TERMINAL_OK = {"successful", "succeeded", "success", "completed", "done"}
 TERMINAL_BAD = {"failed", "dismissed", "deleted", "cancelled", "revoked", "error"}
 ACTIVE = {"accepted", "queued", "running", "started", "offline"}
@@ -75,6 +79,9 @@ class MaapPyClient(MAAPClient):
         workspace=None,
         dedup: bool = True,
         poll_interval: float = 30.0,
+        sensor_collections: Optional[Dict[str, List[str]]] = None,
+        granule_workdir=None,
+        collection_filter: Optional[str] = None,
     ):
         if maap is None:                       # imported lazily on purpose
             from maap.maap import MAAP
@@ -90,6 +97,11 @@ class MaapPyClient(MAAPClient):
         self._result_cache: Dict[str, List[str]] = {}
         self._prefix_cache: Dict[str, str] = {}
         self._job_process: Dict[str, str] = {}
+        # Staged granules are keyed by sensor, but run_day() only passes a
+        # collection list, so the mapping has to come from config.
+        self.sensor_collections = sensor_collections or {}
+        self.granule_workdir = granule_workdir
+        self.collection_filter = collection_filter
 
     # -- algorithms ---------------------------------------------------------
 
@@ -284,10 +296,39 @@ class MaapPyClient(MAAPClient):
         href = self.write_manifest(paths.stac_item_key(process_date, mode), item)
         logger.info("recorded STAC item %s -> %s", item["id"], href)
 
-    def stac_search(self, collections, start, end) -> List[str]:
-        raise NotImplementedError(
-            "L2P granule discovery is not implemented. PO.DAAC needs temporary "
-            "S3 credentials via Earthdata Login, which localize.sh's plain "
-            "`aws s3 cp` cannot obtain -- granules must be staged into the "
-            "workspace bucket first (see mur_maap/granules.py, not yet written). "
-            "landice and iquam do not need this and run today.")
+    def stac_search(self, collections, start, end, *, sensor=None) -> List[str]:
+        """Granule hrefs a DPS job can actually read.
+
+        Not a STAC search: a DPS job cannot fetch from PO.DAAC (every DAAC
+        needs temporary S3 credentials via Earthdata Login, which
+        localize.sh's plain `aws s3 cp` cannot obtain). Granules are fetched
+        here, where Earthdata credentials live, copied into the workspace
+        bucket, and the job reads them from there.
+
+        The name is kept because run_day() calls it; what it returns is still
+        "the hrefs for this collection and day".
+        """
+        from . import granules
+
+        if sensor is None:
+            # run_day passes start == end, one sensor's collections at a time.
+            sensor = self._sensor_for_collections(collections)
+        return granules.stage_day(
+            self, sensor, list(collections), start,
+            workdir=self.granule_workdir,
+            collection_filter=self.collection_filter,
+        )
+
+    def _sensor_for_collections(self, collections) -> str:
+        """Which sensor a collection list belongs to.
+
+        Staged granules are keyed by sensor, so this cannot be guessed from
+        the collection name -- AMSR2R alone has two.
+        """
+        for sensor, cfg in (self.sensor_collections or {}).items():
+            if list(cfg) == list(collections):
+                return sensor
+        raise GranuleSensorUnknown(
+            f"no sensor configured for collections {list(collections)}; pass "
+            f"sensor_collections to the client so staged granules can be keyed "
+            f"by sensor")

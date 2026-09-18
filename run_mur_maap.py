@@ -542,3 +542,181 @@ class MAAPOrchestrator:
             results.append(self.run_day(process_date, mode))
 
         return results
+
+
+# ---------------------------------------------------------------------------
+# CLI
+#
+# Designed to run INSIDE a MAAP workspace: authentication is ambient there,
+# the workspace bucket is reachable, and Earthdata credentials for granule
+# staging are already in place. It is not a remote driver -- there is no
+# mechanism here for talking to MAAP from outside a workspace.
+# ---------------------------------------------------------------------------
+
+def parse_process_days(value: str) -> List[int]:
+    """Offsets from the run day: "-1", or a range like "-9:-1"."""
+    if ":" in value:
+        lo, hi = (int(x) for x in value.split(":", 1))
+        if lo > hi:
+            lo, hi = hi, lo
+        return list(range(lo, hi + 1))
+    return [int(value)]
+
+
+def _is_placeholder(value) -> bool:
+    """Whether a config value is still an unfilled <angle-bracket> template.
+
+    config.maap.example.json ships these deliberately, and they are truthy, so
+    a plain falsiness check lets them through to fail as something obscure
+    much later.
+    """
+    return isinstance(value, str) and "<" in value and ">" in value
+
+
+def build_client(config: Dict, args):
+    """Construct the real client from config plus CLI overrides."""
+    from mur_maap.client import MaapPyClient
+
+    maap_cfg = config.get("maap", {})
+    queue = args.queue or maap_cfg.get("queue")
+    if not queue or _is_placeholder(queue):
+        raise SystemExit(
+            f"No usable DPS queue (got {queue!r}). Set maap.queue in the config "
+            f"or pass --queue. Ask MAAP ops which queues you may use; MRVA needs "
+            f"the large one.")
+
+    root = maap_cfg.get("workspace_root")
+    if root and _is_placeholder(root):
+        raise SystemExit(
+            f"maap.workspace_root is still a placeholder ({root!r}). Get the real "
+            f"value from:  python utils/upload_static_resources.py --check")
+
+    l2p = config.get("l2p", {})
+    sensor_collections = {
+        s: cfg.get("collection_name", [])
+        for s, cfg in (l2p.get("sensors") or {}).items()
+    }
+
+    return MaapPyClient(
+        queue=queue,
+        version=str(maap_cfg.get("algorithm_version", "2.0.0")),
+        sensor_collections=sensor_collections,
+        granule_workdir=args.granule_workdir,
+        collection_filter=args.collection,
+        poll_interval=args.poll_interval,
+        dedup=not args.no_dedup,
+    )
+
+
+def parse_args(argv=None):
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="run_mur_maap.py",
+        description="Run the MUR SST pipeline on MAAP DPS, from a MAAP workspace.",
+        epilog=(
+            "Run this inside a MAAP workspace. Authentication is ambient there, "
+            "and granule staging needs the Earthdata credentials that live in "
+            "the workspace.\n\n"
+            "  python run_mur_maap.py --config config.maap.json -p -1\n"
+            "  python run_mur_maap.py --config config.maap.json -p -1 --dry-run\n"
+            "  python run_mur_maap.py --config config.maap.json -p=-9:-1\n"
+            "  python run_mur_maap.py --config config.maap.json -p -1 "
+            "--execute landice,iquam\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
+    )
+    parser.add_argument("--config", required=True, help="MAAP config JSON.")
+    parser.add_argument("--date", help="Treat this YYYY-MM-DD as the run day.")
+    parser.add_argument("-p", "--process-days", default="-1",
+                        help="Offset(s) from the run day: -1, or a range. A range "
+                             "needs an equals sign -- -p=-9:-1 -- because argparse "
+                             "reads a bare -9:-1 as an option (default: %(default)s).")
+    parser.add_argument("--execute",
+                        help="Comma-separated stages to run: landice,iquam,l2p,mrva. "
+                             "Default: all. MRVA needs l2p's outputs, so excluding "
+                             "l2p while including mrva will fail.")
+    parser.add_argument("--sensors", help="Comma-separated sensor subset.")
+    parser.add_argument("--collection", help="Only this PO.DAAC collection.")
+    parser.add_argument("--queue", help="DPS queue (overrides maap.queue).")
+    parser.add_argument("--granule-workdir",
+                        help="Where granules are downloaded before staging. "
+                             "Default: a temp dir, removed afterwards.")
+    parser.add_argument("--poll-interval", type=float, default=30.0,
+                        help="Seconds between job status checks (default: %(default)s).")
+    parser.add_argument("--no-dedup", action="store_true",
+                        help="Submit even if an identical job already ran.")
+    parser.add_argument("--force-nrt", action="store_true",
+                        help="Process every day in NRT mode.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print the plan and exit. Needs no credentials.")
+    parser.add_argument("--debug", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    logging.basicConfig(
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+        level=logging.DEBUG if args.debug else logging.INFO,
+    )
+
+    config = mur_config.load_config(args.config)
+    if args.date:
+        mur_date.set_simulated_date(datetime.date.fromisoformat(args.date))
+
+    offsets = parse_process_days(args.process_days)
+    reference_today = mur_date.today()
+    days = [reference_today + datetime.timedelta(days=o) for o in offsets]
+    _, day1, _ = mur_window.calculate_processing_window(reference_today)
+
+    if args.sensors:
+        wanted = [s.strip().upper() for s in args.sensors.split(",") if s.strip()]
+        config["l2p"]["active_sensors"] = [
+            s for s in config["l2p"]["active_sensors"] if s in wanted]
+
+    print(f"run day        {reference_today}")
+    print(f"analysis days  {', '.join(str(d) for d in days)}")
+    for d in days:
+        print(f"  {d}  {mur_window.mode_for(d, day1, force_nrt=args.force_nrt)}")
+    print(f"sensors        {', '.join(config['l2p']['active_sensors'])}")
+
+    if args.dry_run:
+        # Deliberately offline: exercises the window maths, the config and the
+        # sensor selection without credentials or a single API call.
+        print("\ndry run: nothing submitted")
+        return 0
+
+    client = build_client(config, args)
+    orchestrator = MAAPOrchestrator(
+        config, client,
+        force_nrt=args.force_nrt,
+        today_fn=lambda: reference_today,     # frozen: a run must not drift
+    )
+
+    failed = []
+    for day in days:
+        mode = mur_window.mode_for(day, day1, force_nrt=args.force_nrt)
+        logger.info("=== %s (%s) ===", day, mode)
+        try:
+            result = orchestrator.run_day(day, mode)
+            logger.info("    done: %s", result.netcdf_href)
+        except Exception as exc:                          # noqa: BLE001
+            logger.error("    %s FAILED: %s", day, exc)
+            if args.debug:
+                logger.exception("full traceback")
+            failed.append((day, exc))
+
+    if failed:
+        print(f"\n{len(failed)} of {len(days)} day(s) failed:")
+        for day, exc in failed:
+            print(f"  {day}: {exc}")
+        return 1
+    print(f"\n{len(days)} day(s) complete")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

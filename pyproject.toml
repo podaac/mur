@@ -30,12 +30,19 @@ dependencies = [
     # Web interface
     "streamlit>=1.28.0",
     "plotly>=5.17.0",
+
+    # Viewer data sources: STAC search over plain HTTP (no pystac-client
+    # needed for one POST) and S3 reads of the MAAP workspace bucket.
+    # earthaccess, above, covers PO.DAAC discovery and download.
+    "requests>=2.28.0",
+    "s3fs>=2023.1.0",
 ]
 
 [project.scripts]
 mur-pipeline = "run_mur_pipeline:main"
 mur-viewer = "dataviewer.dataviewer:main"
 mur-web-viewer = "run_web_viewer:main"
+mur-maap = "run_mur_maap:main"
 
 [project.optional-dependencies]
 dev = [
@@ -54,7 +61,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["dataviewer"]
+packages = ["dataviewer", "mur_maap"]
 include = [
     "run_mur_pipeline.py",
     "run_web_viewer.py",
