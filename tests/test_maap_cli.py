@@ -130,3 +130,21 @@ def test_list_queues_does_not_require_a_config():
 def test_config_is_still_required_for_a_real_run():
     with pytest.raises(SystemExit, match="--config is required"):
         cli.main(["-p", "-1"])
+
+
+def test_init_config_is_non_interactive_without_a_terminal(tmp_path, monkeypatch):
+    """It must still write a usable file when run from a script or CI, rather
+    than blocking on input() forever."""
+    monkeypatch.setattr(cli, "fetch_queues", lambda: ["small", "large"])
+    dest = tmp_path / "c.json"
+    assert cli.main(["--config", str(dest), "--init-config"]) == 0
+    assert dest.exists()
+
+
+def test_module_needs_cover_every_process_the_orchestrator_submits():
+    """The listing is read against these, so a missing module would print a
+    queue table that silently omits one."""
+    import re
+    source = (cli.pathlib.Path(cli.__file__)).read_text()
+    submitted = set(re.findall(r'submit_job\("(mur-[a-z]+)"', source))
+    assert submitted <= set(cli.MODULE_NEEDS)

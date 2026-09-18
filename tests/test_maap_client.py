@@ -266,3 +266,29 @@ def test_stac_search_maps_collections_back_to_their_sensor():
     finally:
         g.stage_day = real
     assert staged == ["AMSR2R"]
+
+
+# --- per-module queues -----------------------------------------------------
+
+def test_a_single_queue_is_used_for_every_module():
+    c, _, _ = make_client()
+    assert c.queue_for("mur-landice") == c.queue_for("mur-mrva") == "q"
+
+
+def test_mrva_can_be_sent_to_its_own_queue():
+    """MRVA needs 64 GiB where the others need 4-8. One queue for all four
+    either wastes a large worker on iquam, or fails MRVA at the very end
+    after everything upstream has already succeeded."""
+    c, maap, _ = make_client()
+    c.queues = {"mur-mrva": "big-queue"}
+    assert c.queue_for("mur-landice") == "q"
+    assert c.queue_for("mur-mrva") == "big-queue"
+
+
+def test_the_override_reaches_the_submission():
+    c, maap, _ = make_client()
+    c.queues = {"mur-mrva": "big-queue"}
+    c.algorithms = {"mur-landice": 65, "mur-mrva": 67}
+    c.submit_job("mur-landice", {})
+    c.submit_job("mur-mrva", {})
+    assert [s["queue"] for s in maap.submitted] == ["q", "big-queue"]

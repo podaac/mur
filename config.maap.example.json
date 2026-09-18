@@ -10,7 +10,11 @@
     "workspace_root": "s3://maap-ops-workspace/<username>",
     "queue": "<queue name from MAAP ops>",
     "granule_staging": "workspace",
-    "_granule_staging_note": "workspace = copy PO.DAAC granules into the workspace bucket first, because localize.sh's plain `aws s3 cp` cannot authenticate to a DAAC. direct = pass PO.DAAC hrefs straight through; only once DAAC creds are solved inside the container."
+    "_granule_staging_note": "workspace = copy PO.DAAC granules into the workspace bucket first, because localize.sh's plain `aws s3 cp` cannot authenticate to a DAAC. direct = pass PO.DAAC hrefs straight through; only once DAAC creds are solved inside the container.",
+    "queues": {
+      "mur-mrva": "<a 64 GiB / 16 core queue, if different>"
+    },
+    "_queues_note": "maap.queue is the default for every module. maap.queues overrides it per process. Only MRVA needs a large worker (64 GiB / 16 cores); landice, iquam and l2p fit on 4-8 GiB. Run --list-queues to see what is available."
   },
   "landice": {
     "static_resources_dir": "s3://maap-ops-workspace/<username>/mur/static-resources"

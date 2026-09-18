@@ -603,12 +603,67 @@ def build_client(config: Dict, args):
         version=str(maap_cfg.get("algorithm_version", "2.0.0")),
         sensor_collections=sensor_collections,
         granule_workdir=args.granule_workdir,
+        queues=maap_cfg.get("queues"),
         granule_staging=args.granule_staging or maap_cfg.get(
             "granule_staging", "workspace"),
         collection_filter=args.collection,
         poll_interval=args.poll_interval,
         dedup=not args.no_dedup,
     )
+
+
+# Roughly what each module asks for, so a queue listing can be read against
+# something. From the ram_min/cores_min in maap/*/algorithm_config.yml.
+MODULE_NEEDS = {
+    "mur-iquam":   "4 GiB / 1 core",
+    "mur-landice": "6 GiB / 2 cores",
+    "mur-l2p":     "8 GiB / 2 cores",
+    "mur-mrva":    "64 GiB / 16 cores",
+}
+
+
+def fetch_queues():
+    """Queue names available to this account, or None if they cannot be read."""
+    import requests
+
+    try:
+        from maap.maap import MAAP
+        maap = MAAP()
+    except Exception:                                     # noqa: BLE001
+        return None
+
+    url = f"{maap.config.maap_api_root.rstrip('/')}/admin/job-queues"
+    try:
+        resp = requests.get(url, headers=maap._get_api_header(), timeout=30)
+        if resp.status_code != 200:
+            return None
+        body = resp.json()
+    except Exception:                                     # noqa: BLE001
+        return None
+
+    entries = body.get("queues", body) if isinstance(body, dict) else body
+    names = []
+    for q in entries or []:
+        name = q.get("queue_name") or q.get("name") or q.get("id") if isinstance(q, dict) else q
+        if name:
+            names.append(str(name))
+    return sorted(set(names)) or None
+
+
+def _choose(prompt, options, default=None):
+    """Numbered pick, or free text. Returns None if there is no terminal."""
+    import sys as _sys
+    if not _sys.stdin.isatty():
+        return None
+    for i, opt in enumerate(options, 1):
+        print(f"  {i:>2}. {opt}")
+    suffix = f" [{default}]" if default else ""
+    raw = input(f"{prompt}{suffix}: ").strip()
+    if not raw:
+        return default
+    if raw.isdigit() and 1 <= int(raw) <= len(options):
+        return options[int(raw) - 1]
+    return raw                       # a name typed in full
 
 
 def list_queues() -> int:
@@ -691,15 +746,45 @@ def init_config(dest: str) -> int:
         print(f"Could not reach MAAP to discover the workspace root ({exc}).")
         print("Writing the template with placeholders instead.")
 
+    # Choosing a queue is the one value that cannot be discovered, so offer
+    # the list rather than leaving a placeholder to look up separately.
+    queues = fetch_queues()
+    if queues:
+        print("\nDPS queues available to you. A queue selects the worker size:")
+        for module, need in MODULE_NEEDS.items():
+            print(f"    {module:<14} needs ~{need}")
+        print()
+        picked = _choose("Queue for landice, iquam and l2p", queues,
+                         default=queues[0])
+        if picked:
+            config.setdefault("maap", {})["queue"] = picked
+            print()
+            print("MRVA needs far more than the others. Choose its queue")
+            print("(Enter to reuse the same one):")
+            mrva = _choose("Queue for mrva", queues, default=picked)
+            if mrva and mrva != picked:
+                config["maap"].setdefault("queues", {})["mur-mrva"] = mrva
+    else:
+        print("\nCould not list queues; leaving maap.queue as a placeholder.")
+        print("Find the names in the Jobs UI: Launcher -> Submit Jobs ->")
+        print("the Resource dropdown.")
+
     target.write_text(json.dumps(config, indent=2) + "\n")
-    print(f"wrote {target}")
+    print(f"\nwrote {target}")
     if discovered:
         print(f"  workspace_root       {discovered}")
         print(f"  static_resources_dir {discovered}/mur/static-resources")
-    print()
-    print("Still to fill in:")
-    print("  maap.queue   the DPS queue to submit to. Ask MAAP ops which you")
-    print("               may use; MRVA needs one with 64 GiB and 16 cores.")
+    queue = config.get("maap", {}).get("queue")
+    if _is_placeholder(queue):
+        print()
+        print("Still to fill in:")
+        print("  maap.queue   run --list-queues, or see the Jobs UI's Resource")
+        print("               dropdown. MRVA needs 64 GiB and 16 cores.")
+    else:
+        print(f"  queue                {queue}")
+        override = config.get("maap", {}).get("queues", {}).get("mur-mrva")
+        if override:
+            print(f"  queue (mrva)         {override}")
     return 0
 
 

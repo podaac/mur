@@ -74,6 +74,7 @@ class MaapPyClient(MAAPClient):
         *,
         algorithms: Optional[Dict[str, int]] = None,
         queue: str,
+        queues: Optional[Dict[str, str]] = None,
         version: str,
         tag_prefix: str = "mur",
         workspace=None,
@@ -89,6 +90,10 @@ class MaapPyClient(MAAPClient):
             maap = MAAP()
         self.maap = maap
         self.queue = queue
+        # MRVA needs a 64 GiB queue; the other three fit on small ones. A
+        # single queue for all four either wastes a large worker on iquam or
+        # fails MRVA at the very end, after everything else has succeeded.
+        self.queues = dict(queues or {})
         self.version = str(version)
         self.tag_prefix = tag_prefix
         self.dedup = dedup
@@ -194,7 +199,7 @@ class MaapPyClient(MAAPClient):
         resp = self.maap.submit_job(
             process_id=pid,
             inputs=inputs,
-            queue=self.queue,
+            queue=self.queue_for(process_id),
             dedup=self.dedup,
             tag=tag or f"{self.tag_prefix}.{process_id}",
         )
@@ -208,6 +213,10 @@ class MaapPyClient(MAAPClient):
         self._job_process[job_id] = process_id
         logger.info("submitted %s -> %s", process_id, job_id)
         return job_id
+
+    def queue_for(self, process_id: str) -> str:
+        """The queue this process should run on, falling back to the default."""
+        return self.queues.get(process_id, self.queue)
 
     def get_job_status(self, job_id: str) -> str:
         resp = self.maap.get_job_status(job_id)
