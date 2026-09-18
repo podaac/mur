@@ -192,3 +192,33 @@ def test_interrupt_is_useful_even_before_anything_was_submitted(capsys):
         pass
     cli._report_interrupt(Empty())
     assert "Interrupted" in capsys.readouterr().out
+
+
+def test_dry_run_reports_the_job_count(capsys):
+    """23 jobs and a large download is a different commitment from the
+    single-sensor test that preceded it; seeing it first is the point."""
+    cli.main(["--config", "config.maap.example.json",
+              "--date", "2026-09-18", "-p", "-1", "--dry-run"])
+    out = capsys.readouterr().out
+    assert "mur-l2p" in out and "job(s)" in out
+    assert "mur-mrva" in out
+
+
+def test_dry_run_warns_about_staging_volume_only_in_workspace_mode(capsys):
+    cli.main(["--config", "config.maap.example.json", "--date", "2026-09-18",
+              "-p", "-1", "--dry-run"])
+    assert "downloaded and re-uploaded" in capsys.readouterr().out
+
+    cli.main(["--config", "config.maap.example.json", "--date", "2026-09-18",
+              "-p", "-1", "--dry-run", "--granule-staging", "direct"])
+    assert "downloaded and re-uploaded" not in capsys.readouterr().out
+
+
+def test_the_plan_excludes_future_days(capsys):
+    """A forward day_range reaches past the run day; those are not submitted,
+    so counting them would overstate the work."""
+    cli.main(["--config", "config.maap.example.json",
+              "--date", "2026-09-18", "-p", "-1", "--dry-run"])
+    out = capsys.readouterr().out
+    # day_range [2,2] around 2026-09-17 spans 15th-19th; the 19th is future.
+    assert "4 sensor-day(s)" in out

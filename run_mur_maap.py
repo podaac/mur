@@ -586,6 +586,46 @@ def _is_placeholder(value) -> bool:
     return isinstance(value, str) and "<" in value and ">" in value
 
 
+def _print_job_plan(config: Dict, days, reference_today, args) -> None:
+    """How many jobs this will submit, and roughly how much data it moves.
+
+    Worth seeing before committing: in workspace mode every granule is
+    downloaded here and uploaded to the bucket, and a full five-sensor window
+    is a great deal more than a single-sensor test.
+    """
+    l2p = config.get("l2p", {})
+    sensors = l2p.get("active_sensors", [])
+    staging = args.granule_staging or config.get("maap", {}).get(
+        "granule_staging", "workspace")
+
+    total_units = 0
+    print("\njobs")
+    for sensor in sensors:
+        cfg = (l2p.get("sensors") or {}).get(sensor, {})
+        units = 0
+        for day in days:
+            units += sum(1 for _ in mur_window.day_range_dates(
+                day, cfg.get("day_range", [2, 2]),
+                reference_today=reference_today))
+        total_units += units
+        print(f"  mur-l2p    {sensor:<8} {units:>3} sensor-day(s)")
+
+    per_day = len(days)
+    print(f"  mur-landice{'':<9}{per_day:>3}")
+    print(f"  mur-iquam  {'':<9}{per_day:>3}")
+    print(f"  mur-mrva   {'':<9}{per_day:>3}")
+    print(f"  {'total':<20}{total_units + 3 * per_day:>3} job(s)")
+
+    if staging == "workspace" and total_units:
+        # A MODIS day was ~350 granules at ~20 MB. Other sensors are smaller,
+        # so this is an upper bound rather than a forecast.
+        gb = total_units * 350 * 20 / 1024
+        print()
+        print(f"  granule staging: up to ~{gb:,.0f} GB downloaded and re-uploaded")
+        print(f"  (a MODIS day is ~350 granules at ~20 MB; other sensors are")
+        print(f"   smaller. Already-staged days are skipped, so re-runs are cheap.)")
+
+
 def build_client(config: Dict, args):
     """Construct the real client from config plus CLI overrides."""
     from mur_maap.client import MaapPyClient
@@ -972,6 +1012,8 @@ def main(argv=None) -> int:
     for d in days:
         print(f"  {d}  {mur_window.mode_for(d, day1, force_nrt=args.force_nrt)}")
     print(f"sensors        {', '.join(config['l2p']['active_sensors'])}")
+
+    _print_job_plan(config, days, reference_today, args)
 
     if args.dry_run:
         # Deliberately offline: exercises the window maths, the config and the
