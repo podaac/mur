@@ -113,5 +113,19 @@ PYEOF
         return 1
     fi
 
+    # An empty manifest passes every check above -- nothing is missing when
+    # nothing was listed -- and MATLAB then runs happily over an empty
+    # directory. Observed on a real job: a day with no granules produced a
+    # 48-byte BIC and a 0-byte L2Plist, and the job reported success. That is
+    # worse than failing, because the caller believes a product exists and
+    # MRVA would consume a zero-observation file as though it were data.
+    #
+    # An empty fan-in is never meaningful for any consumer: no granules means
+    # do not run L2P, and no sensor inputs means do not run MRVA.
+    if [[ "$total" -eq 0 ]]; then
+        echo "ERROR: localize_manifest: '$name' listed no files. Refusing to run over an empty input set -- the caller should skip this unit of work instead." >&2
+        return 1
+    fi
+
     echo "$dest_root"
 }

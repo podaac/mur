@@ -202,6 +202,32 @@ else
 fi
 rm -rf "$scratch" "$src_dir"
 
+# --- an empty manifest must fail, not silently produce an empty product ---
+#
+# Observed on a real DPS job: a day with no granules localized cleanly (nothing
+# is missing when nothing was listed), MATLAB ran over an empty directory, and
+# L2P emitted a 48-byte BIC and a 0-byte L2Plist while reporting success. A
+# downstream MRVA would then consume that as real data. No consumer has a
+# meaningful use for an empty fan-in.
+scratch=$(mktemp -d)
+empty_manifest="$scratch/empty.json"
+echo '{"files": []}' > "$empty_manifest"
+
+if run_case "localize_manifest granules '$empty_manifest' '$scratch/out'" >/dev/null 2>&1; then
+    echo "FAIL: localize_manifest accepted an empty manifest"
+    FAILURES=$((FAILURES + 1))
+else
+    echo "PASS: localize_manifest rejects an empty manifest"
+fi
+
+err=$(run_case "localize_manifest granules '$empty_manifest' '$scratch/out'" 2>&1 >/dev/null)
+case "$err" in
+    *"listed no files"*) echo "PASS: the error says the manifest was empty" ;;
+    *) echo "FAIL: unhelpful error for an empty manifest: $err"
+       FAILURES=$((FAILURES + 1)) ;;
+esac
+rm -rf "$scratch"
+
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
     echo "All tests passed."
