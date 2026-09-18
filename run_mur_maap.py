@@ -611,6 +611,53 @@ def build_client(config: Dict, args):
     )
 
 
+def list_queues() -> int:
+    """Print the DPS queues this account can submit to.
+
+    A queue is a worker pool of a given size -- MAAP's own job-submission
+    tutorial describes picking "the smallest one (8 GB)" -- so choosing one is
+    choosing how much memory and how many cores a job gets. MRVA needs a large
+    one; landice, iquam and l2p do not.
+    """
+    import requests
+
+    try:
+        from maap.maap import MAAP
+        maap = MAAP()
+    except Exception as exc:                              # noqa: BLE001
+        raise SystemExit(
+            f"Could not reach MAAP ({exc}). Run this inside a MAAP workspace.")
+
+    url = f"{maap.config.maap_api_root.rstrip('/')}/admin/job-queues"
+    resp = requests.get(url, headers=maap._get_api_header())
+    print(f"{url}\nHTTP {resp.status_code}\n")
+
+    if resp.status_code != 200:
+        print(resp.text[:600])
+        print()
+        print("If this is denied, the queue names are also in the Jobs UI:")
+        print("  Launcher -> Submit Jobs -> the Resource dropdown")
+        return 1
+
+    try:
+        body = resp.json()
+    except ValueError:
+        print(resp.text[:600])
+        return 1
+
+    queues = body.get("queues", body) if isinstance(body, dict) else body
+    if not queues:
+        print("No queues returned. Check the Jobs UI's Resource dropdown.")
+        return 1
+
+    import json as _json
+    print(_json.dumps(queues, indent=2)[:4000])
+    print()
+    print("Put one in the config as maap.queue, or pass --queue.")
+    print("MRVA needs 64 GiB and 16 cores; the others fit on small queues.")
+    return 0
+
+
 def init_config(dest: str) -> int:
     """Write a MAAP config, filling in what can be discovered.
 
@@ -675,7 +722,11 @@ def parse_args(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
     )
-    parser.add_argument("--config", required=True, help="MAAP config JSON.")
+    # Not required for --list-queues, which needs no config at all.
+    parser.add_argument("--config", help="MAAP config JSON.")
+    parser.add_argument("--list-queues", action="store_true",
+                        help="List the DPS queues available to this account, then "
+                             "exit. A queue selects the worker size a job runs on.")
     parser.add_argument("--init-config", action="store_true",
                         help="Write --config from the shipped example, filling in "
                              "the workspace root from your MAAP credentials, then "
@@ -715,11 +766,16 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    if not args.config and not args.list_queues:
+        raise SystemExit("--config is required (except with --list-queues).")
     logging.basicConfig(
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%H:%M:%S",
         level=logging.DEBUG if args.debug else logging.INFO,
     )
+
+    if args.list_queues:
+        return list_queues()
 
     if args.init_config:
         return init_config(args.config)

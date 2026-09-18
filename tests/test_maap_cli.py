@@ -118,3 +118,15 @@ def test_init_config_refuses_to_overwrite(tmp_path):
     dest.write_text("{}")
     with pytest.raises(SystemExit, match="already exists"):
         cli.main(["--config", str(dest), "--init-config"])
+
+
+def test_list_queues_does_not_require_a_config():
+    """Choosing a queue is a prerequisite to writing the config, so requiring
+    the config first would be circular."""
+    args = cli.parse_args(["--list-queues"])
+    assert args.list_queues and args.config is None
+
+
+def test_config_is_still_required_for_a_real_run():
+    with pytest.raises(SystemExit, match="--config is required"):
+        cli.main(["-p", "-1"])
