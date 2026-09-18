@@ -3,15 +3,23 @@
 Two modes, selected by `maap.granule_staging` in the config.
 
 "direct" queries CMR and hands L2P the granules' own PO.DAAC s3:// hrefs. No
-copy, no duplicate storage -- far better when it works. Whether it works
-depends on something not documented: a DPS worker reads S3 as its own role,
-and localize.sh uses a plain `aws s3 cp`, so PO.DAAC is readable only if that
-role carries DAAC access (MAAP documents a `maap-data-reader` role, which
-suggests it may). One L2P job settles it.
+copy, no duplicate storage -- but a real job showed the DPS worker cannot read
+them:
+
+    aws s3 cp s3://podaac-ops-cumulus-protected/MODIS_A-JPL-L2P-v2019.0/...nc
+    fatal error: An error occurred (403) when calling the HeadObject
+    operation: Forbidden
+
+A worker reads S3 as its own role, and that role has no PO.DAAC access. So
+direct mode does not work today. It is kept because nothing in this repo makes
+it wrong -- if MAAP grants workers DAAC access, or localize.sh learns to mint
+Earthdata credentials, it becomes the better option immediately.
 
 "workspace" fetches granules here -- where Earthdata credentials live -- and
-copies them into the workspace bucket, which the job's own role can certainly
-read. It always works and costs duplicate storage.
+copies them into the workspace bucket. The same failing job proved the worker
+CAN read that bucket: it downloaded its own manifest from
+s3://maap-ops-workspace/... moments before failing on PO.DAAC. This is the
+mode that works, and the default.
 
 Only the discovery differs. L2P's OUTPUT is staged out by DPS either way, and
 MRVA reads it from there.

@@ -107,9 +107,16 @@ class MaapPyClient(MAAPClient):
         # collection list, so the mapping has to come from config.
         self.sensor_collections = sensor_collections or {}
         self.granule_workdir = granule_workdir
-        # "direct" hands L2P PO.DAAC's own s3:// hrefs -- no copy, but it
-        # only works if the DPS worker's role can read PO.DAAC.
+        # "direct" hands L2P PO.DAAC's own s3:// hrefs -- no copy, but a real
+        # job showed the worker's role gets 403 Forbidden on
+        # podaac-ops-cumulus-protected. Kept for when that changes.
         self.granule_staging = granule_staging
+        if granule_staging == "direct":
+            logger.warning(
+                "granule_staging=direct: a DPS worker reads S3 as its own role, "
+                "which was observed to get 403 Forbidden on PO.DAAC. L2P will "
+                "fail in localize_all_inputs. Use workspace mode unless testing "
+                "whether that has changed.")
         self.collection_filter = collection_filter
 
     # -- algorithms ---------------------------------------------------------

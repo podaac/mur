@@ -344,7 +344,8 @@
       worst case exceeds 20&nbsp;GB. <code>outdir_max</code> does not reserve
       scratch.</li>
       <li><strong>Outbound egress from DPS workers.</strong> landice fetches
-      OSI-SAF sea ice; iQUAM fetches NOAA STAR.</li>
+      OSI-SAF sea ice; iQUAM fetches NOAA STAR. (A worker does reach ghcr.io
+      and S3, so egress is not blocked wholesale.)</li>
       <li><strong>The runtime UID/GID</strong>, which decides whether MRVA's
       symlink stage-out works or falls back to copying.</li>
       <li><strong><code>submit_job(inputs=)</code>'s shape</strong> &mdash;
@@ -358,15 +359,20 @@
     </ul>
 
     <div class="note">
-      <p>One design decision is provisional rather than unverified. L2P granules
-      are copied into the workspace bucket before a job reads them, because
-      <code>localize.sh</code>'s plain <code>aws s3 cp</code> cannot
-      authenticate to a DAAC &mdash; every DAAC requires temporary S3
-      credentials via Earthdata Login. That costs duplicate storage. The cleaner
-      fix is teaching <code>localize.sh</code> to mint those credentials, but it
-      touches the file all four containers share and means rebuilding every
-      image, so a <code>maap.granule_staging</code> config switch leaves the
-      door open.</p>
+      <p>L2P granules are copied into the workspace bucket before a job reads
+      them. A real job confirmed why: handed PO.DAAC's own href, the container
+      fails with <code>An error occurred (403) when calling the HeadObject
+      operation: Forbidden</code> on
+      <code>podaac-ops-cumulus-protected</code>. A worker reads S3 as its own
+      role, and that role has no DAAC access.</p>
+
+      <p>The same job proved the other half &mdash; it downloaded its manifest
+      from the workspace bucket seconds earlier, so a worker reads that
+      perfectly well. Copying costs duplicate storage and is the price of the
+      403. The cleaner fix is teaching <code>localize.sh</code> to mint
+      Earthdata credentials, but it touches the file all four containers share
+      and means rebuilding every image; a <code>maap.granule_staging</code>
+      switch keeps the direct path available for when that changes.</p>
     </div>
 
     <footer>
