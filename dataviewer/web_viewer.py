@@ -14,6 +14,7 @@ Usage:
 
 import streamlit as st
 from pathlib import Path
+import datetime
 import os
 import numpy as np
 import matplotlib
@@ -28,12 +29,20 @@ try:
     from .dataviewer import (compute_robust_stats, smart_downsample,
                              slice_to_bounds, block_mean_resample,
                              nearest_resample)
+    from .viewer_config import ViewerConfig, load_config as load_viewer_config
+    from .sources import (Granule, CatalogError, CatalogUnavailable,
+                          LocalCatalog, get_catalog, cache_summary,
+                          clear_cache, parse_l4_date)
 except ImportError:
     # Running as standalone script via streamlit
     from format_readers import read_file, DataFileReader
     from dataviewer import (compute_robust_stats, smart_downsample,
                             slice_to_bounds, block_mean_resample,
                             nearest_resample)
+    from viewer_config import ViewerConfig, load_config as load_viewer_config
+    from sources import (Granule, CatalogError, CatalogUnavailable,
+                         LocalCatalog, get_catalog, cache_summary,
+                         clear_cache, parse_l4_date)
 
 # Note: streamlit-file-browser component doesn't work in sidebar, so we use native widgets
 
@@ -50,10 +59,16 @@ st.set_page_config(
 
 
 def get_base_directory() -> Path:
+    """Root of the local file browser.
+
+    Reads the resolved ViewerConfig when one exists, so a root changed in the
+    Data Sources panel takes effect here too, and falls back to the historical
+    MUR_BASE_DIR environment variable when the viewer is used as a library or
+    before the config is loaded.
     """
-    Get the base directory for file browsing.
-    Can be set via environment variable BASE_DIR or defaults to current directory.
-    """
+    config = st.session_state.get('_viewer_config')
+    if config is not None:
+        return Path(config.base_dir).resolve()
     base_dir = os.environ.get('MUR_BASE_DIR', os.getcwd())
     return Path(base_dir).resolve()
 
@@ -3027,6 +3042,292 @@ def _render_comparison_plotly(data1: dict, data2: dict, format_type: str,
     return True
 
 
+# ---------------------------------------------------------------------------
+# Data sources
+#
+# The viewer's original model was "one directory, two files you picked by
+# hand". That only ever worked when both sides of a comparison happened to be
+# on the machine running Streamlit. The catalog layer (dataviewer/sources.py)
+# replaces it with: a run comes from wherever runs live (this filesystem, or
+# MAAP's STAC), and the thing it is compared against defaults to the
+# operational MUR L4 at PO.DAAC -- which is the comparison that actually
+# answers "is this run right", and needs no local path at all.
+#
+# Everything below is presentation. Discovery, download and caching live in
+# sources.py so they stay testable without Streamlit.
+# ---------------------------------------------------------------------------
+
+RUN_SOURCE_LABELS = {
+    'local': 'Local filesystem',
+    'maap': 'MAAP STAC',
+}
+REFERENCE_SOURCE_LABELS = {
+    'public': 'Public product (PO.DAAC)',
+    'local': 'Local file',
+    'maap': 'MAAP STAC',
+}
+
+
+def get_viewer_config() -> ViewerConfig:
+    """The active configuration, resolved once per session.
+
+    Loaded from the config file and environment on first use, then kept in
+    session state so the sidebar's overrides survive a rerun. Reloading on
+    every rerun would throw away whatever the user just selected.
+    """
+    if '_viewer_config' not in st.session_state:
+        try:
+            st.session_state._viewer_config = load_viewer_config()
+        except Exception as exc:
+            st.sidebar.error(f"Config error: {exc}")
+            st.session_state._viewer_config = ViewerConfig()
+    return st.session_state._viewer_config
+
+
+def set_viewer_config(config: ViewerConfig) -> None:
+    st.session_state._viewer_config = config
+
+
+def _source_status(catalog) -> None:
+    """Paint a one-line readiness indicator for a catalog."""
+    reason = catalog.check()
+    if reason is None:
+        st.caption(f"✅ {catalog.title}")
+    else:
+        st.caption(f"⚠️ {catalog.title}: {reason}")
+
+
+def render_source_controls(config: ViewerConfig) -> ViewerConfig:
+    """Sidebar controls for where runs and the reference come from.
+
+    Returns a (possibly updated) config. The selections are written straight
+    back into session state, so a change takes effect on the same rerun that
+    produced it.
+    """
+    with st.sidebar.expander("Data Sources", expanded=False):
+        if config.source_file:
+            st.caption(f"Config: `{config.source_file}`")
+        else:
+            st.caption("Config: defaults + environment")
+
+        run_options = list(RUN_SOURCE_LABELS)
+        run_source = st.radio(
+            "Runs from:",
+            run_options,
+            index=run_options.index(config.run_source),
+            format_func=lambda k: RUN_SOURCE_LABELS[k],
+            key='_run_source',
+            help="Where the granule you are inspecting comes from.",
+        )
+
+        ref_options = list(REFERENCE_SOURCE_LABELS)
+        reference_source = st.radio(
+            "Compare against:",
+            ref_options,
+            index=ref_options.index(config.reference_source),
+            format_func=lambda k: REFERENCE_SOURCE_LABELS[k],
+            key='_reference_source',
+            help="The baseline for Compare mode. The public product is the "
+                 "default because it is the same product this pipeline "
+                 "reproduces, so a difference against it is a statement "
+                 "about the run.",
+        )
+
+        config = config.with_overrides(
+            run_source=run_source,
+            reference_source=reference_source,
+        )
+
+        if 'local' in (run_source, reference_source):
+            base = st.text_input(
+                "Local root:",
+                value=str(config.base_dir),
+                key='_source_base_dir',
+            )
+            if base and Path(base).expanduser().is_dir():
+                config = config.with_overrides(base_dir=base)
+
+        if 'maap' in (run_source, reference_source):
+            stac_url = st.text_input(
+                "MAAP STAC URL:", value=config.maap_stac_url,
+                key='_maap_stac_url',
+            )
+            collection = st.text_input(
+                "MAAP collection:", value=config.maap_collection,
+                key='_maap_collection',
+            )
+            workspace = st.text_input(
+                "Workspace root (s3://…):",
+                value=config.maap_workspace_root,
+                key='_maap_workspace_root',
+                help="Fallback discovery: reads the STAC items the pipeline "
+                     "writes to mur/stac/items/<year>/ when no STAC API is "
+                     "reachable.",
+            )
+            config = config.with_overrides(
+                maap_stac_url=stac_url,
+                maap_collection=collection,
+                maap_workspace_root=workspace,
+            )
+
+        if reference_source == 'public':
+            collection = st.text_input(
+                "Public collection:", value=config.public_collection,
+                key='_public_collection',
+            )
+            config = config.with_overrides(public_collection=collection)
+
+        set_viewer_config(config)
+
+        st.write("")
+        for name in dict.fromkeys([run_source, reference_source]):
+            _source_status(get_catalog(name, config))
+
+        summary = cache_summary(config)
+        if summary['files']:
+            st.caption(
+                f"Cache: {summary['files']} file(s), "
+                f"{summary.get('human', '')} in `{summary['path']}`"
+            )
+            if st.button("Clear download cache", use_container_width=True,
+                         key='_clear_cache'):
+                removed = clear_cache(config)
+                st.success(f"Removed {removed} cached file(s)")
+        else:
+            st.caption(f"Cache: empty (`{config.cache_dir}`)")
+
+    return config
+
+
+def fetch_granule_ui(catalog, granule: Granule) -> Optional[Path]:
+    """Materialize a granule locally, showing progress for remote fetches.
+
+    A local granule short-circuits with no UI at all; a PO.DAAC L4 is ~700 MB
+    and takes long enough that a silent spinner would look like a hang.
+    """
+    if granule.is_local:
+        try:
+            return catalog.fetch(granule)
+        except CatalogError as exc:
+            st.error(str(exc))
+            return None
+
+    cached = catalog.cache_path(granule)
+    status = st.empty()
+    bar = st.progress(0.0)
+
+    def report(fraction: float, message: str) -> None:
+        bar.progress(min(max(fraction, 0.0), 1.0))
+        status.caption(message)
+
+    try:
+        path = catalog.fetch(granule, progress=report)
+    except CatalogUnavailable as exc:
+        bar.empty()
+        status.empty()
+        st.warning(str(exc))
+        return None
+    except CatalogError as exc:
+        bar.empty()
+        status.empty()
+        st.error(str(exc))
+        return None
+
+    bar.empty()
+    status.caption(f"✅ {granule.name} → `{cached}`")
+    return path
+
+
+def render_catalog_browser(catalog, key_prefix: str,
+                           label: str) -> Optional[Granule]:
+    """Date-range search over a catalog, returning the chosen granule.
+
+    Used for MAAP and for the public product, where there is no directory to
+    walk -- the only way to find something is to ask for a date.
+    """
+    reason = catalog.check()
+    if reason:
+        st.sidebar.warning(f"{catalog.title}: {reason}")
+        return None
+
+    today = datetime.date.today()
+    default_start = st.session_state.get(f'{key_prefix}_start',
+                                         today - datetime.timedelta(days=14))
+    default_end = st.session_state.get(f'{key_prefix}_end', today)
+
+    st.sidebar.write(f"**{label}**")
+    start = st.sidebar.date_input("From:", value=default_start,
+                                  key=f'{key_prefix}_start_input')
+    end = st.sidebar.date_input("To:", value=default_end,
+                                key=f'{key_prefix}_end_input')
+    if start > end:
+        st.sidebar.error("Start date is after end date")
+        return None
+
+    cache_key = (catalog.name, str(start), str(end),
+                 catalog.config.maap_collection,
+                 catalog.config.public_collection,
+                 str(catalog.config.base_dir))
+    store = st.session_state.setdefault('_catalog_results', {})
+
+    if st.sidebar.button("Search", use_container_width=True,
+                         key=f'{key_prefix}_search'):
+        store.pop(cache_key, None)
+
+    if cache_key not in store:
+        with st.sidebar:
+            with st.spinner(f"Searching {catalog.title}…"):
+                try:
+                    store[cache_key] = catalog.search(start, end)
+                except CatalogUnavailable as exc:
+                    st.warning(str(exc))
+                    return None
+                except CatalogError as exc:
+                    st.error(str(exc))
+                    return None
+
+    granules = store[cache_key]
+    if not granules:
+        st.sidebar.info(f"No granules found in {catalog.title} for that range")
+        return None
+
+    ids = [g.id for g in granules]
+    chosen = st.sidebar.selectbox(
+        "Granule:",
+        ids,
+        format_func=lambda gid: next(
+            (g.label() for g in granules if g.id == gid), gid
+        ),
+        key=f'{key_prefix}_granule',
+    )
+    return next((g for g in granules if g.id == chosen), None)
+
+
+def resolve_reference(catalog, run_granule: Granule) -> Tuple[Optional[Granule], str]:
+    """Find the reference granule matching a run's date.
+
+    Returns (granule, explanation). The date is the join key because that is
+    the only thing our output and PO.DAAC's share: the filenames are
+    identical by convention, so matching on name would silently pair a run
+    with itself when both sources point at the same tree.
+    """
+    if run_granule.date is None:
+        return None, ("Cannot auto-match a reference: no analysis date in "
+                      f"`{run_granule.name}`. Pick one manually below.")
+    try:
+        match = catalog.find_for_date(run_granule.date,
+                                      exclude_href=run_granule.href)
+    except CatalogUnavailable as exc:
+        return None, str(exc)
+    except CatalogError as exc:
+        return None, f"Reference lookup failed: {exc}"
+    if match is None:
+        return None, (f"No {catalog.title} granule for "
+                      f"{run_granule.date.isoformat()}")
+    return match, (f"Auto-matched from {catalog.title} for "
+                   f"{run_granule.date.isoformat()}")
+
+
 def check_password() -> bool:
     """Prompt for a password and return True if correct.
 
@@ -3054,99 +3355,14 @@ def check_password() -> bool:
     return False
 
 
-def main():
-    """Main Streamlit application."""
+def render_local_file_browser(base_dir: Path) -> Optional[Path]:
+    """Sidebar directory browser over the local tree.
 
-    if not check_password():
-        return
-
-    # Title and description
-    st.title("MUR Data Viewer")
-    st.markdown("Web-based interface for MUR SST processing data files")
-
-    # Get base directory
-    base_dir = get_base_directory()
-
-    # Initialize session state
-    if 'selected_file_path' not in st.session_state:
-        st.session_state.selected_file_path = None
-    if 'reference_file' not in st.session_state:
-        st.session_state.reference_file = None
-    if 'reference_data' not in st.session_state:
-        st.session_state.reference_data = None
-    if 'reference_format' not in st.session_state:
-        st.session_state.reference_format = None
-
-    # Sidebar options
-    st.sidebar.header("Options")
-
-    # Mode selector
-    mode = st.sidebar.radio(
-        "Mode:",
-        ["View File", "Compare Files"],
-    )
-
-    # Display options
-    st.sidebar.write("---")
-    st.sidebar.write("**Display Options:**")
-    show_info = st.sidebar.checkbox("Show file info", value=True)
-
-    plot_type = st.sidebar.radio(
-        "Plot type:",
-        ["Matplotlib (Fast)", "Plotly (Interactive)"],
-        help="Matplotlib is faster. Plotly allows zoom/pan."
-    )
-    use_plotly = plot_type.startswith("Plotly")
-
-    # Defaults (overridden in the sidebar when Compare mode is selected)
-    tolerance = 1e-6
-    diff_color_limit = 0.0
-    diff_color_levels = 0
-
-    # Compare mode: reference file status
-    if mode == "Compare Files":
-        st.sidebar.write("---")
-        st.sidebar.write("**Reference File:**")
-        if st.session_state.reference_file:
-            st.sidebar.success(f"`{Path(st.session_state.reference_file).name}`")
-            if st.sidebar.button("Clear Reference", use_container_width=True):
-                st.session_state.reference_file = None
-                st.session_state.reference_data = None
-                st.session_state.reference_format = None
-                st.rerun()
-        else:
-            st.sidebar.info("No reference set")
-
-        tolerance = st.sidebar.number_input(
-            "Comparison tolerance:",
-            min_value=1e-10,
-            max_value=1.0,
-            value=1e-6,
-            format="%.2e",
-        )
-
-        diff_color_limit = st.sidebar.number_input(
-            "Diff color scale ±°C (0 = auto):",
-            min_value=0.0,
-            max_value=20.0,
-            value=0.0,
-            step=0.1,
-            format="%.3g",
-            help="NetCDF difference image color range. 0 auto-scales from the "
-                 "difference histogram; e.g. 0.5 pins the range to -0.5…+0.5°C.",
-        )
-
-        diff_color_levels = st.sidebar.number_input(
-            "Diff color levels (0 = continuous):",
-            min_value=0,
-            max_value=256,
-            value=0,
-            step=1,
-            help="Number of discrete colors for the NetCDF difference image. "
-                 "0 uses a continuous colormap (default); e.g. 8 buckets the "
-                 "range into 8 colors.",
-        )
-
+    Lifted out of main() unchanged when the run source became
+    configurable: with MAAP as the run source there is no directory to
+    walk, so this had to become one of two alternatives rather than the
+    only way in. The navigation logic itself is untouched.
+    """
     # Initialize directory navigation state
     if 'current_dir' not in st.session_state:
         st.session_state.current_dir = str(base_dir)
@@ -3163,7 +3379,8 @@ def main():
     # Show data root with expander to change it
     with st.sidebar.expander("Data Root", expanded=False):
         st.caption(f"Current: `{base_dir}`")
-        st.caption("Set via MUR_BASE_DIR environment variable")
+        st.caption("Set via MUR_BASE_DIR, a viewer config file, "
+                   "or **Data Sources** above")
         new_root = st.text_input(
             "Change root:",
             value=str(base_dir),
@@ -3174,6 +3391,15 @@ def main():
             if str(Path(new_root).resolve()) != str(base_dir):
                 if st.button("Apply", use_container_width=True):
                     st.session_state.current_dir = new_root
+                    # Write through to the config, which is what
+                    # get_base_directory() and LocalCatalog now read. Setting
+                    # only the environment variable would leave this panel and
+                    # the Data Sources panel disagreeing about the root.
+                    config = st.session_state.get('_viewer_config')
+                    if config is not None:
+                        set_viewer_config(
+                            config.with_overrides(base_dir=new_root)
+                        )
                     os.environ['MUR_BASE_DIR'] = new_root
                     st.rerun()
 
@@ -3321,29 +3547,301 @@ def main():
     else:
         st.sidebar.info("No supported files here")
 
-    # Show selected file and action buttons in sidebar
-    if selected_file:
-        st.sidebar.write("---")
-        st.sidebar.success(f"**Selected:**\n{selected_file.name}")
+    return selected_file
 
-        if mode == "Compare Files":
-            if st.sidebar.button("Set as Reference", use_container_width=True):
-                # Just store the path - data will be loaded during comparison
+
+def render_comparison(run_path: Path, ref_path: Path, tolerance: float,
+                      diff_color_limit: float, diff_color_levels: int,
+                      use_plotly: bool) -> None:
+    """Compare two already-local files and render the result.
+
+    Lifted out of main() when the two sides stopped being "two files the user
+    browsed to" and became "a run and its reference, each materialized from
+    whichever catalog it came from". The comparison itself is unchanged; what
+    changed is that by the time it runs, both arguments are local paths and
+    neither caller cares where they came from.
+
+    `run_path` is the first operand throughout, so every difference reported
+    here is run − reference.
+    """
+    try:
+        run_fmt = DataFileReader.detect_format(run_path)
+        ref_fmt = DataFileReader.detect_format(ref_path)
+
+        if run_fmt != ref_fmt:
+            st.error(
+                f"Cannot compare different formats: "
+                f"{run_fmt.upper()} vs {ref_fmt.upper()}"
+            )
+            return
+
+        st.write(f"**Format:** {run_fmt.upper()}")
+
+        if run_fmt == 'nc':
+            st.write("---")
+
+            # NetCDF is compared by path, not by loaded array: a global MUR
+            # grid is far too large to hold twice, so the diff streams it in
+            # row chunks (build_full_res_diff).
+            run_data = {'_filepath': str(run_path)}
+            ref_data = {'_filepath': str(ref_path)}
+
+            with st.spinner("Comparing files (chunked for memory efficiency)..."):
+                results = compare_files_data(
+                    run_data, ref_data, run_fmt, tolerance
+                )
+
+            st.write("**Field Comparison:**")
+            for comp in results['comparisons']:
+                icon = "✅" if comp['match'] else "❌"
+                st.write(f"{icon} **{comp['field']}**: {comp['message']}")
+
+            # Difference tail distribution (computed over every valid pixel)
+            sst_stats = results.get('stats', {}).get('analysed_sst')
+            if sst_stats and sst_stats.get('tail_counts'):
+                st.write("**Difference tail (all valid pixels):**")
+                vc = sst_stats['valid_count']
+                table_lines = [
+                    "| \\|diff\\| > | pixels | % of valid |",
+                    "|---|---:|---:|",
+                ]
+                for _t, _c in zip(sst_stats['tail_thresholds'],
+                                  sst_stats['tail_counts']):
+                    _pct = (100.0 * _c / vc) if vc else 0.0
+                    table_lines.append(f"| {_t:g} K | {_c:,} | {_pct:.4f}% |")
+                st.markdown("\n".join(table_lines))
+                if sst_stats.get('worst_lat') is not None:
+                    st.markdown(
+                        f"**Worst pixel:** "
+                        f"{sst_stats['worst_value']:+.4f} K at "
+                        f"lat {sst_stats['worst_lat']:.4f}, "
+                        f"lon {sst_stats['worst_lon']:.4f}"
+                    )
+
+            st.write("---")
+
+            if results['all_match']:
+                st.success("Files match within tolerance!")
+            else:
+                st.warning("Differences found.")
+
+        else:
+            # Every other format is small enough to load whole.
+            with st.spinner("Loading files for comparison..."):
+                run_data = read_file(run_path)
+                ref_data = read_file(ref_path)
+
+            st.write(f"**Tolerance:** {tolerance:.2e}")
+            st.write("---")
+
+            results = compare_files_data(run_data, ref_data, run_fmt, tolerance)
+
+            st.write("**Field Comparison:**")
+            for comp in results['comparisons']:
+                icon = "✅" if comp['match'] else "❌"
+                st.write(f"{icon} **{comp['field']}**: {comp['message']}")
+
+            st.write("---")
+
+            if results['all_match']:
+                st.success("All fields match within tolerance!")
+            else:
+                st.warning("Some differences found.")
+
+        # Visualization
+        st.write("---")
+        st.subheader("Comparison Visualization")
+
+        with st.spinner("Creating comparison plots (subsampled for display)..."):
+            rendered = False
+            # Honor the Plotly radio button for formats that have an
+            # interactive comparison view (currently NetCDF). Box-select on
+            # the difference map zooms in and re-renders the region at full
+            # resolution.
+            if use_plotly:
+                try:
+                    rendered = _render_comparison_plotly(
+                        run_data, ref_data, run_fmt,
+                        run_path.name, ref_path.name,
+                        diff_color_limit=diff_color_limit,
+                        diff_color_levels=diff_color_levels,
+                    )
+                except Exception as e:
+                    st.warning(
+                        f"Plotly comparison failed, falling back "
+                        f"to matplotlib: {e}"
+                    )
+
+            if not rendered:
+                fig = create_comparison_plot(
+                    run_data, ref_data, run_fmt,
+                    run_path.name, ref_path.name,
+                    diff_color_limit=diff_color_limit,
+                    diff_color_levels=diff_color_levels,
+                )
+                if fig is not None:
+                    st.pyplot(fig)
+                    plt.close(fig)
+                else:
+                    st.error("Figure was not created")
+
+    except Exception as e:
+        st.error(f"Error comparing files: {e}")
+        import traceback
+        with st.expander("Show error details"):
+            st.code(traceback.format_exc())
+
+
+def main():
+    """Main Streamlit application."""
+
+    if not check_password():
+        return
+
+    # Title and description
+    st.title("MUR Data Viewer")
+    st.markdown("Web-based interface for MUR SST processing data files")
+
+    # Resolve where data comes from before anything reads a path. The local
+    # browser's root is now part of that configuration rather than a bare
+    # environment variable, so get_base_directory() must not run first.
+    config = get_viewer_config()
+
+    # Initialize session state
+    if 'selected_file_path' not in st.session_state:
+        st.session_state.selected_file_path = None
+    if 'reference_file' not in st.session_state:
+        st.session_state.reference_file = None
+    if 'reference_data' not in st.session_state:
+        st.session_state.reference_data = None
+    if 'reference_format' not in st.session_state:
+        st.session_state.reference_format = None
+
+    # Sidebar options
+    st.sidebar.header("Options")
+
+    # Mode selector
+    mode = st.sidebar.radio(
+        "Mode:",
+        ["View File", "Compare Files"],
+    )
+
+    config = render_source_controls(config)
+    base_dir = get_base_directory()
+    run_catalog = get_catalog(config.run_source, config)
+    local_catalog = LocalCatalog(config)
+
+    # Display options
+    st.sidebar.write("---")
+    st.sidebar.write("**Display Options:**")
+    show_info = st.sidebar.checkbox("Show file info", value=True)
+
+    plot_type = st.sidebar.radio(
+        "Plot type:",
+        ["Matplotlib (Fast)", "Plotly (Interactive)"],
+        help="Matplotlib is faster. Plotly allows zoom/pan."
+    )
+    use_plotly = plot_type.startswith("Plotly")
+
+    # Defaults (overridden in the sidebar when Compare mode is selected)
+    tolerance = 1e-6
+    diff_color_limit = 0.0
+    diff_color_levels = 0
+
+    # Compare mode: what we are comparing against.
+    #
+    # The reference used to be a file you had to go and find. It is now
+    # resolved from the configured reference source and the run's own analysis
+    # date -- by default the operational MUR L4 at PO.DAAC, which is the
+    # comparison worth making and which needs nothing on local disk. The
+    # manual pick survives as an explicit override for the run-vs-run case.
+    if mode == "Compare Files":
+        st.sidebar.write("---")
+        st.sidebar.write("**Reference:**")
+        if st.session_state.reference_file:
+            st.sidebar.success(
+                f"Override: `{Path(st.session_state.reference_file).name}`"
+            )
+            if st.sidebar.button("Use configured reference",
+                                 use_container_width=True):
+                st.session_state.reference_file = None
+                st.session_state.reference_data = None
+                st.session_state.reference_format = None
+                st.rerun()
+        else:
+            st.sidebar.caption(
+                f"{REFERENCE_SOURCE_LABELS[config.reference_source]}, "
+                "matched on the run's analysis date"
+            )
+
+        tolerance = st.sidebar.number_input(
+            "Comparison tolerance:",
+            min_value=1e-10,
+            max_value=1.0,
+            value=1e-6,
+            format="%.2e",
+        )
+
+        diff_color_limit = st.sidebar.number_input(
+            "Diff color scale ±°C (0 = auto):",
+            min_value=0.0,
+            max_value=20.0,
+            value=0.0,
+            step=0.1,
+            format="%.3g",
+            help="NetCDF difference image color range. 0 auto-scales from the "
+                 "difference histogram; e.g. 0.5 pins the range to -0.5…+0.5°C.",
+        )
+
+        diff_color_levels = st.sidebar.number_input(
+            "Diff color levels (0 = continuous):",
+            min_value=0,
+            max_value=256,
+            value=0,
+            step=1,
+            help="Number of discrete colors for the NetCDF difference image. "
+                 "0 uses a continuous colormap (default); e.g. 8 buckets the "
+                 "range into 8 colors.",
+        )
+
+    # How a run is chosen depends on where runs live. A filesystem has a tree
+    # to walk; a STAC catalog has only dates to ask about, so the two get
+    # genuinely different controls rather than one pretending to be the other.
+    selected_file = None
+    run_granule = None
+    if config.run_source == 'local':
+        selected_file = render_local_file_browser(base_dir)
+        if selected_file is not None:
+            run_granule = local_catalog.granule_for_path(selected_file)
+    else:
+        st.sidebar.write("---")
+        run_granule = render_catalog_browser(run_catalog, 'run', 'Run Browser')
+
+    # Show selection and the local-file override in the sidebar
+    if run_granule is not None:
+        st.sidebar.write("---")
+        st.sidebar.success(f"**Selected:**\n{run_granule.name}")
+        if run_granule.date:
+            st.sidebar.caption(f"Analysis date: {run_granule.date.isoformat()}")
+
+        if mode == "Compare Files" and selected_file is not None:
+            if st.sidebar.button("Set as Reference", use_container_width=True,
+                                 help="Override the configured reference with "
+                                      "this local file (run-vs-run)."):
                 st.session_state.reference_file = str(selected_file)
                 st.session_state.reference_data = None  # Clear any stale data
                 st.session_state.reference_format = None
-                st.rerun()
-
-            compare_disabled = st.session_state.reference_file is None
-            if st.sidebar.button("Compare to Reference", use_container_width=True,
-                                 disabled=compare_disabled):
-                st.session_state.compare_target = str(selected_file)
                 st.rerun()
 
     # Main content area for visualization
     st.subheader("Visualization")
 
     if mode == "View File":
+        # A granule from a catalog has to come down to local disk first:
+        # every reader below opens a path.
+        if run_granule is not None and selected_file is None:
+            selected_file = fetch_granule_ui(run_catalog, run_granule)
+
         # Single file visualization
         if selected_file:
             try:
@@ -3446,159 +3944,79 @@ def main():
             st.info("Select a file from the browser to visualize it.")
 
     else:  # Compare mode
-        ref_file = st.session_state.reference_file
-        cmp_file = getattr(st.session_state, 'compare_target', None)
+        # The pair is (run, reference), in that order, and the difference
+        # below is run - reference. That direction is deliberate: the question
+        # this mode exists to answer is "how does what we produced differ from
+        # the accepted product", and a sign convention that reads backwards
+        # makes every number in the table need a mental flip.
+        ref_catalog = get_catalog(config.reference_source, config)
+        override = st.session_state.get('reference_file')
 
-        if not ref_file:
-            st.info("Set a reference file first, then select a file to compare.")
-        elif not cmp_file:
+        if run_granule is None:
             st.info(
-                f"Reference: **{Path(ref_file).name}**\n\n"
-                "Select another file and click Compare."
+                "Select a run from the browser, and it will be compared "
+                f"against the {REFERENCE_SOURCE_LABELS[config.reference_source]}"
+                " for the same analysis date."
             )
-        elif ref_file == cmp_file:
-            st.warning("Cannot compare a file to itself.")
         else:
-            # Perform comparison
-            try:
-                ref_path = Path(ref_file)
-                cmp_path = Path(cmp_file)
+            if override:
+                ref_granule = local_catalog.granule_for_path(Path(override))
+                match_note = "manual override"
+            else:
+                ref_granule, match_note = resolve_reference(
+                    ref_catalog, run_granule
+                )
 
-                # Detect formats first (fast)
-                ref_fmt = DataFileReader.detect_format(ref_path)
-                cmp_fmt = DataFileReader.detect_format(cmp_path)
+            st.write(
+                f"**Run:** `{run_granule.name}` — "
+                f"{RUN_SOURCE_LABELS[config.run_source]}"
+                + (f" [{run_granule.mode.upper()}]" if run_granule.mode else "")
+            )
 
-                if ref_fmt != cmp_fmt:
-                    st.error(
-                        f"Cannot compare different formats: "
-                        f"{ref_fmt.upper()} vs {cmp_fmt.upper()}"
+            if ref_granule is None:
+                st.warning(match_note)
+                st.caption(
+                    "Pick a local file and press **Set as Reference** in the "
+                    "sidebar to compare against it instead, or change the "
+                    "reference source under **Data Sources**."
+                )
+            elif (ref_granule.href == run_granule.href
+                  and ref_granule.source == run_granule.source):
+                st.warning(
+                    "The run and the reference are the same file. Choose a "
+                    "different reference source or a different granule."
+                )
+            else:
+                st.write(
+                    f"**Reference:** `{ref_granule.name}` — "
+                    f"{ref_catalog.title} ({match_note})"
+                )
+                st.caption("Difference below is **run − reference**.")
+
+                pair = (run_granule.source, run_granule.id,
+                        ref_granule.source, ref_granule.id)
+                # Gated behind a button because a public reference is a
+                # ~700 MB download; no one wants that to fire because they
+                # changed a colour scale.
+                if st.button("Compare", type="primary",
+                             use_container_width=False):
+                    st.session_state._compare_pair = pair
+
+                if st.session_state.get('_compare_pair') != pair:
+                    st.info(
+                        "Press **Compare** to fetch both granules and run the "
+                        "full-resolution difference."
                     )
                 else:
-                    st.write(f"**Reference:** {Path(ref_file).name}")
-                    st.write(f"**Comparison:** {cmp_path.name}")
-                    st.write(f"**Format:** {ref_fmt.upper()}")
+                    run_path = fetch_granule_ui(run_catalog, run_granule)
+                    ref_path = (fetch_granule_ui(ref_catalog, ref_granule)
+                                if run_path is not None else None)
 
-                    # For NetCDF, use memory-efficient comparison (chunked stats, subsampled plot)
-                    if ref_fmt == 'nc':
-                        st.write("---")
-
-                        # Pass file paths for memory-efficient processing
-                        ref_data = {'_filepath': str(ref_path)}
-                        cmp_data = {'_filepath': str(cmp_path)}
-
-                        with st.spinner("Comparing files (chunked for memory efficiency)..."):
-                            results = compare_files_data(
-                                ref_data, cmp_data, ref_fmt, tolerance
-                            )
-
-                        st.write("**Field Comparison:**")
-                        for comp in results['comparisons']:
-                            icon = "✅" if comp['match'] else "❌"
-                            st.write(
-                                f"{icon} **{comp['field']}**: {comp['message']}"
-                            )
-
-                        # Difference tail distribution (computed over every valid pixel)
-                        sst_stats = results.get('stats', {}).get('analysed_sst')
-                        if sst_stats and sst_stats.get('tail_counts'):
-                            st.write("**Difference tail (all valid pixels):**")
-                            vc = sst_stats['valid_count']
-                            table_lines = [
-                                "| \\|diff\\| > | pixels | % of valid |",
-                                "|---|---:|---:|",
-                            ]
-                            for _t, _c in zip(sst_stats['tail_thresholds'],
-                                              sst_stats['tail_counts']):
-                                _pct = (100.0 * _c / vc) if vc else 0.0
-                                table_lines.append(
-                                    f"| {_t:g} K | {_c:,} | {_pct:.4f}% |"
-                                )
-                            st.markdown("\n".join(table_lines))
-                            if sst_stats.get('worst_lat') is not None:
-                                st.markdown(
-                                    f"**Worst pixel:** "
-                                    f"{sst_stats['worst_value']:+.4f} K at "
-                                    f"lat {sst_stats['worst_lat']:.4f}, "
-                                    f"lon {sst_stats['worst_lon']:.4f}"
-                                )
-
-                        st.write("---")
-
-                        if results['all_match']:
-                            st.success("Files match within tolerance!")
-                        else:
-                            st.warning("Differences found.")
-
-                    else:
-                        # For other formats, load the files
-                        with st.spinner("Loading files for comparison..."):
-                            ref_data = read_file(ref_path)
-                            cmp_data = read_file(cmp_path)
-
-                        st.write(f"**Tolerance:** {tolerance:.2e}")
-                        st.write("---")
-
-                        results = compare_files_data(
-                            ref_data, cmp_data, ref_fmt, tolerance
+                    if run_path is not None and ref_path is not None:
+                        render_comparison(
+                            run_path, ref_path, tolerance,
+                            diff_color_limit, diff_color_levels, use_plotly,
                         )
-
-                        st.write("**Field Comparison:**")
-                        for comp in results['comparisons']:
-                            icon = "✅" if comp['match'] else "❌"
-                            st.write(
-                                f"{icon} **{comp['field']}**: {comp['message']}"
-                            )
-
-                        st.write("---")
-
-                        # Summary
-                        if results['all_match']:
-                            st.success("All fields match within tolerance!")
-                        else:
-                            st.warning("Some differences found.")
-
-                    # Visualization
-                    st.write("---")
-                    st.subheader("Comparison Visualization")
-
-                    with st.spinner("Creating comparison plots (subsampled for display)..."):
-                        rendered = False
-                        # Honor the Plotly radio button for formats that have
-                        # an interactive comparison view (currently NetCDF).
-                        # Box-select on the difference map zooms in and
-                        # re-renders the region at full resolution.
-                        if use_plotly:
-                            try:
-                                rendered = _render_comparison_plotly(
-                                    ref_data, cmp_data, ref_fmt,
-                                    Path(ref_file).name, cmp_path.name,
-                                    diff_color_limit=diff_color_limit,
-                                    diff_color_levels=diff_color_levels,
-                                )
-                            except Exception as e:
-                                st.warning(
-                                    f"Plotly comparison failed, falling back "
-                                    f"to matplotlib: {e}"
-                                )
-
-                        if not rendered:
-                            fig = create_comparison_plot(
-                                ref_data, cmp_data, ref_fmt,
-                                Path(ref_file).name, cmp_path.name,
-                                diff_color_limit=diff_color_limit,
-                                diff_color_levels=diff_color_levels,
-                            )
-                            if fig is not None:
-                                st.pyplot(fig)
-                                plt.close(fig)
-                            else:
-                                st.error("Figure was not created")
-
-            except Exception as e:
-                st.error(f"Error comparing files: {e}")
-                import traceback
-                with st.expander("Show error details"):
-                    st.code(traceback.format_exc())
 
 
 if __name__ == '__main__':

@@ -1,0 +1,39 @@
+{
+  "_comment": [
+    "Data-source configuration for the MUR web viewer (dataviewer/web_viewer.py).",
+    "Copy to viewer.json next to run_web_viewer.py, or point MUR_VIEWER_CONFIG at it.",
+    "",
+    "Precedence: environment variables beat this file, which beats the defaults.",
+    "The file is what you check in or bake into an image; the environment is what",
+    "whoever launches the viewer overrides.",
+    "",
+    "Pointing MUR_VIEWER_CONFIG at a pipeline config (config.maap.json) also works:",
+    "the viewer reads maap.workspace_root out of it, so the workspace root does not",
+    "need a second copy here."
+  ],
+
+  "run_source": "local",
+  "_run_source": "Where the granule you are inspecting comes from: 'local' (a directory tree on the machine running Streamlit) or 'maap' (runs this pipeline published to MAAP's STAC).",
+
+  "base_dir": "/data3/jleach/testing/preprocessing/output",
+  "_base_dir": "Root of the local file browser, when run_source is 'local'. Also settable with MUR_BASE_DIR, which is what run_web_viewer.py has always used.",
+
+  "reference_source": "public",
+  "_reference_source": "What Compare mode measures a run against: 'public' (the operational MUR L4 at PO.DAAC), 'local', or 'maap'. 'public' is the default because it is the same product this pipeline reproduces, so a difference against it is a statement about the run rather than about two files that happened to be on disk. The reference is matched on the run's own analysis date; no path selection is involved.",
+
+  "public_collection": "MUR-JPL-L4-GLOB-v4.1",
+  "_public_collection": "CMR short name for the public product. Downloading needs an Earthdata login (a urs.earthdata.nasa.gov entry in ~/.netrc, or EARTHDATA_USERNAME / EARTHDATA_PASSWORD); searching does not.",
+
+  "maap_stac_url": "https://stac.maap-project.org",
+  "maap_collection": "mur-l4-sst",
+  "_maap_collection": "Matches mur_maap/stac.py's DEFAULT_COLLECTION -- the collection run_mur_maap.py publishes L4 Items into.",
+
+  "maap_workspace_root": "",
+  "_maap_workspace_root": "s3://bucket/prefix. Fallback discovery: the viewer reads the STAC items the pipeline writes to mur/stac/items/<year>/ (mur_maap/paths.stac_item_key) directly out of the bucket when the STAC API is unset or unreachable. That route works today, before any STAC endpoint exists to point at. Needs s3fs.",
+
+  "cache_dir": "",
+  "_cache_dir": "Where remote granules are materialized; defaults to ~/.cache/mur-viewer/granules. Every reader opens a local path, so a MAAP or PO.DAAC granule is downloaded once and reused. Namespaced by source, because our output and PO.DAAC's share a filename.",
+
+  "max_download_mb": 2048,
+  "_max_download_mb": "Refuse a single granule larger than this. MUR L4 is ~700 MB/day."
+}

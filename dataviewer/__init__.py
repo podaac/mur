@@ -21,6 +21,22 @@ from .format_readers import (
 
 from .fortran_io import FortranReader, fortread
 
+# Data-source layer. Imported lazily-safe: sources.py pulls earthaccess,
+# s3fs and requests only inside the methods that need them, so importing the
+# package never requires any of the remote-access dependencies.
+from .viewer_config import ViewerConfig, load_config
+from .sources import (
+    Granule,
+    Catalog,
+    CatalogError,
+    CatalogUnavailable,
+    LocalCatalog,
+    PublicMurCatalog,
+    MaapStacCatalog,
+    get_catalog,
+    parse_l4_date,
+)
+
 __version__ = '1.0.0'
 __all__ = [
     'read_file',
@@ -36,4 +52,15 @@ __all__ = [
     'NetCDFReader',
     'FortranReader',
     'fortread',
+    'ViewerConfig',
+    'load_config',
+    'Granule',
+    'Catalog',
+    'CatalogError',
+    'CatalogUnavailable',
+    'LocalCatalog',
+    'PublicMurCatalog',
+    'MaapStacCatalog',
+    'get_catalog',
+    'parse_l4_date',
 ]

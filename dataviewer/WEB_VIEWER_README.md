@@ -15,6 +15,10 @@ A web-based interface for browsing and visualizing MUR SST processing data files
   - NetCDF: `.nc`, `.nc4`
   - Coefficients: `.c*`, `.u*`
 - **Real-time Statistics**: File information and statistics displayed alongside visualizations
+- **Configurable Data Sources**: Runs come from the local filesystem *or* MAAP's
+  STAC catalog, and Compare mode measures them against the operational MUR L4
+  product at PO.DAAC by default — no local copy of the reference required
+  (see [Data Sources](#data-sources))
 
 ## Installation
 
@@ -121,20 +125,137 @@ For production, enable SSL (see above) and run headless:
 streamlit run web_viewer.py --server.headless true
 ```
 
+## Data Sources
+
+The viewer originally browsed one directory and compared two files you picked by
+hand. That only works while both sides of a comparison are on the machine running
+Streamlit — which stops being true the moment the pipeline runs on MAAP, and was
+never true of the thing most worth comparing against: the operational MUR L4
+product published at PO.DAAC.
+
+Three things are now configured independently:
+
+| Setting | Meaning | Values | Default |
+|---|---|---|---|
+| `run_source` | where the granule you are inspecting comes from | `local`, `maap` | `local` |
+| `reference_source` | what Compare mode measures it against | `public`, `local`, `maap` | `public` |
+| `cache_dir` | where remote granules are materialized | any path | `~/.cache/mur-viewer/granules` |
+
+### Why `public` is the default reference
+
+The public product is the same product this pipeline reproduces. A difference
+against it is a statement about the run; a difference between two files that
+happened to be on disk is a statement about nothing in particular. Compare mode
+therefore resolves the reference automatically from the **run's own analysis
+date** — there is no path to select. The difference is reported as
+**run − reference**.
+
+The manual pick survives as an explicit override (**Set as Reference** in the
+sidebar) for the run-vs-run case, such as comparing a container run against a
+production run of the same day.
+
+### Configuration
+
+Environment variables beat a config file, which beats the defaults. The file is
+what you check in or bake into an image; the environment is what whoever
+launches the viewer overrides.
+
+```bash
+# Local runs, compared against the public product (the default)
+export MUR_BASE_DIR=/data3/testing/output
+mur-web-viewer
+
+# MAAP runs, compared against the public product
+export MUR_VIEWER_RUN_SOURCE=maap
+export MUR_VIEWER_MAAP_WORKSPACE_ROOT=s3://maap-ops-workspace/yourname
+mur-web-viewer
+
+# Container run vs production run, both local
+export MUR_VIEWER_REFERENCE_SOURCE=local
+```
+
+Every setting, and where it comes from:
+
+| Environment variable | Config key | Notes |
+|---|---|---|
+| `MUR_VIEWER_RUN_SOURCE` | `run_source` | `local` or `maap` |
+| `MUR_BASE_DIR`, `MUR_VIEWER_BASE_DIR` | `base_dir` | local browser root; the namespaced spelling wins if both are set |
+| `MUR_VIEWER_REFERENCE_SOURCE` | `reference_source` | `public`, `local` or `maap` |
+| `MUR_VIEWER_PUBLIC_COLLECTION` | `public_collection` | CMR short name; default `MUR-JPL-L4-GLOB-v4.1` |
+| `MUR_VIEWER_MAAP_STAC_URL` | `maap_stac_url` | STAC API root |
+| `MUR_VIEWER_MAAP_COLLECTION` | `maap_collection` | default `mur-l4-sst`, matching `mur_maap/stac.py` |
+| `MUR_VIEWER_MAAP_WORKSPACE_ROOT` | `maap_workspace_root` | `s3://bucket/prefix`; enables the bucket fallback below |
+| `MUR_VIEWER_MAAP_STAC_TOKEN`, `MAAP_PGT` | `maap_stac_token` | bearer token for the STAC API |
+| `MUR_VIEWER_CACHE_DIR` | `cache_dir` | download cache |
+| `MUR_VIEWER_MAX_DOWNLOAD_MB` | `max_download_mb` | per-granule ceiling; default 2048 |
+| `MUR_VIEWER_CONFIG` | — | path to the config file itself |
+
+Copy `viewer.example.json` to `viewer.json` next to `run_web_viewer.py`, or point
+`MUR_VIEWER_CONFIG` at it. Pointing `MUR_VIEWER_CONFIG` at a *pipeline* config
+(`config.maap.json`) also works: the viewer reads `maap.workspace_root` out of it
+rather than needing a second copy.
+
+Everything is also adjustable at runtime under **Data Sources** in the sidebar,
+which shows a readiness line per source (`✅` / `⚠️` with the reason).
+
+### How MAAP runs are discovered
+
+Two routes, tried in order:
+
+1. **STAC API** — a `POST /search` against `maap_stac_url` for
+   `maap_collection`, over plain HTTP. (No `pystac-client` dependency for one
+   request.)
+2. **Workspace bucket** — the deterministic item keys the pipeline already
+   writes, at `mur/stac/items/<year>/<doy><mode>.json`
+   (`mur_maap/paths.stac_item_key`). This route works *today*, before any STAC
+   endpoint exists to point at, because it reads files we know we wrote at keys
+   we chose. Needs `s3fs`.
+
+A day produced first as NRT and later reprocessed as REA appears as two
+granules, labelled `[NRT]` and `[REA]`; an unqualified date lookup prefers the
+reanalysis.
+
+### Credentials
+
+- **PO.DAAC**: searching CMR needs nothing. *Downloading* needs an Earthdata
+  login — a `machine urs.earthdata.nasa.gov` entry in `~/.netrc`, or
+  `EARTHDATA_USERNAME` / `EARTHDATA_PASSWORD`. The viewer says so at the moment
+  a download is actually wanted rather than up front.
+- **MAAP**: `MAAP_PGT` is picked up automatically, so a MAAP JupyterHub session
+  needs no extra configuration. S3 reads use the default credential chain.
+
+### The download cache
+
+Every reader downstream opens a local path, so a remote granule is downloaded
+once and reused. MUR L4 is ~700 MB/day, so:
+
+- comparisons are gated behind an explicit **Compare** button — nothing is
+  fetched because you changed a colour scale;
+- downloads stage through a scratch directory, so an interrupted transfer does
+  not leave a short file under the name the cache looks for;
+- a cached file whose size does not match is re-fetched rather than handed back;
+- the cache is namespaced by source, because our output and PO.DAAC's share a
+  filename by convention and would otherwise overwrite each other;
+- `max_download_mb` refuses an oversized granule before any transfer starts.
+
+Size and location are shown under **Data Sources**, with a button to clear it.
+
 ## Interface Guide
 
 ### Sidebar (Left)
 
-- **Base Directory**: Shows the configured base directory
-- **Current Directory**: Displays the current browsing location
-- **Navigation**:
-  - "⬆️ Parent Directory" button to go up one level
-  - Click folder names to navigate into subdirectories
-- **File Filter**: Dropdown to filter by file type
-- **File Selector**: Dropdown to select a specific file
+- **Mode**: "View File" or "Compare Files"
+- **Data Sources**: run source, reference source, the settings each one needs,
+  a readiness line per source, and the download cache
 - **Display Options**:
   - "Show file info": Toggle file statistics
-  - "Show visualization": Toggle plots
+  - Plot type: Matplotlib (fast) or Plotly (interactive zoom/pan)
+- **Comparison settings** (Compare mode): tolerance, difference colour range
+  and number of colour levels
+- **Run selection**, which depends on the run source:
+  - *local* — directory navigation and a file selector, as before
+  - *maap* — a date range and a granule list; a STAC catalog has no tree to
+    walk, only dates to ask about
 
 ### Main Panel (Right)
 
@@ -175,7 +296,7 @@ For large datasets:
 
 3. **Caching**: Streamlit's caching can be added to `read_file()` calls for faster repeated access
 
-## Example Workflow
+## Example Workflow: viewing a file
 
 1. **Start the app**:
    ```bash
@@ -195,6 +316,34 @@ For large datasets:
    - Plots are static (PNG) but can be downloaded via right-click
    - Use the file selector to quickly compare different files
    - Toggle info/plots on/off for focused viewing
+
+## Example Workflow: comparing a run against the public product
+
+1. **Start the app** pointed at your output tree:
+   ```bash
+   export MUR_BASE_DIR=/data3/testing/output
+   mur-web-viewer
+   ```
+
+2. **Switch to "Compare Files"** in the sidebar.
+
+3. **Select a run** — the L4 granule you produced.
+
+4. The **reference resolves itself**: the PO.DAAC granule for that same
+   analysis date, named in the main panel. Nothing to browse to.
+
+5. **Press Compare**. Both granules are materialized locally (the public one is
+   downloaded once and cached, with a progress bar) and the full-resolution
+   difference runs.
+
+6. **Read the result**: per-field match/mismatch, a difference-tail table over
+   every valid pixel, the worst pixel and its location, and the difference map.
+   With Plotly selected, box-select on the map re-renders that region at full
+   resolution.
+
+To compare two of your own runs instead — a container run against a production
+run of the same day — either set `reference_source` to `local`, or select the
+other file and press **Set as Reference**.
 
 ## Troubleshooting
 

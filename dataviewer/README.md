@@ -78,6 +78,12 @@ mur-viewer data.bip --info
 
 ### Compare Files
 
+> **Note:** the CLI compares two local paths. The *web* viewer additionally
+> resolves the reference automatically from the operational MUR L4 product at
+> PO.DAAC (or from MAAP's STAC), matched on the run's analysis date — see
+> [WEB_VIEWER_README.md](WEB_VIEWER_README.md#data-sources).
+
+
 Compare two files of the same format:
 ```bash
 mur-viewer file1.bip file2.bip --compare
