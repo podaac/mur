@@ -171,3 +171,24 @@ def test_mrva_needs_more_than_a_64gb_queue_nominally_provides():
     gib_in_a_64gb_queue = 64 * 1000**3 / 1024**3
     assert gib_requested > gib_in_a_64gb_queue
     assert "maap-dps-worker-32vcpu-64gb" in cli.KNOWN_QUEUES
+
+
+def test_interrupt_reports_the_jobs_left_running(capsys):
+    """Ctrl-C stops the polling, not the jobs. Their ids live only in this
+    process, so losing them makes running work untrackable."""
+    class FakeClient:
+        tag_prefix = "mur"
+        _job_process = {"abc-123": "mur-landice", "def-456": "mur-l2p"}
+
+    cli._report_interrupt(FakeClient())
+    out = capsys.readouterr().out
+    assert "STILL RUNNING" in out
+    assert "abc-123" in out and "mur-landice" in out
+    assert "cancel_job" in out and "list_jobs" in out
+
+
+def test_interrupt_is_useful_even_before_anything_was_submitted(capsys):
+    class Empty:
+        pass
+    cli._report_interrupt(Empty())
+    assert "Interrupted" in capsys.readouterr().out

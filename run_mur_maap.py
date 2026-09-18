@@ -844,6 +844,28 @@ def init_config(dest: str) -> int:
     return 0
 
 
+def _report_interrupt(client) -> None:
+    """On Ctrl-C, say what is still running and how to get back to it."""
+    jobs = getattr(client, "_job_process", {}) or {}
+    print()
+    print("Interrupted. The jobs below were submitted and are STILL RUNNING on")
+    print("DPS -- stopping this process does not stop them.")
+    if jobs:
+        print()
+        for job_id, process in jobs.items():
+            print(f"  {process:<12} {job_id}")
+    print()
+    print("To check on them:")
+    print("    maap.get_job_status('<job id>')")
+    print("To stop them:")
+    print("    maap.cancel_job('<job id>')")
+    print("To find them again after this terminal is gone:")
+    print(f"    maap.list_jobs(tag='{getattr(client, 'tag_prefix', 'mur')}.<process>')")
+    print()
+    print("Re-running is safe: completed work is reused rather than redone,")
+    print("and dedup suppresses an identical resubmission.")
+
+
 def parse_args(argv=None):
     import argparse
 
@@ -965,17 +987,24 @@ def main(argv=None) -> int:
     )
 
     failed = []
-    for day in days:
-        mode = mur_window.mode_for(day, day1, force_nrt=args.force_nrt)
-        logger.info("=== %s (%s) ===", day, mode)
-        try:
-            result = orchestrator.run_day(day, mode)
-            logger.info("    done: %s", result.netcdf_href)
-        except Exception as exc:                          # noqa: BLE001
-            logger.error("    %s FAILED: %s", day, exc)
-            if args.debug:
-                logger.exception("full traceback")
-            failed.append((day, exc))
+    try:
+        for day in days:
+            mode = mur_window.mode_for(day, day1, force_nrt=args.force_nrt)
+            logger.info("=== %s (%s) ===", day, mode)
+            try:
+                result = orchestrator.run_day(day, mode)
+                logger.info("    done: %s", result.netcdf_href)
+            except Exception as exc:                      # noqa: BLE001
+                logger.error("    %s FAILED: %s", day, exc)
+                if args.debug:
+                    logger.exception("full traceback")
+                failed.append((day, exc))
+    except KeyboardInterrupt:
+        # Interrupting stops the POLLING, not the jobs -- they run on DPS and
+        # keep going. Their ids live only in this process, so print them or
+        # they are lost and the work becomes untrackable.
+        _report_interrupt(client)
+        return 130
 
     if failed:
         print(f"\n{len(failed)} of {len(days)} day(s) failed:")
