@@ -622,23 +622,51 @@ MODULE_NEEDS = {
 }
 
 
-def fetch_queues():
-    """Queue names available to this account, or None if they cannot be read."""
+# The queue-listing endpoint is admin-gated (401 "Insufficient permissions"
+# for an ordinary account), so these are the names shown in the Jobs UI's
+# Resource dropdown. Used only when the live listing is unavailable, and
+# they are a convenience rather than a source of truth -- the dropdown is.
+KNOWN_QUEUES = [
+    "maap-dps-sandbox",
+    "maap-dps-worker-8gb",
+    "maap-dps-worker-16gb",
+    "maap-dps-worker-32gb",
+    "maap-dps-worker-64gb",
+    "maap-dps-worker-32vcpu-64gb",
+]
+
+
+def fetch_queues(verbose: bool = False):
+    """Queue names for this account, or None if they cannot be read.
+
+    `verbose` reports WHY rather than falling back silently -- a 401 here is
+    expected for a non-admin account and worth saying out loud, since
+    otherwise it looks like the queues do not exist.
+    """
     import requests
 
     try:
         from maap.maap import MAAP
         maap = MAAP()
-    except Exception:                                     # noqa: BLE001
+    except Exception as exc:                              # noqa: BLE001
+        if verbose:
+            print(f"  cannot reach MAAP: {exc}")
         return None
 
     url = f"{maap.config.maap_api_root.rstrip('/')}/admin/job-queues"
     try:
         resp = requests.get(url, headers=maap._get_api_header(), timeout=30)
         if resp.status_code != 200:
+            if verbose:
+                print(f"  {url}")
+                print(f"  HTTP {resp.status_code}: {resp.text.strip()[:200]}")
+                if resp.status_code in (401, 403):
+                    print("  (this endpoint is admin-only; using the known names)")
             return None
         body = resp.json()
-    except Exception:                                     # noqa: BLE001
+    except Exception as exc:                              # noqa: BLE001
+        if verbose:
+            print(f"  queue listing failed: {exc}")
         return None
 
     entries = body.get("queues", body) if isinstance(body, dict) else body
@@ -651,12 +679,17 @@ def fetch_queues():
 
 
 def _choose(prompt, options, default=None):
-    """Numbered pick, or free text. Returns None if there is no terminal."""
+    """Numbered pick, or free text. Returns the default with no terminal.
+
+    The options are printed either way: run non-interactively, seeing what
+    was available is still the useful half.
+    """
     import sys as _sys
-    if not _sys.stdin.isatty():
-        return None
     for i, opt in enumerate(options, 1):
         print(f"  {i:>2}. {opt}")
+    if not _sys.stdin.isatty():
+        print(f"{prompt}: (no terminal; leaving it unset)")
+        return None
     suffix = f" [{default}]" if default else ""
     raw = input(f"{prompt}{suffix}: ").strip()
     if not raw:
@@ -688,10 +721,14 @@ def list_queues() -> int:
     print(f"{url}\nHTTP {resp.status_code}\n")
 
     if resp.status_code != 200:
-        print(resp.text[:600])
-        print()
-        print("If this is denied, the queue names are also in the Jobs UI:")
-        print("  Launcher -> Submit Jobs -> the Resource dropdown")
+        print(resp.text.strip()[:300])
+        if resp.status_code in (401, 403):
+            print("\nThis endpoint is admin-only. The names shown in the Jobs UI")
+            print("(Launcher -> Submit Jobs -> Resource) are:\n")
+            for q in KNOWN_QUEUES:
+                print(f"  {q}")
+            _print_sizing_note()
+            return 0
         return 1
 
     try:
@@ -707,10 +744,21 @@ def list_queues() -> int:
 
     import json as _json
     print(_json.dumps(queues, indent=2)[:4000])
-    print()
-    print("Put one in the config as maap.queue, or pass --queue.")
-    print("MRVA needs 64 GiB and 16 cores; the others fit on small queues.")
+    _print_sizing_note()
     return 0
+
+
+def _print_sizing_note() -> None:
+    print()
+    for module, need in MODULE_NEEDS.items():
+        print(f"  {module:<14} needs ~{need}")
+    print()
+    print("Put one in the config as maap.queue, and MRVA's in maap.queues.")
+    print()
+    print("Note the units. A queue named ...-64gb is likely 64 GB = 59.6 GiB,")
+    print("while mrva asks for 65536 MiB = 64 GiB, which would not fit. The")
+    print("32vcpu-64gb queue is the one that clearly satisfies both its memory")
+    print("and its 16-core request.")
 
 
 def init_config(dest: str) -> int:
@@ -748,7 +796,7 @@ def init_config(dest: str) -> int:
 
     # Choosing a queue is the one value that cannot be discovered, so offer
     # the list rather than leaving a placeholder to look up separately.
-    queues = fetch_queues()
+    queues = fetch_queues(verbose=True) or KNOWN_QUEUES
     if queues:
         print("\nDPS queues available to you. A queue selects the worker size:")
         for module, need in MODULE_NEEDS.items():
@@ -764,10 +812,6 @@ def init_config(dest: str) -> int:
             mrva = _choose("Queue for mrva", queues, default=picked)
             if mrva and mrva != picked:
                 config["maap"].setdefault("queues", {})["mur-mrva"] = mrva
-    else:
-        print("\nCould not list queues; leaving maap.queue as a placeholder.")
-        print("Find the names in the Jobs UI: Launcher -> Submit Jobs ->")
-        print("the Resource dropdown.")
 
     target.write_text(json.dumps(config, indent=2) + "\n")
     print(f"\nwrote {target}")

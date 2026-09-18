@@ -135,7 +135,7 @@ def test_config_is_still_required_for_a_real_run():
 def test_init_config_is_non_interactive_without_a_terminal(tmp_path, monkeypatch):
     """It must still write a usable file when run from a script or CI, rather
     than blocking on input() forever."""
-    monkeypatch.setattr(cli, "fetch_queues", lambda: ["small", "large"])
+    monkeypatch.setattr(cli, "fetch_queues", lambda **kw: ["small", "large"])
     dest = tmp_path / "c.json"
     assert cli.main(["--config", str(dest), "--init-config"]) == 0
     assert dest.exists()
@@ -148,3 +148,26 @@ def test_module_needs_cover_every_process_the_orchestrator_submits():
     source = (cli.pathlib.Path(cli.__file__)).read_text()
     submitted = set(re.findall(r'submit_job\("(mur-[a-z]+)"', source))
     assert submitted <= set(cli.MODULE_NEEDS)
+
+
+def test_known_queues_are_offered_when_the_listing_is_denied(tmp_path, monkeypatch, capsys):
+    """/admin/job-queues is admin-only, so an ordinary account gets 401. The
+    names are still knowable -- they are in the Jobs UI -- so falling back to
+    them beats leaving a placeholder to look up elsewhere."""
+    monkeypatch.setattr(cli, "fetch_queues", lambda **kw: None)
+    dest = tmp_path / "c.json"
+    assert cli.main(["--config", str(dest), "--init-config"]) == 0
+    out = capsys.readouterr().out
+    assert "maap-dps-worker-8gb" in out
+
+
+def test_mrva_needs_more_than_a_64gb_queue_nominally_provides():
+    """A queue named ...-64gb is likely 64 GB = 59.6 GiB, while mrva asks for
+    65536 MiB = 64 GiB. The unit mismatch is easy to miss and would show up
+    as a job that never schedules."""
+    import yaml, pathlib as _p
+    cfg = yaml.safe_load((_p.Path("maap/mrva/algorithm_config.yml")).read_text())
+    gib_requested = cfg["ram_min"] / 1024
+    gib_in_a_64gb_queue = 64 * 1000**3 / 1024**3
+    assert gib_requested > gib_in_a_64gb_queue
+    assert "maap-dps-worker-32vcpu-64gb" in cli.KNOWN_QUEUES
