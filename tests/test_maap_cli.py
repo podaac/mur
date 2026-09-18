@@ -4,6 +4,7 @@ Everything here runs offline. --dry-run in particular must need no
 credentials: it is the pre-flight you run before committing a day's compute.
 """
 import datetime
+import re
 
 import pytest
 
@@ -52,14 +53,19 @@ def test_dry_run_shows_the_nrt_rea_split(capsys):
     cli.main(["--config", "config.maap.example.json",
               "--date", "2026-08-10", "-p=-9:-1", "--dry-run"])
     out = capsys.readouterr().out
-    assert "2026-08-06  rea" in out
-    assert "2026-08-07  nrt" in out
+    modes = dict(re.findall(r"^\s+(\d{4}-\d{2}-\d{2})\s+(\w+)$", out, re.M))
+    assert modes["2026-08-06"] == "rea"
+    assert modes["2026-08-07"] == "nrt"
 
 
 def test_force_nrt_overrides_every_day(capsys):
     cli.main(["--config", "config.maap.example.json",
               "--date", "2026-08-10", "-p=-9:-1", "--force-nrt", "--dry-run"])
-    assert "rea" not in capsys.readouterr().out
+    # Match the mode column specifically. A bare "rea" substring also hits
+    # "Already-staged" in the staging note, which has nothing to do with mode.
+    modes = re.findall(r"^\s+\d{4}-\d{2}-\d{2}\s+(\w+)$",
+                       capsys.readouterr().out, re.M)
+    assert modes and set(modes) == {"nrt"}
 
 
 def test_sensor_filter_narrows_the_run(capsys):
