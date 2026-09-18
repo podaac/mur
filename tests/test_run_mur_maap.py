@@ -556,3 +556,39 @@ def test_this_days_coefficient_is_promoted_for_tomorrow(orchestrator):
     orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
     dests = [d for _, d in orchestrator.client.copied if "/mur/csp/" in d]
     assert dests == [f"{WORKSPACE_ROOT}/mur/csp/2026/2026080609_MRVA4_Global.c06"]
+
+
+def test_a_day_with_no_granules_does_not_submit_l2p():
+    """The current day is still accumulating, and a sensor can have no
+    coverage. Submitting anyway writes an empty manifest, runs L2P over
+    nothing, and leaves MRVA's manifest referencing a BIC that was never
+    produced -- which only surfaces later as an unresolvable output."""
+    client = FakeMAAPClient()
+    client.stac_search = lambda collections, start, end: []
+
+    orch = MAAPOrchestrator(
+        _single_sensor_config(), client, today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    assert [p for p, _ in client.submitted if p == "mur-l2p"] == []
+
+
+def test_an_empty_day_is_absent_from_the_mrva_manifest():
+    client = FakeMAAPClient()
+    client.stac_search = lambda collections, start, end: []
+
+    orch = MAAPOrchestrator(
+        _single_sensor_config(), client, today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    _, manifest = client.written_manifests[-1]
+    assert [e for e in manifest["files"] if e["sensor"] == "AMSR2R"] == []
+
+
+def test_a_sensor_with_granules_is_unaffected():
+    """The skip must be per sensor-day, not a blanket bail-out."""
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(
+        _single_sensor_config(), client, today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert len([p for p, _ in client.submitted if p == "mur-l2p"]) == 1

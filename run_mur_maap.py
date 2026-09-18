@@ -426,6 +426,18 @@ class MAAPOrchestrator:
                     start=data_day,
                     end=data_day,
                 )
+                if not granules:
+                    # A day with no granules is a real answer, not a failure:
+                    # the current day is still accumulating, and a sensor can
+                    # simply have no coverage. Submitting anyway would write
+                    # an empty manifest, run L2P over nothing, and leave MRVA's
+                    # manifest pointing at a BIC that was never produced --
+                    # which surfaces much later as an unresolvable output.
+                    logger.info(
+                        "    no granules for %s %s; not submitting L2P",
+                        sensor, data_day)
+                    continue
+
                 # A variable-count input can't be a repeated flag or a CWL
                 # array (docs/input-contract.html section 3, and arrays
                 # are unconfirmed in MAAP's app-package generator) -- write the
