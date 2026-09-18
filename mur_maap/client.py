@@ -191,10 +191,21 @@ class MaapPyClient(MAAPClient):
 
     def submit_job(self, process_id: str, args: Dict[str, Any], *, tag=None) -> str:
         pid = self._process_id(process_id)
-        # Every value crosses as a command-line flag, and the CWL declares
-        # every input as `string`, so coerce here rather than relying on the
-        # server to stringify ints.
-        inputs = {k: ("" if v is None else str(v)) for k, v in args.items()}
+        # Two translations on the way out.
+        #
+        # Keys: the orchestrator uses Python-shaped names (landmask_p01_file)
+        # while the CWL declares the container's own flags
+        # (landmask-p01-file). MAAP matches on the declared name and rejects
+        # the submission outright -- "Parameter landmask-p01-file missing from
+        # inputs" -- rather than ignoring the unknown key. No MUR input name
+        # contains an underscore, so the mapping is total.
+        #
+        # Values: every input is declared `string` and becomes a command-line
+        # flag, so ints are stringified here rather than left to the server.
+        inputs = {
+            k.replace("_", "-"): ("" if v is None else str(v))
+            for k, v in args.items()
+        }
 
         resp = self.maap.submit_job(
             process_id=pid,

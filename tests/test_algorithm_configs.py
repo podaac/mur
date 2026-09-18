@@ -144,3 +144,74 @@ def test_only_scalar_string_inputs_are_used():
         for item in load_config(module)["inputs"]:
             assert str(item["type"]) in ("string", "string?"), \
                 f"{module}: input {item['name']} has non-scalar type {item['type']}"
+
+
+# --- the orchestrator's arguments must match the declared inputs -----------
+#
+# The existing tests check the CWL inputs against the entrypoint flags, which
+# is one half of the contract. The other half is what run_day() actually
+# submits: a mismatch there is rejected by MAAP with "Parameter X missing from
+# inputs", which is only discoverable by submitting a job.
+
+def _submitted_args():
+    """Every (process, args) run_day submits, via the fake client."""
+    import datetime
+    import sys
+    sys.path.insert(0, str(REPO))
+    from run_mur_maap import MAAPOrchestrator
+    from tests.test_run_mur_maap import CONFIG, FakeMAAPClient
+
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    return client.submitted
+
+
+def _declared_inputs(module):
+    cfg = load_config(module)
+    return {i["name"] for i in cfg["inputs"]}
+
+
+@pytest.mark.parametrize("module", MODULES)
+def test_orchestrator_arguments_map_onto_declared_inputs(module):
+    """Keys are translated _ -> - on submission, so compare in that form."""
+    process = f"mur-{module}"
+    declared = _declared_inputs(module)
+
+    for pid, args in _submitted_args():
+        if pid != process:
+            continue
+        sent = {k.replace("_", "-") for k in args}
+        unknown = sent - declared
+        assert not unknown, (
+            f"{process}: submits {sorted(unknown)}, which the CWL does not "
+            f"declare. MAAP rejects the whole submission for an undeclared "
+            f"input. Declared: {sorted(declared)}")
+
+
+@pytest.mark.parametrize("module", MODULES)
+def test_every_required_input_is_actually_sent(module):
+    """An input with no default that is never sent fails at submission with
+    'Parameter X missing from inputs. No default set in algorithm spec.'"""
+    process = f"mur-{module}"
+    cfg = load_config(module)
+    required = {i["name"] for i in cfg["inputs"]
+                if not str(i["type"]).endswith("?")}
+
+    for pid, args in _submitted_args():
+        if pid != process:
+            continue
+        sent = {k.replace("_", "-") for k in args}
+        missing = required - sent
+        assert not missing, (
+            f"{process}: never sends required input(s) {sorted(missing)}")
+        return
+    pytest.skip(f"{process} is not submitted by run_day in this config")
+
+
+def test_no_mur_input_name_contains_an_underscore():
+    """The _ -> - translation is only total while this holds."""
+    for module in MODULES:
+        for name in _declared_inputs(module):
+            assert "_" not in name, f"{module}: input {name!r} breaks the mapping"
