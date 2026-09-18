@@ -1,13 +1,22 @@
 """Getting PO.DAAC L2P granules somewhere a DPS job can read them.
 
-A DPS job cannot fetch from PO.DAAC itself. Every DAAC requires temporary S3
-credentials via Earthdata Login, and `common/bin/localize.sh` uses a plain
-`aws s3 cp` on the default credential chain -- inside a job that is the job's
-own role, which has no DAAC access. So granules are fetched in the workspace
-(where Earthdata credentials live) and copied into the workspace bucket, and
-the job reads them from there.
+Two modes, selected by `maap.granule_staging` in the config.
 
-The download itself is the same mechanism run_mur_pipeline.py already uses:
+"direct" queries CMR and hands L2P the granules' own PO.DAAC s3:// hrefs. No
+copy, no duplicate storage -- far better when it works. Whether it works
+depends on something not documented: a DPS worker reads S3 as its own role,
+and localize.sh uses a plain `aws s3 cp`, so PO.DAAC is readable only if that
+role carries DAAC access (MAAP documents a `maap-data-reader` role, which
+suggests it may). One L2P job settles it.
+
+"workspace" fetches granules here -- where Earthdata credentials live -- and
+copies them into the workspace bucket, which the job's own role can certainly
+read. It always works and costs duplicate storage.
+
+Only the discovery differs. L2P's OUTPUT is staged out by DPS either way, and
+MRVA reads it from there.
+
+The workspace-mode download is the same mechanism run_mur_pipeline.py uses:
 `podaac-data-subscriber` with `-dydoy`, which sorts granules into
 <dir>/<YYYY>/<DOY>/. Keeping one downloader means granules staged for MAAP and
 granules downloaded for a local run come from the same code path and the same
@@ -90,11 +99,72 @@ def download_day(
     return found or sorted(dest.glob("*.nc"))
 
 
+def discover_day(
+    collections: List[str],
+    data_day: datetime.date,
+    *,
+    collection_filter: Optional[str] = None,
+) -> List[str]:
+    """PO.DAAC s3:// hrefs for one sensor-day, straight from CMR.
+
+    No download and no copy: the hrefs point at PO.DAAC's own bucket. Whether
+    a DPS job can then read them is the open question above.
+    """
+    try:
+        import earthaccess
+    except ImportError:
+        raise GranuleStagingError(
+            "earthaccess is required for direct granule discovery. "
+            "pip install earthaccess") from None
+
+    earthaccess.login(strategy="netrc")
+
+    hrefs: List[str] = []
+    for collection in collections:
+        if collection_filter and collection != collection_filter:
+            continue
+        results = earthaccess.search_data(
+            short_name=collection,
+            temporal=(f"{data_day.isoformat()}T00:00:00Z",
+                      f"{data_day.isoformat()}T23:59:59Z"),
+        )
+        for granule in results:
+            # access="direct" yields the s3:// href; "external" would give
+            # an https:// one, which localize.sh cannot fetch at all.
+            for link in granule.data_links(access="direct"):
+                if link.endswith(".nc"):
+                    hrefs.append(link)
+        logger.info("    %s %s: %d granule(s) in CMR",
+                    collection, data_day, len(results))
+    return sorted(set(hrefs))
+
+
 def staged_hrefs(client, sensor: str, data_day: datetime.date) -> List[str]:
     """Granules already staged in the workspace bucket for this sensor/day."""
     prefix = client.workspace.path().s3_uri(
         paths.granule_stage_prefix(sensor, data_day))
     return [h for h in client.list_objects(prefix) if h.endswith(".nc")]
+
+
+def granules_for_day(
+    client,
+    sensor: str,
+    collections: List[str],
+    data_day: datetime.date,
+    *,
+    mode: str = "workspace",
+    workdir: Optional[pathlib.Path] = None,
+    collection_filter: Optional[str] = None,
+) -> List[str]:
+    """Hrefs L2P should be given for this sensor-day, per the configured mode."""
+    if mode == "direct":
+        return discover_day(collections, data_day,
+                            collection_filter=collection_filter)
+    if mode == "workspace":
+        return stage_day(client, sensor, collections, data_day,
+                         workdir=workdir, collection_filter=collection_filter)
+    raise ValueError(
+        f"unknown granule_staging mode {mode!r}; expected 'direct' or 'workspace'")
 
 
 def stage_day(

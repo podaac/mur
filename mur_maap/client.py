@@ -82,6 +82,7 @@ class MaapPyClient(MAAPClient):
         sensor_collections: Optional[Dict[str, List[str]]] = None,
         granule_workdir=None,
         collection_filter: Optional[str] = None,
+        granule_staging: str = "workspace",
     ):
         if maap is None:                       # imported lazily on purpose
             from maap.maap import MAAP
@@ -101,6 +102,9 @@ class MaapPyClient(MAAPClient):
         # collection list, so the mapping has to come from config.
         self.sensor_collections = sensor_collections or {}
         self.granule_workdir = granule_workdir
+        # "direct" hands L2P PO.DAAC's own s3:// hrefs -- no copy, but it
+        # only works if the DPS worker's role can read PO.DAAC.
+        self.granule_staging = granule_staging
         self.collection_filter = collection_filter
 
     # -- algorithms ---------------------------------------------------------
@@ -313,8 +317,9 @@ class MaapPyClient(MAAPClient):
         if sensor is None:
             # run_day passes start == end, one sensor's collections at a time.
             sensor = self._sensor_for_collections(collections)
-        return granules.stage_day(
+        return granules.granules_for_day(
             self, sensor, list(collections), start,
+            mode=self.granule_staging,
             workdir=self.granule_workdir,
             collection_filter=self.collection_filter,
         )

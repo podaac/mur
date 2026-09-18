@@ -602,6 +602,8 @@ def build_client(config: Dict, args):
         version=str(maap_cfg.get("algorithm_version", "2.0.0")),
         sensor_collections=sensor_collections,
         granule_workdir=args.granule_workdir,
+        granule_staging=args.granule_staging or maap_cfg.get(
+            "granule_staging", "workspace"),
         collection_filter=args.collection,
         poll_interval=args.poll_interval,
         dedup=not args.no_dedup,
@@ -640,6 +642,12 @@ def parse_args(argv=None):
     parser.add_argument("--sensors", help="Comma-separated sensor subset.")
     parser.add_argument("--collection", help="Only this PO.DAAC collection.")
     parser.add_argument("--queue", help="DPS queue (overrides maap.queue).")
+    parser.add_argument("--granule-staging", choices=("workspace", "direct"),
+                        help="direct: hand L2P PO.DAAC's own s3:// hrefs (no copy, "
+                             "but only works if the DPS worker's role can read "
+                             "PO.DAAC). workspace: copy granules into the workspace "
+                             "bucket first, which always works. "
+                             "Default: maap.granule_staging, else workspace.")
     parser.add_argument("--granule-workdir",
                         help="Where granules are downloaded before staging. "
                              "Default: a temp dir, removed afterwards.")
