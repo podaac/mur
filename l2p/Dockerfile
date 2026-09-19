@@ -112,6 +112,9 @@ WORKDIR /data
 # common/julian.m / common/fortwrite.m above, this is bash, not MATLAB source
 # to be compiled away, so it has to persist into this final image.
 COPY common/bin/localize.sh /opt/common/bin/localize.sh
+# Mints DAAC credentials from a MAAP token, so the container can read
+# a bucket its own role cannot. stdlib only -- no new dependencies.
+COPY common/bin/maap_credentials.py /opt/common/bin/maap_credentials.py
 RUN chmod +x /opt/common/bin/localize.sh
 
 # Entrypoint wrapper script (source: l2p/bin/entrypoint.sh).

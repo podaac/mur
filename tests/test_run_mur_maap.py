@@ -26,10 +26,15 @@ def test_build_l2p_manifest_from_hrefs():
         "s3://podaac/AMSR2-REMSS-L2P-v8.2/2026-08-07.nc",
     ])
 
+    # Each entry declares how the container should read it. The orchestrator
+    # knows the source, so it says so rather than leaving the container to
+    # infer it from a bucket name.
     assert manifest == {
         "files": [
-            {"path": "s3://podaac/AMSR2-REMSS-L2P-v8.2/2026-08-06.nc"},
-            {"path": "s3://podaac/AMSR2-REMSS-L2P-v8.2/2026-08-07.nc"},
+            {"path": "s3://podaac/AMSR2-REMSS-L2P-v8.2/2026-08-06.nc",
+             "access": "podaac"},
+            {"path": "s3://podaac/AMSR2-REMSS-L2P-v8.2/2026-08-07.nc",
+             "access": "podaac"},
         ]
     }
 

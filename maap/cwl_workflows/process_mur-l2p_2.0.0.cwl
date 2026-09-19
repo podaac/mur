@@ -42,6 +42,17 @@ $graph:
         '
       label: Granules manifest
       type: string
+    maap-token:
+      doc: 'Optional MAAP token, used only to mint temporary PO.DAAC credentials inside
+        the container. A DPS worker reads S3 as its own role, which gets 403 Forbidden
+        on a DAAC bucket, so granules cannot be read without this. Supplied by run_mur_maap.py
+        from its own environment; an empty string means no DAAC access is available
+        and granule fetches will fail.
+
+        '
+      label: MAAP token
+      type: string?
+      default: ''
   outputs:
     output:
       type: Directory
@@ -56,6 +67,7 @@ $graph:
         doy: doy
         rewrite: rewrite
         granules-manifest: granules-manifest
+        maap-token: maap-token
       out:
       - outputs_result
 - class: CommandLineTool
@@ -63,6 +75,9 @@ $graph:
   requirements:
     DockerRequirement:
       dockerPull: ghcr.io/podaac/mur/l2p-dps:2.0.0
+    EnvVarRequirement:
+      envDef:
+        MAAP_PGT: $(inputs["maap-token"])
     NetworkAccess:
       networkAccess: true
     ResourceRequirement:
@@ -101,6 +116,9 @@ $graph:
       inputBinding:
         position: 6
         prefix: --granules-manifest
+    maap-token:
+      type: string?
+      default: ''
   outputs:
     outputs_result:
       outputBinding:
@@ -119,7 +137,7 @@ s:citation: 'Chin, T.M., Vazquez-Cuervo, J., Armstrong, E.M. (2017). A multi-sca
   '
 s:codeRepository: https://github.com/podaac/mur
 s:commitHash: null
-s:dateCreated: 2026-09-17
+s:dateCreated: 2026-09-19
 s:license: https://github.com/podaac/mur/blob/main/LICENSE
 s:softwareVersion: 1.0.0
 s:version: 2.0.0

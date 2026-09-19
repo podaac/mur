@@ -228,6 +228,67 @@ case "$err" in
 esac
 rm -rf "$scratch"
 
+# --- access kinds: the container decides HOW to read each source ---
+#
+# The orchestrator says WHAT to fetch; localize.sh says how. Three kinds exist
+# today -- a mounted file, a bucket the runtime's own role can read, and a DAAC
+# bucket it cannot -- and adding a fourth means adding a case to fetch_uri
+# rather than changing any caller.
+
+out=$(run_case 'access_kind_for "/data/in/x.nc"')
+assert_eq "a bare path is local" "local" "$out"
+
+out=$(run_case 'access_kind_for "s3://my-bucket/x.bic"')
+assert_eq "an ordinary bucket uses the runtime role" "s3" "$out"
+
+out=$(run_case 'access_kind_for "s3://podaac-ops-cumulus-protected/x.nc"')
+assert_eq "a PO.DAAC bucket needs DAAC credentials" "podaac" "$out"
+
+out=$(run_case 'access_kind_for "https://example.com/x.nc"')
+assert_eq "an https URL is fetched over http" "http" "$out"
+
+# A declared kind must win over inference: the orchestrator knows things the
+# bucket name does not say.
+scratch=$(mktemp -d)
+printf 'real\n' > "$scratch/src.nc"
+cat > "$scratch/m.json" <<EOF
+{"files": [{"path": "$scratch/src.nc", "relative_path": "a.nc", "access": "local"}]}
+EOF
+out=$(run_case "localize_manifest granules '$scratch/m.json' '$scratch/out'" 2>/dev/null)
+if [[ -r "$scratch/out/granules/a.nc" ]]; then
+    echo "PASS: a local entry is materialized without any S3 call"
+else
+    echo "FAIL: local entry was not materialized"
+    FAILURES=$((FAILURES + 1))
+fi
+
+# DAAC credentials are minted once per run, not once per file. A sensor-day is
+# hundreds of granules; one exchange each would be hundreds of round trips.
+cat > "$scratch/many.json" <<'EOF'
+{"files": [
+  {"path": "s3://podaac-ops-cumulus-protected/a.nc", "relative_path": "a.nc", "access": "podaac"},
+  {"path": "s3://podaac-ops-cumulus-protected/b.nc", "relative_path": "b.nc", "access": "podaac"},
+  {"path": "s3://podaac-ops-cumulus-protected/c.nc", "relative_path": "c.nc", "access": "podaac"}
+]}
+EOF
+# Stub the credential HELPER, not _ensure_podaac_credentials -- overriding the
+# function would bypass the caching guard this is meant to test.
+cat > "$scratch/fake_creds.py" <<'CREDEOF'
+import sys
+print("MINT", file=sys.stderr)
+print("export AWS_ACCESS_KEY_ID=fake")
+print("export AWS_SECRET_ACCESS_KEY=fake")
+print("export AWS_SESSION_TOKEN=fake")
+CREDEOF
+mints=$(bash -c "
+    source '$HELPER'
+    export MUR_CREDENTIAL_HELPER='$scratch/fake_creds.py'
+    aws() { mkdir -p \"\$(dirname \"\$4\")\"; echo stub > \"\$4\"; return 0; }
+    localize_manifest granules '$scratch/many.json' '$scratch/out2' >/dev/null
+" 2>&1 | grep -c MINT)
+assert_eq "DAAC credentials are minted once for a whole manifest" "1" "$mints"
+rm -rf "$scratch"
+
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
     echo "All tests passed."

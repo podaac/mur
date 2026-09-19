@@ -72,6 +72,17 @@ inputs:
       `aws s3 cp` cannot authenticate to a DAAC.
     type: string
 
+  - name: maap-token
+    label: MAAP token
+    doc: >
+      Optional MAAP token, used only to mint temporary PO.DAAC credentials
+      inside the container. A DPS worker reads S3 as its own role, which gets
+      403 Forbidden on a DAAC bucket, so granules cannot be read without this.
+      Supplied by run_mur_maap.py from its own environment; an empty string
+      means no DAAC access is available and granule fetches will fail.
+    type: string?
+    default: ""
+
 outputs:
   - name: output
     type: Directory

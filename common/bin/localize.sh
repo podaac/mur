@@ -7,19 +7,130 @@
 # into a guaranteed-local path before the compiled MATLAB/Fortran code
 # touches it -- none of it understands s3:// natively.
 #
-# Local values (including ones that don't exist -- existence checking stays
-# the caller's job, e.g. landice's verify_inputs_exist) pass through
-# unchanged. s3:// values are fetched via `aws s3 cp` into scratch_dir/name.
-# Credentials come from the standard AWS credential chain (env vars locally,
-# IAM role automatically on MAAP/AWS compute) -- no branching needed here.
+# Fetching is pluggable by ACCESS KIND, so the container -- not the caller --
+# owns data access, and the same image works wherever it runs:
+#
+#   local   a path on a mounted filesystem. Passed through unchanged,
+#           including when it does not exist: existence checking stays the
+#           caller's job (e.g. landice's verify_inputs_exist).
+#   s3      a bucket the runtime's own credentials can read. The standard AWS
+#           chain covers it -- env vars locally, an IAM role on AWS compute.
+#   podaac  a NASA DAAC bucket, which the runtime's own role CANNOT read (a
+#           worker gets 403 Forbidden). Temporary credentials are minted from
+#           a MAAP token via maap_credentials.py and used for that copy only.
+#   http    an https:// URL, fetched with curl.
+#
+# A manifest entry may declare its kind with an "access" field. When it does
+# not, the kind is inferred from the URI, so older manifests keep working.
+#
+# Adding a source means adding a case to fetch_uri, not changing any caller.
 #
 # Usage:
 #   local_path=$(localize_input <name> <value> <scratch_dir>) || exit 1
 
+# This file's own directory. SCRIPT_DIR belongs to whichever entrypoint
+# sourced us and points at /opt/<module>/bin, not /opt/common/bin.
+LOCALIZE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Buckets that need DAAC credentials rather than the runtime's own role.
+: "${MUR_DAAC_BUCKET_PATTERN:=podaac-ops-*|podaac-*|*-cumulus-protected|*-protected}"
+
+access_kind_for() {
+    # Infer an access kind from a URI, when the manifest did not declare one.
+    local uri="$1" bucket
+    case "$uri" in
+        s3://*)
+            bucket="${uri#s3://}"; bucket="${bucket%%/*}"
+            # Split on | and test each pattern separately. An unquoted
+            # variable inside a case pattern is glob-expanded but NOT split
+            # into alternations, so "a*|b*" from a variable matches the
+            # literal string "a*|b*" and nothing else.
+            local pat
+            local saved_ifs="$IFS"
+            IFS='|'
+            for pat in $MUR_DAAC_BUCKET_PATTERN; do
+                # shellcheck disable=SC2254
+                case "$bucket" in
+                    $pat) IFS="$saved_ifs"; echo podaac; return 0 ;;
+                esac
+            done
+            IFS="$saved_ifs"
+            echo s3
+            ;;
+        http://*|https://*) echo http ;;
+        *) echo local ;;
+    esac
+}
+
+_podaac_env_ready=0
+_ensure_podaac_credentials() {
+    # Mint DAAC credentials once per container run. maap_credentials.py caches
+    # them on disk and re-mints near expiry, so hundreds of granules cost one
+    # exchange.
+    [[ "$_podaac_env_ready" -eq 1 ]] && return 0
+
+    local helper="${MUR_CREDENTIAL_HELPER:-$LOCALIZE_DIR/maap_credentials.py}"
+    if [[ ! -x "$helper" && ! -f "$helper" ]]; then
+        echo "ERROR: credential helper not found at $helper -- cannot read a DAAC bucket" >&2
+        return 1
+    fi
+
+    local exports
+    if ! exports=$(python3 "$helper" ${MUR_DAAC_ENDPOINT:+--endpoint "$MUR_DAAC_ENDPOINT"}); then
+        return 1
+    fi
+    eval "$exports"
+    _podaac_env_ready=1
+    return 0
+}
+
+fetch_uri() {
+    # fetch_uri <src> <dest> [access_kind]
+    #
+    # Copies one source to one local path. The only place that knows how a
+    # given kind of source is read.
+    local src="$1" dest="$2" kind="${3:-}"
+    [[ -n "$kind" && "$kind" != "null" ]] || kind=$(access_kind_for "$src")
+
+    mkdir -p "$(dirname "$dest")"
+
+    case "$kind" in
+        local)
+            if [[ ! -e "$src" ]]; then
+                echo "ERROR: local source does not exist: $src" >&2
+                return 1
+            fi
+            [[ -e "$dest" ]] || ln -s "$(cd "$(dirname "$src")" && pwd)/$(basename "$src")" "$dest"
+            ;;
+        s3)
+            aws s3 cp "$src" "$dest" >&2 || return 1
+            ;;
+        podaac)
+            _ensure_podaac_credentials || return 1
+            # A subshell so the DAAC credentials never leak into the
+            # environment of anything else this container runs.
+            ( export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+              aws s3 cp "$src" "$dest" >&2 ) || return 1
+            ;;
+        http)
+            curl -fsSL -o "$dest" "$src" || return 1
+            ;;
+        *)
+            echo "ERROR: unknown access kind '$kind' for $src" >&2
+            return 1
+            ;;
+    esac
+    return 0
+}
+
 localize_input() {
     local name="$1" value="$2" scratch_dir="$3"
+    local kind
+    kind=$(access_kind_for "$value")
 
-    if [[ "$value" != s3://* ]]; then
+    # A local path is handed straight back rather than symlinked: callers
+    # verify these themselves, and a mounted file is already local.
+    if [[ "$kind" == "local" ]]; then
         echo "$value"
         return 0
     fi
@@ -27,7 +138,7 @@ localize_input() {
     mkdir -p "$scratch_dir"
     local dest="$scratch_dir/$name"
 
-    if ! aws s3 cp "$value" "$dest" >&2; then
+    if ! fetch_uri "$value" "$dest" "$kind"; then
         echo "ERROR: failed to fetch $name from $value" >&2
         return 1
     fi
@@ -65,10 +176,18 @@ localize_manifest() {
     local dest_root="$scratch_dir/$name"
     mkdir -p "$dest_root"
 
-    python3 - "$manifest_local" "$dest_root" <<'PYEOF' || return 1
+    # Parse in Python (bash has no JSON), fetch in bash. Fetching from a
+    # spawned interpreter would re-source this file and re-mint credentials
+    # for every entry -- a sensor-day is hundreds of granules, so that is
+    # hundreds of credential exchanges and process spawns.
+    # Parse in Python (bash has no JSON), fetch in bash. Fetching from a
+    # spawned interpreter would re-source this file and re-mint credentials for
+    # every entry -- a sensor-day is hundreds of granules, so that would be
+    # hundreds of credential exchanges and process spawns.
+    local plan
+    plan=$(python3 - "$manifest_local" "$dest_root" <<'PYEOF'
 import json
 import os
-import subprocess
 import sys
 
 manifest_path, dest_root = sys.argv[1], sys.argv[2]
@@ -80,14 +199,19 @@ for entry in manifest.get("files", []):
     src = entry["path"]
     rel = entry.get("relative_path") or os.path.basename(src)
     dest = os.path.join(dest_root, rel)
-    dest_dir = os.path.dirname(dest)
-    if dest_dir:
-        os.makedirs(dest_dir, exist_ok=True)
-    if src.startswith("s3://"):
-        subprocess.run(["aws", "s3", "cp", src, dest], check=True)
-    elif not os.path.exists(dest):
-        os.symlink(os.path.abspath(src), dest)
+    # Tab-separated: a path may contain spaces, never a tab or newline.
+    print("\t".join([src, dest, entry.get("access") or ""]))
 PYEOF
+) || return 1
+
+    local src dest kind
+    while IFS=$'\t' read -r src dest kind; do
+        [[ -n "$src" ]] || continue
+        if ! fetch_uri "$src" "$dest" "$kind"; then
+            echo "ERROR: localize_manifest: $name: failed to fetch $src" >&2
+            return 1
+        fi
+    done <<< "$plan"
 
     # Verify every materialized entry is genuinely readable (this dereferences
     # symlinks, so it catches a dangling symlink or a truncated/failed fetch

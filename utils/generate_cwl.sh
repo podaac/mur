@@ -91,14 +91,43 @@ if [ "$VALIDATE_ONLY" -eq 0 ]; then
     # never read here. Its README says to fix this by hand; do it instead,
     # since the value is right there in the config.
     "$PYTHON" - "$dest" "$image" <<'PATCH'
-import pathlib, re, sys
+import pathlib
+import re
+import sys
+
 path, image = pathlib.Path(sys.argv[1]), sys.argv[2]
 text = path.read_text()
-patched, n = re.subn(r'(dockerPull:)\s*null\b', r'\1 ' + image, text)
-if n == 0 and f'dockerPull: {image}' not in patched:
+
+# The generator leaves dockerPull null when run outside its GitHub Action --
+# building and tagging the image is the Action's job.
+text, n = re.subn(r'(dockerPull:)\s*null\b', r'\1 ' + image, text)
+if n == 0 and f'dockerPull: {image}' not in text:
     sys.exit(f"could not set dockerPull in {path}")
-path.write_text(patched)
 print(f"    dockerPull -> {image}")
+
+# A MAAP token must reach the container as an environment variable, not as a
+# command-line flag: argv is visible to anything that can read /proc, and the
+# entrypoint has no business parsing a credential. The generator has no notion
+# of env vars, so the binding is rewritten here -- drop the inputBinding so it
+# is not passed as --maap-token, and add an EnvVarRequirement.
+if "maap-token" in text and "EnvVarRequirement" not in text:
+    text = re.sub(
+        r"(\n    maap-token:\n      type: string\??\n)"
+        r"      inputBinding:\n        position: \d+\n        prefix: --maap-token\n",
+        r"\1",
+        text,
+    )
+    text = text.replace(
+        "    NetworkAccess:",
+        "    EnvVarRequirement:\n"
+        "      envDef:\n"
+        "        MAAP_PGT: $(inputs[\"maap-token\"])\n"
+        "    NetworkAccess:",
+        1,
+    )
+    print("    MAAP_PGT <- inputs[\"maap-token\"] (env, not argv)")
+
+path.write_text(text)
 PATCH
   done
 fi

@@ -257,15 +257,15 @@ def test_stac_search_maps_collections_back_to_their_sensor():
     c, _, _ = make_client()
     c.sensor_collections = {"AMSR2R": ["AMSR2-REMSS-L2P-v8.2"]}
 
-    staged = []
+    seen = []
     import mur_maap.granules as g
-    real = g.stage_day
-    g.stage_day = lambda client, sensor, cols, day, **kw: staged.append(sensor) or []
+    real = g.granules_for_day
+    g.granules_for_day = lambda client, sensor, cols, day, **kw: seen.append(sensor) or []
     try:
         c.stac_search(["AMSR2-REMSS-L2P-v8.2"], datetime.date(2026, 8, 6), None)
     finally:
-        g.stage_day = real
-    assert staged == ["AMSR2R"]
+        g.granules_for_day = real
+    assert seen == ["AMSR2R"]
 
 
 # --- per-module queues -----------------------------------------------------

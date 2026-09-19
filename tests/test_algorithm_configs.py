@@ -16,6 +16,16 @@ yaml = pytest.importorskip("yaml")
 REPO = pathlib.Path(__file__).resolve().parent.parent
 MODULES = ("landice", "iquam", "l2p", "mrva")
 
+# Inputs delivered to the container as environment variables rather than
+# command-line flags, so they have no matching entrypoint flag by design.
+# utils/generate_cwl.sh strips their inputBinding and adds an
+# EnvVarRequirement.
+ENV_INPUTS = {
+    # A credential has no business in argv, which anything able to read /proc
+    # can see, nor in an entrypoint's argument parser.
+    "l2p": {"maap-token": "MAAP_PGT"},
+}
+
 # Flags deliberately not exposed as job inputs, with the reason.
 UNEXPOSED = {
     "iquam": {
@@ -47,6 +57,7 @@ def entrypoint_flags(module):
 @pytest.mark.parametrize("module", MODULES)
 def test_every_declared_input_is_a_real_entrypoint_flag(module):
     declared = {i["name"] for i in load_config(module)["inputs"]}
+    declared -= set(ENV_INPUTS.get(module, {}))
     unknown = declared - entrypoint_flags(module)
     assert not unknown, (
         f"{module}: declares input(s) the entrypoint rejects: {sorted(unknown)}. "
@@ -215,3 +226,25 @@ def test_no_mur_input_name_contains_an_underscore():
     for module in MODULES:
         for name in _declared_inputs(module):
             assert "_" not in name, f"{module}: input {name!r} breaks the mapping"
+
+
+@pytest.mark.parametrize("module", MODULES)
+def test_env_delivered_inputs_are_declared_and_optional(module):
+    """An env-delivered input still has to exist in the config -- that is what
+    the CWL references -- and must be optional, since a run without a MAAP
+    token is legitimate for the stages that need no DAAC access."""
+    declared = {i["name"]: i for i in load_config(module)["inputs"]}
+    for name in ENV_INPUTS.get(module, {}):
+        assert name in declared, f"{module}: {name} is not declared"
+        assert str(declared[name]["type"]).endswith("?"), \
+            f"{module}: {name} must be optional"
+
+
+def test_the_cwl_generator_knows_about_every_env_input():
+    """If an input is added to ENV_INPUTS without teaching generate_cwl.sh,
+    it silently stays a command-line flag and the credential lands in argv."""
+    script = (REPO / "utils" / "generate_cwl.sh").read_text()
+    for module, mapping in ENV_INPUTS.items():
+        for name, env in mapping.items():
+            assert name in script, f"generate_cwl.sh does not handle {name}"
+            assert env in script, f"generate_cwl.sh does not set {env}"

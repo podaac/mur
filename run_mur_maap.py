@@ -28,6 +28,7 @@ is real and covered by tests/test_run_mur_maap.py against a fake client.
 """
 import datetime
 import logging
+import os
 import pathlib
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
@@ -52,13 +53,35 @@ def resolve_landice_static_hrefs(static_resources_root: str) -> Dict[str, str]:
     }
 
 
+def access_kind_for(href: str) -> str:
+    """Which accessor the container should use for this source.
+
+    The orchestrator knows where a href came from, so it says so rather than
+    leaving the container to infer it from a bucket name. localize.sh still
+    infers when the field is absent, so older manifests keep working.
+    """
+    if not href.startswith("s3://"):
+        return "http" if href.startswith(("http://", "https://")) else "local"
+    bucket = href[len("s3://"):].split("/", 1)[0]
+    if "podaac" in bucket or bucket.endswith(("-protected", "-cumulus-protected")):
+        return "podaac"
+    return "s3"
+
+
 def build_l2p_manifest_from_hrefs(granule_hrefs: List[str]) -> Dict:
-    """Build the granules manifest (docs/input-contract.html
-    section 3) for L2P from stac_search()'s already-s3://-href granule list
-    -- no path rewriting needed here, unlike the local-mode equivalent in
-    run_mur_pipeline.py's build_l2p_granules_manifest, since these hrefs are
-    already directly readable by the container via localize.sh."""
-    return {"files": [{"path": href} for href in granule_hrefs]}
+    """Build the granules manifest (docs/input-contract.html section 3).
+
+    Entries carry an `access` kind so the container knows how to read each
+    one -- a DAAC bucket needs credentials its own role does not have, a
+    public bucket does not, and a mounted file needs no fetch at all. The
+    orchestrator decides WHAT to fetch; localize.sh decides HOW.
+    """
+    return {
+        "files": [
+            {"path": href, "access": access_kind_for(href)}
+            for href in granule_hrefs
+        ]
+    }
 
 
 def resolve_mrva_static_hrefs(static_resources_root: str, doy: int) -> Dict[str, str]:
@@ -334,6 +357,7 @@ class MAAPOrchestrator:
                     files.append({
                         "path": entry_href,
                         "sensor": sensor,
+                        "access": access_kind_for(entry_href),
                         "relative_path": paths.iquam_relative_path(data_day),
                     })
                     continue
@@ -356,6 +380,7 @@ class MAAPOrchestrator:
                 files.append({
                     "path": entry_href,
                     "sensor": sensor,
+                    "access": access_kind_for(entry_href),
                     "relative_path": paths.bic_relative_path(
                         sensor, data_day, entry_href.rsplit("/", 1)[-1]
                     ),
@@ -448,14 +473,27 @@ class MAAPOrchestrator:
                     paths.l2p_manifest_key(sensor, data_day),
                     build_l2p_manifest_from_hrefs(granules),
                 )
-                job = self.client.submit_job("mur-l2p", {
+                l2p_args = {
                     "sensor": sensor,
                     "region": sensor_config["region"],
                     "year": data_day.year,
                     "doy": data_day.timetuple().tm_yday,
                     "rewrite": 1 if rewrite else 0,
                     "granules_manifest": granules_manifest_href,
-                })
+                }
+                # The container mints its own PO.DAAC credentials from this;
+                # a worker's own role gets 403 on a DAAC bucket. The CWL turns
+                # it into the MAAP_PGT environment variable rather than a
+                # flag, so it never appears in the container's argv.
+                if maap_token := os.environ.get("MAAP_PGT"):
+                    l2p_args["maap_token"] = maap_token
+                elif any(g.startswith("s3://podaac") for g in granules):
+                    logger.warning(
+                        "    MAAP_PGT is not set, so %s %s cannot obtain DAAC "
+                        "credentials and its granule fetches will fail",
+                        sensor, data_day)
+
+                job = self.client.submit_job("mur-l2p", l2p_args)
                 l2p_jobs.append(job)
                 bic_results[(sensor, data_day)] = (None, job)
 
