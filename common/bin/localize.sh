@@ -156,15 +156,15 @@ localize_input() {
 # that don't need subdirectory grouping (e.g. L2P) can omit it; callers that
 # do (e.g. MRVA's per-sensor BIC layout) supply it explicitly rather than
 # having this function infer identity by parsing the path string, per the
-# design doc's section 1 principle. Local sources are symlinked; s3://
-# sources are fetched via `aws s3 cp`, same as localize_input.
+# design doc's section 1 principle.
+#
+# Every entry goes through fetch_uri, so a manifest may mix kinds freely: a
+# mounted climatology file beside a public-bucket grid beside several hundred
+# PO.DAAC granules, each read the way that source requires.
 #
 # Uses python3 (already present as the awscli package's own transitive
-# dependency -- not a new tool) for the actual JSON parsing/materialization,
-# since bash has no practical JSON support. There's a deliberate small
-# duplication of "if the source starts with s3://, run aws s3 cp" against
-# localize_input above -- accepted as simpler than round-tripping through
-# temp files between bash and python for every entry.
+# dependency -- not a new tool) for the JSON parsing, since bash has no
+# practical JSON support.
 #
 # Usage:
 #   dir=$(localize_manifest <name> <manifest_value> <scratch_dir>) || exit 1
@@ -176,10 +176,6 @@ localize_manifest() {
     local dest_root="$scratch_dir/$name"
     mkdir -p "$dest_root"
 
-    # Parse in Python (bash has no JSON), fetch in bash. Fetching from a
-    # spawned interpreter would re-source this file and re-mint credentials
-    # for every entry -- a sensor-day is hundreds of granules, so that is
-    # hundreds of credential exchanges and process spawns.
     # Parse in Python (bash has no JSON), fetch in bash. Fetching from a
     # spawned interpreter would re-source this file and re-mint credentials for
     # every entry -- a sensor-day is hundreds of granules, so that would be

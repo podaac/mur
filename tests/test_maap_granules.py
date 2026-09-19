@@ -1,94 +1,60 @@
-"""Granule discovery and staging.
+"""Granule discovery.
 
-Two modes exist because which one is necessary is not yet known: "direct"
-hands L2P PO.DAAC's own s3:// hrefs and avoids all copying, but only works if
-the DPS worker's role can read PO.DAAC. "workspace" copies first and always
-works. These cover the dispatch and the staging bookkeeping; whether direct
-mode's hrefs are readable inside a job is settled by running one.
+This module's job is to answer "which granules exist for this sensor-day" and
+nothing else. Everything here defends that boundary: the orchestrator resolves
+hrefs, the container reads them. A regression would look like this module
+growing the ability to open a granule again -- a downloader, a bucket copy, a
+credential exchange -- so these tests assert the absence of those as directly
+as the absence of a thing can be asserted.
 """
+import ast
 import datetime
+import inspect
 import pathlib
 
 import pytest
 
 from mur_maap import granules
-from mur_maap.workspace import WorkspacePath
 
 DAY = datetime.date(2026, 8, 6)
-BUCKET, USER = "maap-ops-workspace", "jleach_jpl"
 
 
 class FakeS3:
-    def __init__(self, keys=()):
-        self.keys, self.uploaded, self.deleted = list(keys), [], []
-    def get_paginator(self, name):
-        keys = self.keys
-        class P:
-            def paginate(self, Bucket, Prefix):
-                return [{"Contents": [{"Key": k} for k in keys if k.startswith(Prefix)]}]
-        return P()
-    def head_object(self, Bucket, Key):
-        from botocore.exceptions import ClientError
-        if Key not in self.keys:
-            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
-        return {"ContentLength": 10}
+    """Records any write. Nothing should ever reach it."""
+    def __init__(self):
+        self.uploaded, self.deleted = [], []
     def upload_file(self, filename, Bucket, Key):
-        self.uploaded.append(Key); self.keys.append(Key)
+        self.uploaded.append(Key)
     def upload_fileobj(self, fileobj, Bucket, Key):
-        fileobj.read()                      # streaming: the body is consumed
-        self.uploaded.append(Key); self.keys.append(Key)
+        self.uploaded.append(Key)
     def delete_object(self, Bucket, Key):
-        self.deleted.append(Key); self.keys.remove(Key)
-
-
-class FakePodaacS3:
-    """Stands in for the PO.DAAC-authorized client staging reads from."""
-    def __init__(self, objects=None):
-        self.objects = objects or {}
-        self.read = []
-    def head_object(self, Bucket, Key):
-        from botocore.exceptions import ClientError
-        if Key not in self.objects:
-            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
-        return {"ContentLength": self.objects[Key]}
-    def get_object(self, Bucket, Key):
-        self.read.append(Key)
-        import io
-        return {"Body": io.BytesIO(b"x" * self.objects.get(Key, 10))}
+        self.deleted.append(Key)
 
 
 class FakeClient:
-    def __init__(self, keys=(), podaac=None):
-        self._s3 = FakeS3(keys)
+    def __init__(self):
+        self._s3 = FakeS3()
         self.workspace = self
         self.maap = object()
-        # Pre-seeded so staging never tries to mint real credentials.
-        self._podaac_s3 = podaac if podaac is not None else FakePodaacS3()
     def s3(self): return self._s3
-    def path(self): return WorkspacePath(BUCKET, USER)
-    def list_objects(self, prefix):
-        _, key = prefix[len("s3://"):].split("/", 1)
-        return [f"s3://{BUCKET}/{k}" for k in self._s3.keys if k.startswith(key)]
 
 
-STAGED_PREFIX = f"{USER}/mur/l2p-granules/AMSR2R/2026/218"
+# --- what it returns -------------------------------------------------------
 
-
-# --- dispatch --------------------------------------------------------------
-
-def test_direct_mode_does_not_touch_the_bucket(monkeypatch):
-    """The whole point of direct mode: no copy, no duplicate storage."""
+def test_hrefs_are_returned_unchanged(monkeypatch):
+    """PO.DAAC's own hrefs, not rewritten to somewhere we copied them."""
     client = FakeClient()
     monkeypatch.setattr(granules, "discover_day",
-                        lambda c, d, **kw: ["s3://podaac-ops/g1.nc"])
+                        lambda c, d, **kw: ["s3://podaac-ops-cumulus-protected/g1.nc"])
     got = granules.granules_for_day(client, "AMSR2R", ["C"], DAY, mode="direct")
-    assert got == ["s3://podaac-ops/g1.nc"]
+    assert got == ["s3://podaac-ops-cumulus-protected/g1.nc"]
     assert client._s3.uploaded == []
 
 
-def test_workspace_mode_is_accepted_but_only_discovers(monkeypatch, caplog):
-    """Existing configs say granule_staging=workspace; that must keep working
-    rather than erroring, while no longer copying anything."""
+def test_obsolete_workspace_mode_still_discovers(monkeypatch):
+    """A config written before the container fetched its own data says
+    granule_staging=workspace. That must keep working rather than erroring,
+    while no longer copying anything."""
     calls = []
     monkeypatch.setattr(granules, "discover_day",
                         lambda c, d, **kw: calls.append(d) or ["s3://podaac-ops/g.nc"])
@@ -100,24 +66,72 @@ def test_workspace_mode_is_accepted_but_only_discovers(monkeypatch, caplog):
     assert client._s3.uploaded == []
 
 
-def test_nothing_is_copied_into_the_bucket(monkeypatch):
-    monkeypatch.setattr(granules, "discover_day",
-                        lambda *a, **k: ["s3://podaac-ops/a.nc", "s3://podaac-ops/b.nc"])
-    client = FakeClient()
-    granules.granules_for_day(client, "AMSR2R", ["C"], DAY)
-    assert client._s3.uploaded == []
-
-
 def test_a_day_with_no_granules_returns_empty(monkeypatch):
     """A real answer, not a failure -- L2P is simply not submitted for it."""
     monkeypatch.setattr(granules, "discover_day", lambda *a, **k: [])
     assert granules.granules_for_day(FakeClient(), "AMSR2R", ["C"], DAY) == []
 
 
-def test_discovery_does_not_shell_out(monkeypatch):
-    """No second downloader with its own credentials in the path."""
-    monkeypatch.setattr(granules, "discover_day", lambda *a, **k: ["s3://p/g.nc"])
-    def boom(*a, **k):
-        raise AssertionError("granule discovery must not spawn a subprocess")
-    monkeypatch.setattr(granules.subprocess, "run", boom)
-    granules.granules_for_day(FakeClient(), "AMSR2R", ["C"], DAY)
+def test_collection_filter_reaches_discovery(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(granules, "discover_day",
+                        lambda c, d, **kw: seen.update(cols=c, **kw) or [])
+    granules.granules_for_day(FakeClient(), "AMSR2R", ["A", "B"], DAY,
+                              collection_filter="B")
+    assert seen == {"cols": ["A", "B"], "collection_filter": "B"}
+
+
+# --- what it must not do ---------------------------------------------------
+
+MODULE_SOURCE = pathlib.Path(inspect.getfile(granules)).read_text()
+
+
+def test_the_module_cannot_spawn_a_process():
+    """Stronger than patching subprocess.run: the name is not importable here
+    at all, so no code path can reach a downloader. The podaac-data-subscriber
+    call this module used to make needed a .netrc, duplicated the credential
+    story, and fetched to local disk for data the container reads itself."""
+    imported = set()
+    for node in ast.walk(ast.parse(MODULE_SOURCE)):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module.split(".")[0])
+    assert not imported & {"subprocess", "os", "shutil", "tempfile"}, \
+        f"discovery reaches the filesystem or a process: {sorted(imported)}"
+
+
+def test_the_module_does_not_mint_credentials():
+    """Credentials belong to whoever reads the bytes. This module reads none,
+    so an s3credentials endpoint appearing here means staging crept back in."""
+    assert "s3credentials" not in MODULE_SOURCE
+    assert "boto3" not in MODULE_SOURCE
+
+
+def test_no_bucket_writing_helpers_survive():
+    tree = ast.parse(MODULE_SOURCE)
+    defined = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+    assert defined == {"discover_day", "_try_login", "granules_for_day"}, \
+        f"unexpected public surface: {sorted(defined)}"
+
+
+def test_earthaccess_is_the_only_hard_dependency_and_it_is_lazy():
+    """Importing mur_maap must work in an environment without earthaccess --
+    --dry-run and the whole test suite depend on it."""
+    top_level = {n.names[0].name for n in ast.parse(MODULE_SOURCE).body
+                 if isinstance(n, ast.Import)}
+    assert "earthaccess" not in top_level
+
+
+def test_missing_earthaccess_names_the_fix(monkeypatch):
+    import builtins
+    real_import = builtins.__import__
+
+    def no_earthaccess(name, *args, **kwargs):
+        if name == "earthaccess":
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_earthaccess)
+    with pytest.raises(granules.GranuleDiscoveryError, match="pip install earthaccess"):
+        granules.discover_day(["C"], DAY)
