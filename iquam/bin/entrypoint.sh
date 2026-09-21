@@ -7,6 +7,12 @@
 # exactly the one (year, doy) it's told, using the explicit reference date
 # for its own +/-buoy-day-range rewrite/stability decisions.
 
+# Say which image this is before doing anything else. Docker reuses a cached
+# image for a tag that was rebuilt in place, so "the tag is 2.0.0" is not
+# evidence that the bits are today's -- this line is. Set at build time by
+# maap/Dockerfile.dps; "unknown" means a base image built outside that path.
+echo "MUR image build: ${MUR_IMAGE_BUILD:-unknown} (module: iquam)" >&2
+
 usage() {
     echo "Usage: docker run ... --year YEAR --doy DOY --mode nrt|rea --reference-date YYYY-MM-DD \\"
     echo "  --work-dir DIR --log-dir DIR --output-dir DIR \\"

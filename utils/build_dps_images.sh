@@ -68,6 +68,21 @@ fi
 
 cd "$(dirname "$0")/.."
 
+# Identifies this build inside the image. A tag rebuilt in place looks
+# identical to the old one from outside, and cwltool skips `docker pull`
+# whenever `docker inspect <tag>` succeeds -- so a DPS worker that has run
+# this tag before will keep running its cached copy. The entrypoint echoes
+# this value, which is how a job log proves which build actually ran.
+BUILD_STAMP="${BUILD_STAMP:-$(git rev-parse --short HEAD 2>/dev/null || echo nogit)$(git diff --quiet 2>/dev/null || echo -dirty)-$(date -u +%Y%m%dT%H%M%SZ)}"
+echo "Build stamp: ${BUILD_STAMP}"
+case "$BUILD_STAMP" in
+  *-dirty-*) echo "    NOTE: the working tree has uncommitted changes, so this" ;;
+esac
+case "$BUILD_STAMP" in
+  *-dirty-*) echo "          image cannot be reproduced from a commit." ;;
+esac
+echo
+
 for module in $MODULES; do
   base="${REGISTRY}/${REPO}/${module}:${TAG}"
   dps="${REGISTRY}/${REPO}/${module}-dps:${TAG}"
@@ -84,6 +99,7 @@ for module in $MODULES; do
     --platform "$PLATFORM" \
     --build-arg "BASE_IMAGE=${base}" \
     --build-arg "MODULE=${module}" \
+    --build-arg "BUILD_STAMP=${BUILD_STAMP}" \
     --file maap/Dockerfile.dps \
     --tag "$dps" \
     .
@@ -107,8 +123,25 @@ for module in $MODULES; do
     echo "             (is the working tree on a commit that includes it?)" >&2
   fi
 
+  # The stamp is what makes a rebuilt tag identifiable; if it did not land,
+  # the job log will say "unknown" and prove nothing.
+  stamped=$(docker image inspect "$dps" --format '{{index .Config.Env}}' \
+            | tr ' ' '\n' | grep '^MUR_IMAGE_BUILD=' | cut -d= -f2- || true)
+  if [ "$stamped" = "$BUILD_STAMP" ]; then
+    echo "    ok: build stamp ${stamped}"
+  else
+    echo "    ERROR: build stamp is '${stamped}', expected '${BUILD_STAMP}'" >&2
+    exit 1
+  fi
+
   if [ "$PUSH" -eq 1 ]; then
     docker push "$dps"
+
+    # The digest is the only identifier that cannot be reused. Pin the CWL to
+    # it -- utils/generate_cwl.sh --pin-digest -- when rebuilding a tag in
+    # place, or a worker with a cached copy will never fetch this build.
+    digest=$(docker image inspect "$dps" --format '{{index .RepoDigests 0}}' 2>/dev/null || true)
+    [ -n "$digest" ] && echo "    digest: ${digest}"
   fi
 done
 
@@ -140,3 +173,20 @@ echo "Done. Reference these in each maap/<module>/algorithm_config.yml as:"
 for module in $MODULES; do
   echo "  algorithm_container_url: ${REGISTRY}/${REPO}/${module}-dps:${TAG}"
 done
+
+if [ "$PUSH" -eq 1 ]; then
+  cat <<'NOTE'
+
+IF YOU REBUILT AN ALREADY-DEPLOYED TAG, THE CWL NEEDS THE DIGEST
+  cwltool runs `docker pull` only when `docker inspect <tag>` fails, so a DPS
+  worker that has already run this tag keeps its cached image and never sees
+  this build. Whether a job gets old or new code then depends on which worker
+  picks it up.
+
+    ./utils/generate_cwl.sh --pin-digest    # rewrites dockerPull to @sha256:...
+
+  Then redeploy. Confirm from the job log, which now prints:
+
+    MUR image build: <sha>-<timestamp> (module: l2p)
+NOTE
+fi

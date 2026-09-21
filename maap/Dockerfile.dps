@@ -38,6 +38,16 @@ FROM ${BASE_IMAGE}
 # Repeated after FROM: an ARG declared before it is out of scope afterwards.
 ARG MODULE
 
+# Identifies this exact build. A tag rebuilt in place is indistinguishable
+# from the old one on any host that already pulled it -- cwltool only runs
+# `docker pull` when `docker inspect` of the tag FAILS, so a DPS worker that
+# has run this tag before keeps using its cached copy forever. The entrypoint
+# echoes this, so a job log answers "which build actually ran" as a fact
+# instead of an assumption. build_dps_images.sh fills it from git.
+ARG BUILD_STAMP=unknown
+ENV MUR_IMAGE_BUILD=${BUILD_STAMP}
+LABEL org.opencontainers.image.revision="${BUILD_STAMP}"
+
 # Refresh the entrypoint and the localization helper from the working tree.
 # iquam neither installs awscli nor sources localize.sh, so its copy is inert
 # -- a few KB, and it keeps this one Dockerfile serving all four modules.

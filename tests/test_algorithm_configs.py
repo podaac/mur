@@ -248,3 +248,46 @@ def test_the_cwl_generator_knows_about_every_env_input():
         for name, env in mapping.items():
             assert name in script, f"generate_cwl.sh does not handle {name}"
             assert env in script, f"generate_cwl.sh does not set {env}"
+
+
+# --- knowing which image ran -----------------------------------------------
+#
+# cwltool only runs `docker pull` when `docker inspect <dockerPull>` fails, so
+# a worker that has already run a tag keeps its cached copy of that tag even
+# after the tag is rebuilt and repushed. Whether a job gets the new code then
+# depends on which worker picks it up, and the job output looks identical
+# either way. The build stamp is what makes the difference visible.
+
+@pytest.mark.parametrize("module", MODULES)
+def test_every_entrypoint_announces_its_build(module):
+    text = (REPO / module / "bin" / "entrypoint.sh").read_text()
+    assert "MUR_IMAGE_BUILD" in text, (
+        f"{module}: the entrypoint does not print its build stamp, so a job "
+        f"log cannot tell a rebuilt image from a cached one")
+    # Stdout is the module's own output; a banner belongs on stderr.
+    line = next(l for l in text.splitlines() if "MUR_IMAGE_BUILD" in l and l.startswith("echo"))
+    assert line.rstrip().endswith(">&2"), f"{module}: build banner is not on stderr"
+    # Unset must not read as a valid build.
+    assert ":-unknown}" in line, f"{module}: no fallback when the stamp is unset"
+
+
+def test_the_dps_image_bakes_the_stamp_in():
+    text = (REPO / "maap" / "Dockerfile.dps").read_text()
+    assert "ARG BUILD_STAMP" in text
+    assert "ENV MUR_IMAGE_BUILD=${BUILD_STAMP}" in text
+
+
+def test_the_build_script_supplies_and_verifies_the_stamp():
+    """An unset --build-arg leaves the default, and every log line would read
+    'unknown' -- true, but useless, and easy not to notice."""
+    text = (REPO / "utils" / "build_dps_images.sh").read_text()
+    assert "--build-arg \"BUILD_STAMP=${BUILD_STAMP}\"" in text
+    assert "MUR_IMAGE_BUILD=" in text, "the build script never checks the stamp landed"
+
+
+def test_generate_cwl_can_pin_a_digest():
+    """The only way to force a worker off a cached tag."""
+    text = (REPO / "utils" / "generate_cwl.sh").read_text()
+    assert "--pin-digest" in text
+    assert "imagetools inspect" in text, "no way to resolve a tag to a digest"
+    assert "sha256:" in text

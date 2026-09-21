@@ -29,6 +29,24 @@
 #   ./utils/generate_cwl.sh                  # generate + validate all four
 #   ./utils/generate_cwl.sh --modules mrva   # just one
 #   ./utils/generate_cwl.sh --validate-only  # re-validate what is committed
+#   ./utils/generate_cwl.sh --pin-digest     # dockerPull by @sha256, not by tag
+#
+# --pin-digest: WHEN A TAG IS REBUILT IN PLACE
+#   cwltool asks `docker inspect <dockerPull>` first and only runs
+#   `docker pull` if that FAILS (cwltool/docker.py: `if (force_pull or not
+#   found) and pull_image`). A DPS worker that has already run
+#   l2p-dps:2.0.0 therefore keeps using its cached copy of that tag for
+#   good, while a freshly scaled-up worker pulls the new one -- so the code a
+#   job runs depends on which worker takes it, and nothing in the output says
+#   which.
+#
+#   A digest cannot be reused: `docker inspect repo@sha256:new` fails on a
+#   host holding only the old bits, so the pull happens. Pinning here keeps
+#   the version number meaningful while still forcing the right image.
+#
+#   Requires the images to be pushed first -- the digest is assigned by the
+#   registry. Redeploy afterwards: a registration holds its own frozen copy of
+#   the CWL, so editing this file changes nothing already deployed.
 set -euo pipefail
 
 GENERATOR_REPO="${GENERATOR_REPO:-https://github.com/MAAP-Project/ogc-app-pack-generator}"
@@ -36,15 +54,36 @@ GENERATOR_DIR="${GENERATOR_DIR:-/tmp/ogc-app-pack-generator}"
 PYTHON="${PYTHON:-python3}"
 MODULES="landice iquam l2p mrva"
 VALIDATE_ONLY=0
+PIN_DIGEST=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --modules)       MODULES="$2"; shift 2 ;;
     --validate-only) VALIDATE_ONLY=1; shift ;;
-    -h|--help)       sed -n '2,30p' "$0"; exit 0 ;;
+    --pin-digest)    PIN_DIGEST=1; shift ;;
+    -h|--help)       sed -n '2,50p' "$0"; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+# Resolve a tag to the immutable digest the registry published it under.
+# buildx queries the registry rather than the local cache, which is the point:
+# the local copy may be the very stale image we are trying to get away from.
+resolve_digest() {
+  local image="$1" repo="${1%%:*}" digest=""
+  digest=$(docker buildx imagetools inspect "$image" \
+             --format '{{.Manifest.Digest}}' 2>/dev/null || true)
+  if [ -z "$digest" ]; then
+    # Older docker without buildx imagetools --format. A local RepoDigest is
+    # accurate immediately after a push of this same image.
+    digest=$(docker image inspect "$image" \
+               --format '{{index .RepoDigests 0}}' 2>/dev/null | cut -d@ -f2 || true)
+  fi
+  case "$digest" in
+    sha256:*) echo "${repo}@${digest}" ;;
+    *) return 1 ;;
+  esac
+}
 
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
@@ -85,6 +124,18 @@ if [ "$VALIDATE_ONLY" -eq 0 ]; then
     fi
     dest="$OUT_DIR/process_mur-${module}_${version}.cwl"
     cp "$src" "$dest"
+
+    if [ "$PIN_DIGEST" -eq 1 ]; then
+      echo "    resolving ${image} to its registry digest"
+      if ! pinned=$(resolve_digest "$image"); then
+        echo "ERROR: could not resolve a digest for ${image}." >&2
+        echo "       Push the image first -- the registry assigns the digest." >&2
+        echo "       (docker buildx imagetools inspect ${image})" >&2
+        exit 1
+      fi
+      echo "    ${image} -> ${pinned}"
+      image="$pinned"
+    fi
 
     # Standalone, the generator leaves `dockerPull: null` -- building and
     # tagging the image is the Action's job, so algorithm_container_url is
@@ -159,8 +210,20 @@ for module in sys.argv[2:]:
     # dockerPull must be the pre-built image, not a placeholder. The generator
     # README warns that running it outside the GitHub Action leaves the Docker
     # requirement pointing at something you have to fix by hand.
-    if expected_image not in text:
-        print(f"  {module}: dockerPull is not {expected_image} -- fix it by hand")
+    #
+    # A --pin-digest run writes <repo>@sha256:... instead of <repo>:<tag>, so
+    # match on the repository and accept either form. Anything else -- a
+    # different repo, a null, a placeholder -- is still caught.
+    repo = expected_image.split(":")[0]
+    pull = re.search(r"dockerPull:\s*(\S+)", text)
+    actual = pull.group(1) if pull else None
+    if actual == expected_image:
+        pass
+    elif actual and actual.startswith(f"{repo}@sha256:"):
+        print(f"  {module}: dockerPull is digest-pinned ({actual.split('@')[1][:19]}...)")
+    else:
+        print(f"  {module}: dockerPull is {actual!r}, expected {expected_image} "
+              f"or {repo}@sha256:... -- fix it by hand")
         problems += 1
 
     # landice and iquam fetch over HTTPS at runtime; l2p and mrva read S3.

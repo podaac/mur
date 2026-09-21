@@ -133,6 +133,33 @@ def test_resolves_the_numeric_process_id_for_the_right_version():
     assert c.resolve_algorithms(["mur-landice"]) == {"mur-landice": 65}
 
 
+def test_a_redeployment_resolves_to_the_newest_registration(caplog):
+    """Deploying the same name and version again ADDS a registration rather
+    than replacing it, and each one keeps its own frozen copy of the CWL. That
+    happens every time a CWL is fixed without bumping the version -- to change
+    a dockerPull digest, say. Resolving positionally would then submit against
+    the registration holding the OLD image, and the job would look entirely
+    normal while running last week's code."""
+    c, maap, _ = make_client()
+    maap.list_algorithms = lambda: Resp({"processes": [
+        {"id": "mur-landice", "version": "2.0.0", "processID": 65},
+        {"id": "mur-landice", "version": "2.0.0", "processID": 88},
+        {"id": "mur-landice", "version": "1.0.0", "processID": 12},
+    ]})
+    import logging
+    with caplog.at_level(logging.WARNING):
+        assert c.resolve_algorithms(["mur-landice"]) == {"mur-landice": 88}
+    assert "registered 2 times" in caplog.text
+
+
+def test_a_single_registration_warns_about_nothing(caplog):
+    c, _, _ = make_client()
+    import logging
+    with caplog.at_level(logging.WARNING):
+        c.resolve_algorithms(["mur-landice"])
+    assert "registered" not in caplog.text
+
+
 def test_a_missing_version_names_the_ones_registered():
     c, _, _ = make_client()
     c.version = "9.9.9"

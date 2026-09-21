@@ -12,6 +12,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../common/bin/localize.sh
 source "$SCRIPT_DIR/../../common/bin/localize.sh"
 
+# Say which image this is before doing anything else. Docker reuses a cached
+# image for a tag that was rebuilt in place, so "the tag is 2.0.0" is not
+# evidence that the bits are today's -- this line is. Set at build time by
+# maap/Dockerfile.dps; "unknown" means a base image built outside that path.
+echo "MUR image build: ${MUR_IMAGE_BUILD:-unknown} (module: landice)" >&2
+
 usage() {
     echo "Usage: docker run ... --year YEAR --doy DOY \\"
     echo "  --landmask-p01-file FILE --gridindex-north-p01-file FILE --gridindex-south-p01-file FILE \\"

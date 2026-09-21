@@ -127,6 +127,15 @@ class MaapPyClient(MAAPClient):
         Filters by version: several versions of one algorithm can be
         registered simultaneously and each has its own processID, so an
         unfiltered lookup could silently run last month's package.
+
+        The same name and version can ALSO be registered more than once --
+        deploying again after fixing a CWL does not replace the old
+        registration, it adds another, each with its own processID and its own
+        frozen copy of the CWL. Picking positionally out of the listing would
+        then run whichever MAAP happened to return first, which may be the
+        registration pointing at the old dockerPull. processIDs increment, so
+        the largest is the most recent deployment; say so when there is a
+        choice, because a stale duplicate is otherwise invisible.
         """
         for name in names:
             resp = self.maap.list_algorithms()
@@ -142,7 +151,15 @@ class MaapPyClient(MAAPClient):
                 raise LookupError(
                     f"{name} v{self.version} is not registered"
                     + (f"; registered versions: {versions}" if versions else ""))
-            self.algorithms[name] = match[0]["processID"]
+
+            ids = sorted(p["processID"] for p in match)
+            if len(ids) > 1:
+                logger.warning(
+                    "%s v%s is registered %d times (processIDs %s); using %s, "
+                    "the most recent. Older registrations keep their own copy "
+                    "of the CWL, so one of them may still point at a previous "
+                    "image.", name, self.version, len(ids), ids, ids[-1])
+            self.algorithms[name] = ids[-1]
         return self.algorithms
 
     def _process_id(self, name: str) -> int:
