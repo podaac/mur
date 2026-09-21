@@ -130,6 +130,8 @@ class FakeMAAPClient(MAAPClient):
         self.written_manifests = []
         self.copied = []
         self.tags = []
+        # Job ids the test wants to come back failed.
+        self.failing_jobs = set()
 
     def job_id_for(self, process_id, **match):
         """Job id of the single recorded submission for `process_id`,
@@ -176,8 +178,15 @@ class FakeMAAPClient(MAAPClient):
         self.existing_objects.add(dest_uri)
         return dest_uri
 
-    def wait_all(self, job_ids):
+    def wait_all(self, job_ids, *, raise_on_failure=True):
         self.waited.append(list(job_ids))
+        # Mirrors the real client: {job_id: status} for the failures, empty
+        # when everything succeeded. Returning None here let run_day pass its
+        # `job in failures` check against a non-container.
+        failures = {j: "failed" for j in job_ids if j in self.failing_jobs}
+        if failures and raise_on_failure:
+            raise RuntimeError(f"job(s) failed: {failures}")
+        return failures
 
     def get_job_output(self, job_id, output_name):
         return f"s3://podaac/output/{job_id}/{output_name}"
@@ -684,3 +693,79 @@ def test_a_partial_run_returns_a_day_result_without_an_l4():
     assert result.process_date == datetime.date(2026, 8, 6)
     assert result.mrva_job_id is None
     assert result.netcdf_href is None
+
+
+# --- a failed job must not discard the successful ones ---------------------
+#
+# wait_all raised the moment any job failed, which aborted run_day BEFORE the
+# promotion step. The BICs that had been produced stayed at unpredictable DPS
+# output paths, where _find_cached_bic cannot see them, so the next run
+# resubmitted every one of them. One bad granule cost twenty jobs twice.
+
+def _orch_with_failures(failing):
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    orch._failing = failing
+    real_submit = client.submit_job
+
+    def submit(process_id, args, *, tag=None):
+        jid = real_submit(process_id, args, tag=tag)
+        if process_id in failing and jid not in client.failing_jobs:
+            client.failing_jobs.add(jid)
+            failing.remove(process_id)          # only the first such job
+        return jid
+
+    client.submit_job = submit
+    return orch, client
+
+
+def test_one_failed_l2p_still_promotes_every_other_bic():
+    """The salvage: the nineteen that worked are promoted to canonical keys,
+    so a re-run finds them cached instead of resubmitting."""
+    orch, client = _orch_with_failures({"mur-l2p"})
+    with pytest.raises(RuntimeError, match="job.s. failed"):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert client.copied, "no BIC was promoted despite other jobs succeeding"
+
+
+def test_the_failure_says_what_was_salvaged():
+    """Otherwise the reader has no way to know a re-run is cheap."""
+    orch, client = _orch_with_failures({"mur-l2p"})
+    with pytest.raises(RuntimeError) as exc:
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    message = str(exc.value)
+    assert "job_logs.py" in message, "must say how to diagnose"
+    assert "promoted" in message, "must say what survived"
+
+
+def test_a_failed_jobs_bic_is_not_promoted_or_referenced():
+    """A failed job produced no BIC. Promoting it would create a manifest
+    entry pointing at an object that was never written, and MRVA would fail
+    on a missing input rather than on the real cause."""
+    orch, client = _orch_with_failures({"mur-l2p"})
+    with pytest.raises(RuntimeError):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    failed = client.failing_jobs
+    for src, _dest in client.copied:
+        for jid in failed:
+            assert jid not in src, f"promoted output of failed job {jid}"
+
+
+def test_mrva_is_not_submitted_when_a_bic_is_missing():
+    """Stopping is the right call: MRVA fans in the BICs, and producing an L4
+    from an incomplete set is a scientific decision, not error handling."""
+    orch, client = _orch_with_failures({"mur-l2p"})
+    with pytest.raises(RuntimeError):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert not any(pid == "mur-mrva" for pid, _ in client.submitted)
+
+
+def test_a_clean_day_still_promotes_and_reaches_mrva():
+    """The salvage path must not change the normal one."""
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert any(pid == "mur-mrva" for pid, _ in client.submitted)
+    assert client.copied

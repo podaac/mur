@@ -182,7 +182,8 @@ class MAAPClient:
         """
         raise NotImplementedError("MAAPClient.submit_job: wire up maap-py OGC execute")
 
-    def wait_all(self, job_ids: List[str]) -> None:
+    def wait_all(self, job_ids: List[str], *,
+                 raise_on_failure: bool = True) -> Dict[str, str]:
         """Block until every job in `job_ids` reaches a terminal state.
 
         TODO: maap-py job polling (plan section 9).
@@ -554,17 +555,46 @@ class MAAPOrchestrator:
                 l2p_jobs.append(job)
                 bic_results[(sensor, data_day)] = (None, job)
 
-        self.client.wait_all([j for j in (landice_job, iquam_job, *l2p_jobs)
-                              if j is not None])
+        # Do not raise yet. A failure here used to abort the day before the
+        # promotion below, which threw away the output of every job that DID
+        # succeed: their BICs stayed at unpredictable DPS paths, where
+        # _find_cached_bic cannot see them, so the next run resubmitted all of
+        # them. One bad granule cost twenty jobs twice over.
+        failures = self.client.wait_all(
+            [j for j in (landice_job, iquam_job, *l2p_jobs) if j is not None],
+            raise_on_failure=False)
 
         # Promote every BIC this run produced from its DPS path to the
         # canonical workspace key, so tomorrow's run can find it with a HEAD
-        # instead of resubmitting the job that made it.
+        # instead of resubmitting the job that made it. Failed jobs have no
+        # output to promote and are dropped, so the manifest below cannot
+        # reference a BIC that was never written.
+        promoted = 0
         for key, (cached_href, job) in list(bic_results.items()):
             if job is None:
                 continue                       # already canonical: it came from the cache
+            if job in failures:
+                del bic_results[key]
+                continue
             sensor, data_day = key
             bic_results[key] = (self._promote_bic(sensor, data_day, job), job)
+            promoted += 1
+
+        if failures:
+            if promoted:
+                logger.info(
+                    "  salvaged %d BIC(s) from this day's successful jobs; a "
+                    "re-run will reuse them rather than resubmit", promoted)
+            raise RuntimeError(
+                f"{len(failures)} job(s) failed:\n"
+                + "\n".join(f"  {jid}  [{status}]"
+                             for jid, status in failures.items())
+                + f"\n\nLogs:\n  python utils/job_logs.py "
+                + " ".join(list(failures)[:3])
+                + (" ..." if len(failures) > 3 else "")
+                + (f"\n\n{promoted} BIC(s) from this day were promoted and will "
+                   f"be reused;\nre-running submits only what is still missing."
+                   if promoted else ""))
 
         # Sensor-inputs manifest (BIC + IQUAM0 unified -- IQUAM0 has the
         # identical fan-in shape as the satellite sensors in

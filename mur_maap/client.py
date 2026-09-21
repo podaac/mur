@@ -261,8 +261,14 @@ class MaapPyClient(MAAPClient):
         body = resp.json() if resp.content else {}
         return normalize_status(body)
 
-    def wait_all(self, job_ids: List[str], *, timeout: Optional[float] = None) -> None:
-        """Block until every job is terminal; raise if any failed.
+    def wait_all(self, job_ids: List[str], *, timeout: Optional[float] = None,
+                 raise_on_failure: bool = True) -> Dict[str, str]:
+        """Block until every job is terminal. Returns {job_id: status} for the
+        ones that failed, and raises on any failure unless told not to.
+
+        raise_on_failure=False exists so a caller can salvage what succeeded
+        before deciding whether to go on. Raising immediately discarded the
+        outputs of every job that worked -- see run_day.
 
         Kept for the existing run_day() flow. It does not survive an
         interrupted process -- a resumable run needs the state machine, not
@@ -287,7 +293,7 @@ class MaapPyClient(MAAPClient):
                 raise TimeoutError(f"jobs still running after {timeout}s: {pending}")
             time.sleep(self.poll_interval)
 
-        if failures:
+        if failures and raise_on_failure:
             # The ids alone are not a diagnosis, and this is where a run ends,
             # so say how to get one rather than leaving the reader holding
             # twenty UUIDs.
@@ -298,6 +304,7 @@ class MaapPyClient(MAAPClient):
                 f"Logs:\n  python utils/job_logs.py "
                 f"{' '.join(list(failures)[:3])}"
                 + (" ..." if len(failures) > 3 else ""))
+        return failures
 
     # -- outputs ------------------------------------------------------------
 
