@@ -288,7 +288,16 @@ class MaapPyClient(MAAPClient):
             time.sleep(self.poll_interval)
 
         if failures:
-            raise RuntimeError(f"job(s) failed: {failures}")
+            # The ids alone are not a diagnosis, and this is where a run ends,
+            # so say how to get one rather than leaving the reader holding
+            # twenty UUIDs.
+            listed = "\n".join(f"  {jid}  [{status}]"
+                                for jid, status in failures.items())
+            raise RuntimeError(
+                f"{len(failures)} job(s) failed:\n{listed}\n\n"
+                f"Logs:\n  python utils/job_logs.py "
+                f"{' '.join(list(failures)[:3])}"
+                + (" ..." if len(failures) > 3 else ""))
 
     # -- outputs ------------------------------------------------------------
 
