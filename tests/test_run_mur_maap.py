@@ -129,6 +129,7 @@ class FakeMAAPClient(MAAPClient):
         self.published = []
         self.written_manifests = []
         self.copied = []
+        self.tags = []
 
     def job_id_for(self, process_id, **match):
         """Job id of the single recorded submission for `process_id`,
@@ -163,7 +164,8 @@ class FakeMAAPClient(MAAPClient):
         self.written_manifests.append((prefix, manifest))
         return f"s3://podaac/{prefix}"
 
-    def submit_job(self, process_id, args):
+    def submit_job(self, process_id, args, *, tag=None):
+        self.tags.append(tag)
         job_id = f"job-{len(self.submitted)}"
         self.submitted.append((process_id, args))
         self.job_ids.append(job_id)

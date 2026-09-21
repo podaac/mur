@@ -40,6 +40,7 @@ from iquam_date_flags import format_iquam_reference_date
 from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
 from mrva_static_files import MRVA_STATIC_RELATIVE_PATHS, seasonal_relative_path
 from mur_maap import paths
+from mur_maap import tags
 from mur_maap.version import ALGORITHM_VERSION
 
 logger = logging.getLogger(__name__)
@@ -165,13 +166,17 @@ class MAAPClient:
         """
         raise NotImplementedError("MAAPClient.copy_object: wire up boto3 copy_object")
 
-    def submit_job(self, process_id: str, args: Dict[str, Any]) -> str:
+    def submit_job(self, process_id: str, args: Dict[str, Any],
+                   *, tag: Optional[str] = None) -> str:
         """Submit an OGC API Processes execute request for `process_id`.
 
         `args` keys match the container entrypoints' named-arg flags
         (e.g. {"year": 2026, "doy": 200} -> --year 2026 --doy 200; see
         landice/iquam/l2p/mrva bin/entrypoint.sh) so the CWL wiring layer can
         map them 1:1 to inputBinding prefixes (plan section 8.2).
+
+        `tag` is the label MAAP shows beside the job and the key
+        list_jobs(tag=...) searches on -- see mur_maap/tags.py.
 
         TODO: maap-py OGC job submission (plan section 8, 9).
         """
@@ -444,7 +449,7 @@ class MAAPOrchestrator:
                 "landmask_p01_file": landice_hrefs["landmask_p01"],
                 "gridindex_north_p01_file": landice_hrefs["gridindex_north_p01"],
                 "gridindex_south_p01_file": landice_hrefs["gridindex_south_p01"],
-            })
+            }, tag=tags.job_tag("landice", process_date, mode))
 
         iquam_job = None
         if "iquam" in self.stages:
@@ -457,7 +462,7 @@ class MAAPOrchestrator:
                     self.get_reference_today()),
                 "buoy_day_range": iquam_config["buoy_dayrange"],
                 "stability_latency": iquam_config["stable_latency"],
-            })
+            }, tag=tags.job_tag("iquam", process_date, mode))
 
         l2p_jobs = []
         # Maps (sensor, data_day) -> (cached_href_or_None, job_or_None) for
@@ -539,7 +544,13 @@ class MAAPOrchestrator:
                         "credentials and its granule fetches will fail",
                         sensor, data_day)
 
-                job = self.client.submit_job("mur-l2p", l2p_args)
+                # sensor + data day: one analysis day submits a job per
+                # sensor per day in that sensor's window, and they are
+                # otherwise indistinguishable in MAAP's job table.
+                job = self.client.submit_job(
+                    "mur-l2p", l2p_args,
+                    tag=tags.job_tag("l2p", process_date, mode,
+                                     sensor=sensor, data_date=data_day))
                 l2p_jobs.append(job)
                 bic_results[(sensor, data_day)] = (None, job)
 
@@ -618,7 +629,9 @@ class MAAPOrchestrator:
         if prior_csp is not None:
             mrva_args["prior_csp_file"] = prior_csp
 
-        mrva_job = self.client.submit_job("mur-mrva", mrva_args)
+        mrva_job = self.client.submit_job(
+            "mur-mrva", mrva_args,
+            tag=tags.job_tag("mrva", process_date, mode))
         self.client.wait_all([mrva_job])
 
         # Promote this day's coefficient so tomorrow can chain from it.
