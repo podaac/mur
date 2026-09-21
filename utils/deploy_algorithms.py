@@ -65,6 +65,36 @@ def registrations(maap, name: str):
     )
 
 
+def report_registrations(maap, modules, version):
+    """Print every registration for each module. Returns those missing `version`.
+
+    Shared by --status and the post-deploy report, so the two cannot drift
+    into disagreeing about what "deployed" means.
+    """
+    print("\n==> Registrations visible to MAAP")
+    missing = []
+    for module in modules:
+        name = f"mur-{module}"
+        rows = registrations(maap, name)
+        at_version = [pid for v, pid in rows if v == version]
+        if not at_version:
+            missing.append(module)
+        # Highest processID wins: registrations accumulate, and
+        # run_mur_maap.py takes the most recent one at its version.
+        resolves = max(at_version) if at_version else None
+        if not rows:
+            print(f"  {name}: no registrations at all")
+            continue
+        for v, pid in rows:
+            mark = " <- resolves here" if pid == resolves else ""
+            print(f"  {name}  v{v}  processID {pid}{mark}")
+        if len(at_version) > 1:
+            print(f"      NOTE: {len(at_version)} registrations at v{version}. "
+                  f"Each holds its own copy of the CWL; run_mur_maap.py takes "
+                  f"the highest processID.")
+    return missing
+
+
 def wait_for_registration(maap, modules, version, *, timeout, poll_interval):
     """Block until every module is registered at `version`, or time runs out.
 
@@ -109,7 +139,12 @@ def main(argv=None) -> int:
                         choices=list(MODULES))
     parser.add_argument("--version", default=ALGORITHM_VERSION,
                         help=f"default: {ALGORITHM_VERSION}, from mur_maap/version.py")
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="show what would be deployed and exit. Offline: "
+                             "checks the files, contacts MAAP for nothing.")
+    parser.add_argument("--status", action="store_true",
+                        help="ask MAAP what is registered and exit, deploying "
+                             "nothing. Exits non-zero if --version is absent.")
     parser.add_argument("--skip-check", action="store_true",
                         help="skip the CWL/config cross-check (not advised)")
     parser.add_argument("--no-wait", action="store_true",
@@ -122,6 +157,25 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     version = args.version
+
+    if args.status:
+        try:
+            from maap.maap import MAAP
+        except ImportError:
+            print("ERROR: maap-py is not installed. Run this in a MAAP "
+                  "workspace.\n       (--dry-run works offline; --status has "
+                  "to ask MAAP.)")
+            return 1
+        missing = report_registrations(MAAP(), args.modules, version)
+        if missing:
+            print(f"\nNOT registered at {version}: {', '.join(sorted(missing))}")
+            print("Deployment is asynchronous -- a pipeline may still be "
+                  "running. Check again\nbefore redeploying, or you will add a "
+                  "second registration rather than\nreplacing the first.")
+            return 1
+        print(f"\nAll {len(args.modules)} registered at {version}.")
+        return 0
+
     if version != ALGORITHM_VERSION:
         print(f"NOTE: deploying {version}, but this checkout builds "
               f"{ALGORITHM_VERSION}. Jobs run whatever run_mur_maap.py "
@@ -213,25 +267,7 @@ def main(argv=None) -> int:
         maap, submitted, version,
         timeout=args.timeout, poll_interval=args.poll_interval)
 
-    print("\n==> Registrations now visible to MAAP")
-    still_missing = []
-    for module in args.modules:
-        name = f"mur-{module}"
-        rows = registrations(maap, name)
-        at_version = [pid for v, pid in rows if v == version]
-        if not at_version:
-            still_missing.append(module)
-        resolves = max(at_version) if at_version else None
-        if not rows:
-            print(f"  {name}: no registrations at all")
-            continue
-        for v, pid in rows:
-            mark = " <- resolves here" if pid == resolves else ""
-            print(f"  {name}  v{v}  processID {pid}{mark}")
-        if len(at_version) > 1:
-            print(f"      NOTE: {len(at_version)} registrations at v{version}. "
-                  f"Each holds its own copy of the CWL; run_mur_maap.py takes "
-                  f"the highest processID.")
+    still_missing = report_registrations(maap, args.modules, version)
 
     if still_missing or rejected:
         print(f"\nNOT registered at {version}: "

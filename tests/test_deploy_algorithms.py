@@ -222,3 +222,83 @@ def test_a_timed_out_deploy_exits_nonzero_and_warns_about_the_old_version(
     assert f"NOT registered at {version}" in out
     assert "PREVIOUS version" in out
     assert "https://pipeline/l2p" in out
+
+
+# --- asking without deploying ----------------------------------------------
+
+def _fake_maap_module(monkeypatch, fake):
+    monkeypatch.setitem(sys.modules, "maap", type(sys)("maap"))
+    monkeypatch.setitem(sys.modules, "maap.maap", type(sys)("maap.maap"))
+    sys.modules["maap.maap"].MAAP = lambda: fake
+
+
+def test_status_deploys_nothing(monkeypatch, capsys):
+    """The whole point: check whether an async deployment landed without
+    adding a second registration by asking again with a deploy."""
+    fake = FakeMaap([
+        {"id": "mur-l2p", "version": "2.0.1", "processID": 88},
+    ])
+    _fake_maap_module(monkeypatch, fake)
+
+    rc = deploy.main(["--status", "--modules", "l2p", "--version", "2.0.1"])
+    assert rc == 0
+    assert fake.deployed == [], "--status must not register anything"
+    assert "registered at 2.0.1" in capsys.readouterr().out
+
+
+def test_status_exits_nonzero_when_the_version_is_absent(monkeypatch, capsys):
+    fake = FakeMaap([
+        {"id": "mur-l2p", "version": "2.0.0", "processID": 65},
+    ])
+    _fake_maap_module(monkeypatch, fake)
+
+    rc = deploy.main(["--status", "--modules", "l2p", "--version", "2.0.1"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "NOT registered at 2.0.1" in out
+    assert "v2.0.0  processID 65" in out, "show what IS there, not just what isn't"
+    assert "second registration" in out, "warn before they redeploy blindly"
+    assert fake.deployed == []
+
+
+def test_status_needs_no_cwl_files(monkeypatch, capsys):
+    """It asks MAAP what is registered; the local files are irrelevant, so a
+    version with no committed CWL must still be answerable."""
+    fake = FakeMaap([{"id": "mur-l2p", "version": "9.9.9", "processID": 1}])
+    _fake_maap_module(monkeypatch, fake)
+    assert deploy.main(["--status", "--modules", "l2p", "--version", "9.9.9"]) == 0
+
+
+def test_the_resolved_registration_is_the_highest_process_id(capsys):
+    """Matches resolve_algorithms. If these disagreed, the script would name
+    one registration and the orchestrator would run another."""
+    maap = FakeMaap([
+        {"id": "mur-l2p", "version": "2.0.1", "processID": 88},
+        {"id": "mur-l2p", "version": "2.0.1", "processID": 91},
+        {"id": "mur-l2p", "version": "2.0.0", "processID": 65},
+    ])
+    missing = deploy.report_registrations(maap, ["l2p"], "2.0.1")
+    out = capsys.readouterr().out
+    assert missing == []
+    assert "processID 91 <- resolves here" in out
+    assert "2 registrations at v2.0.1" in out
+
+
+def test_report_and_resolve_agree_on_which_registration_wins():
+    """The script's report and mur_maap.client must pick the same one."""
+    from mur_maap.client import MaapPyClient
+    from tests.test_maap_client import make_client, Resp as ClientResp
+
+    rows = [
+        {"id": "mur-landice", "version": "2.0.1", "processID": 88},
+        {"id": "mur-landice", "version": "2.0.1", "processID": 91},
+    ]
+    client, maap, _ = make_client()
+    client.version = "2.0.1"
+    maap.list_algorithms = lambda: ClientResp({"processes": rows})
+    resolved = client.resolve_algorithms(["mur-landice"])["mur-landice"]
+
+    reported = max(pid for v, pid in
+                   deploy.registrations(FakeMaap(rows), "mur-landice")
+                   if v == "2.0.1")
+    assert resolved == reported == 91
