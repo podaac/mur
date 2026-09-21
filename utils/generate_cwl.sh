@@ -186,78 +186,47 @@ fi
 
 echo
 echo "==> Checking each workflow against its config"
-python3 - "$REPO_ROOT" $MODULES <<'PY'
-import pathlib, re, sys
-try:
-    import yaml
-except ImportError:
-    print("  (pyyaml not installed; skipping the config cross-check)")
-    sys.exit(0)
-
-repo = pathlib.Path(sys.argv[1])
-problems = 0
-for module in sys.argv[2:]:
-    cfg = yaml.safe_load((repo / "maap" / module / "algorithm_config.yml").read_text())
-    version = cfg["algorithm_version"]
-    cwl_path = repo / "maap/cwl_workflows" / f"process_mur-{module}_{version}.cwl"
-    if not cwl_path.exists():
-        print(f"  MISSING  {cwl_path.name}")
-        problems += 1
-        continue
-
-    text = cwl_path.read_text()
-    expected_image = cfg["algorithm_container_url"]
-
-    # dockerPull must be the pre-built image, not a placeholder. The generator
-    # README warns that running it outside the GitHub Action leaves the Docker
-    # requirement pointing at something you have to fix by hand.
-    #
-    # A --pin-digest run writes <repo>@sha256:... instead of <repo>:<tag>, so
-    # match on the repository and accept either form. Anything else -- a
-    # different repo, a null, a placeholder -- is still caught.
-    repo = expected_image.split(":")[0]
-    pull = re.search(r"dockerPull:\s*(\S+)", text)
-    actual = pull.group(1) if pull else None
-    if actual == expected_image:
-        pass
-    elif actual and actual.startswith(f"{repo}@sha256:"):
-        print(f"  {module}: dockerPull is digest-pinned ({actual.split('@')[1][:19]}...)")
-    else:
-        print(f"  {module}: dockerPull is {actual!r}, expected {expected_image} "
-              f"or {repo}@sha256:... -- fix it by hand")
-        problems += 1
-
-    # landice and iquam fetch over HTTPS at runtime; l2p and mrva read S3.
-    if "networkAccess" not in text:
-        print(f"  {module}: no NetworkAccess requirement; runtime downloads will fail")
-        problems += 1
-
-    for item in cfg["inputs"]:
-        if f"--{item['name']}" not in text and item["name"] not in text:
-            print(f"  {module}: input {item['name']} missing from the CWL")
-            problems += 1
-
-    print(f"  ok  {cwl_path.name}")
-
-sys.exit(1 if problems else 0)
-PY
+# Extracted to a file so it can be tested -- see the module docstring for the
+# shadowed variable that made the heredoc version fail on its second module.
+"$PYTHON" "$REPO_ROOT/utils/check_cwl_against_config.py" "$REPO_ROOT" $MODULES
 
 echo
+# A missing validator is not a failed validation. Exiting 1 because cwltool
+# is not installed would block a perfectly good generation -- and the MAAP
+# workspace, where this runs, does not ship either tool.
 echo "==> cwltool validation"
-for f in "$OUT_DIR"/*.cwl; do
-  printf '  %s ... ' "$(basename "$f")"
-  cwltool --validate --strict "$f" >/dev/null 2>&1 && echo "ok" || { echo "FAILED"; cwltool --validate --strict "$f"; exit 1; }
-done
+VALIDATED=1
+if ! command -v cwltool >/dev/null 2>&1; then
+  VALIDATED=0
+  echo "  SKIPPED: cwltool is not installed (pip install cwltool)"
+  echo "           The CWLs were generated; they are just unvalidated."
+else
+  for f in "$OUT_DIR"/*.cwl; do
+    printf '  %s ... ' "$(basename "$f")"
+    cwltool --validate --strict "$f" >/dev/null 2>&1 && echo "ok" || { echo "FAILED"; cwltool --validate --strict "$f"; exit 1; }
+  done
+fi
 
 echo
 echo "==> OGC best-practices validation"
-for f in "$OUT_DIR"/*.cwl; do
-  printf '  %s ... ' "$(basename "$f")"
-  ap-validator --detail all "$f" >/dev/null 2>&1 && echo "ok" || { echo "FAILED"; ap-validator --detail all "$f"; exit 1; }
-done
+if ! command -v ap-validator >/dev/null 2>&1; then
+  VALIDATED=0
+  echo "  SKIPPED: ap-validator is not installed (pip install ogc_ap_validator)"
+else
+  for f in "$OUT_DIR"/*.cwl; do
+    printf '  %s ... ' "$(basename "$f")"
+    ap-validator --detail all "$f" >/dev/null 2>&1 && echo "ok" || { echo "FAILED"; ap-validator --detail all "$f"; exit 1; }
+  done
+fi
 
 echo
-echo "All workflows generated and validated. Deploy from a MAAP workspace with:"
+if [ "$VALIDATED" -eq 1 ]; then
+  echo "All workflows generated and validated. Deploy from a MAAP workspace with:"
+else
+  echo "All workflows generated. NOT fully validated -- see the SKIPPED lines"
+  echo "above; they checked out against their configs, but no CWL validator ran."
+  echo "Deploy from a MAAP workspace with:"
+fi
 echo
 echo "  from maap.maap import MAAP"
 echo "  maap = MAAP()"
