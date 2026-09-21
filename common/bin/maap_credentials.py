@@ -29,6 +29,7 @@ import json
 import os
 import pathlib
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -60,6 +61,40 @@ def _service_token(host: str) -> str:
     return (config.get("service") or {}).get("maap_token", "")
 
 
+def endpoint_candidates(endpoint: str):
+    """The forms of `{endpoint_uri}` that MAAP's router actually accepts.
+
+    /api/environment/config gives the route as
+
+        members/self/awsAccess/edcCredentials/{endpoint_uri}
+
+    but something in front of the handler decodes the path once before
+    routing, so a single percent-encoded URI turns back into slashes and
+    splits the path. Probed against the live API with no token, where 404
+    means "no such route" and 401 means "route found, authenticate":
+
+        https%3A%2F%2Farchive...%2Fs3credentials    404   <- what this sent
+        https://archive.../s3credentials            404
+        https%253A%252F%252Farchive...              401
+        archive.podaac.earthdata.nasa.gov           401
+        podaac                                      401
+
+    Three forms route and the probe cannot tell which one the handler wants,
+    because distinguishing them needs a valid ticket. Rather than guess and
+    spend another twenty-job run finding out, try them in order and use the
+    first that answers. The one that works is logged, so it can be pinned.
+    """
+    quoted = urllib.parse.quote(endpoint, safe="")
+    host = urllib.parse.urlsplit(endpoint).netloc or endpoint
+    # Double-encoded first: it carries the whole URI, which is what
+    # "{endpoint_uri}" asks for, and survives the router's single decode.
+    return [
+        urllib.parse.quote(quoted, safe=""),
+        host,
+        quoted,
+    ]
+
+
 def fetch(endpoint: str, host: str, token: str) -> dict:
     """Temporary AWS credentials for `endpoint`, via MAAP's EDC proxy."""
     headers = {
@@ -67,9 +102,37 @@ def fetch(endpoint: str, host: str, token: str) -> dict:
         "token": _service_token(host),
         "proxy-ticket": token,
     }
-    url = (f"{_api_root(host)}/members/self/awsAccess/edcCredentials/"
-           f"{urllib.parse.quote(endpoint, safe='')}")
-    body = _get(url, headers)
+
+    base = f"{_api_root(host)}/members/self/awsAccess/edcCredentials"
+    body = None
+    tried = []
+    for candidate in endpoint_candidates(endpoint):
+        url = f"{base}/{candidate}"
+        try:
+            body = _get(url, headers)
+            print(f"maap_credentials: endpoint_uri form {candidate!r} worked",
+                  file=sys.stderr)
+            break
+        except urllib.error.HTTPError as exc:
+            tried.append((candidate, exc.code))
+            if exc.code == 404:
+                continue          # wrong shape for this deployment's router
+            raise SystemExit(
+                f"MAAP refused the credential request for {endpoint}: "
+                f"HTTP {exc.code} {exc.reason}.\n"
+                f"  url: {url}\n"
+                f"  A 401 here means the proxy-ticket was rejected -- check "
+                f"MAAP_PGT is the whole token,\n"
+                f"  starting 'jwt:' (a clipped prefix is the usual cause).")
+
+    if body is None:
+        raise SystemExit(
+            f"No edcCredentials route matched for {endpoint}. Tried:\n"
+            + "\n".join(f"  HTTP {code}  {base}/{c}" for c, code in tried)
+            + "\n  All 404, so MAAP's route shape has changed. The current "
+              "one is published at\n  "
+            + f"{_api_root(host)}/environment/config  as maap_endpoint."
+              "edc_credentials.")
 
     creds = body.get("credentials", body)
     out = {

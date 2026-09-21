@@ -248,6 +248,16 @@ finish_output_redirect() {
 main() {
     set -e
     parse_args "$@" || exit 1
+    # Create the stage-out directory BEFORE anything that can fail. CWL
+    # collects ./output* when the job ends, successfully or not; with no such
+    # directory it reports
+    #
+    #   Did not find output file with glob pattern: ['./output*']
+    #
+    # as the job's error, which buries the real one. An empty directory makes
+    # the actual failure the only failure in the log.
+    mkdir -p "$(output_root)"
+
     localize_all_inputs || exit 1
     verify_inputs_exist || exit 1
 

@@ -142,6 +142,17 @@ build_command() {
 main() {
     set -e
     parse_args "$@" || exit 1
+    # Create the stage-out directory BEFORE anything that can fail. CWL
+    # collects ./output* when the job ends, successfully or not; with no such
+    # directory it reports
+    #
+    #   Did not find output file with glob pattern: ['./output*']
+    #
+    # as the job's error, which buries the real one. An empty directory makes
+    # the actual failure the only failure in the log.
+    root="$(output_root)"
+    mkdir -p "$root/p011" "$root/p01"
+
     localize_all_inputs || exit 1
     verify_inputs_exist || exit 1
 
@@ -150,8 +161,6 @@ main() {
 
     # MATLAB is not guaranteed to create these, and on DPS nothing else will.
     local root
-    root="$(output_root)"
-    mkdir -p "$root/p011" "$root/p01"
 
     build_command
     exec "${CMD[@]}"
