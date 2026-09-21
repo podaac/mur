@@ -210,10 +210,15 @@ def test_dry_run_reports_the_job_count(capsys):
     assert "mur-mrva" in out
 
 
-def test_dry_run_warns_about_staging_volume_only_in_workspace_mode(capsys):
+def test_dry_run_reports_the_granule_volume(capsys):
+    """Not a staging cost any more -- nothing passes through this process --
+    but the containers still fetch it, and it explains a long L2P job."""
     cli.main(["--config", "config.maap.example.json", "--date", "2026-09-18",
               "-p", "-1", "--dry-run"])
-    assert "downloaded and re-uploaded" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "granule volume" in out
+    assert "GB fetched by the containers" in out
+    assert "re-uploaded" not in out, "nothing is re-uploaded any more"
 
     cli.main(["--config", "config.maap.example.json", "--date", "2026-09-18",
               "-p", "-1", "--dry-run", "--granule-staging", "direct"])

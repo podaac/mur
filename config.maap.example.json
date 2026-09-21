@@ -9,12 +9,14 @@
   "maap": {
     "workspace_root": "s3://maap-ops-workspace/<username>",
     "queue": "<queue name from MAAP ops>",
-    "granule_staging": "workspace",
-    "_granule_staging_note": "workspace = copy PO.DAAC granules into the workspace bucket first, because localize.sh's plain `aws s3 cp` cannot authenticate to a DAAC. direct = pass PO.DAAC hrefs straight through; only once DAAC creds are solved inside the container.",
+    "granule_staging": "direct",
+    "_granule_staging_note": "direct = pass PO.DAAC's own s3:// hrefs to the job; the container fetches them itself, minting DAAC credentials from MAAP_PGT via common/bin/maap_credentials.py. This is the only behaviour now. 'workspace' is still accepted, for configs written when granules were copied into the workspace bucket first, and does the same thing.",
     "queues": {
       "mur-mrva": "<a 64 GiB / 16 core queue, if different>"
     },
-    "_queues_note": "maap.queue is the default for every module. maap.queues overrides it per process. Only MRVA needs a large worker (64 GiB / 16 cores); landice, iquam and l2p fit on 4-8 GiB. Run --list-queues to see what is available."
+    "_queues_note": "maap.queue is the default for every module. maap.queues overrides it per process. Only MRVA needs a large worker (64 GiB / 16 cores); landice, iquam and l2p fit on 4-8 GiB. Run --list-queues to see what is available.",
+    "algorithm_version": null,
+    "_algorithm_version_note": "null = use the version this checkout builds (mur_maap/version.py), which is almost always what you want. Set it only to run packages deployed from a different revision -- a rollback, say. MAAP keeps every version ever registered, so naming an old one here succeeds silently and runs old code."
   },
   "landice": {
     "static_resources_dir": "s3://maap-ops-workspace/<username>/mur/static-resources"

@@ -24,6 +24,8 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
+_warned_obsolete_mode = False
+
 
 class GranuleDiscoveryError(RuntimeError):
     pass
@@ -102,9 +104,14 @@ def granules_for_day(
     `mode` and `workdir` are accepted so existing configs and call sites keep
     working, and otherwise ignored: there is one path now.
     """
-    if mode == "workspace":
+    # Once per process, not once per sensor-day: a run is 5 sensors x 5 days,
+    # and 25 copies of the same notice buries the log lines that matter.
+    global _warned_obsolete_mode
+    if mode == "workspace" and not _warned_obsolete_mode:
+        _warned_obsolete_mode = True
         logger.info(
             "    granule_staging=workspace is obsolete -- the container reads "
-            "PO.DAAC directly. Discovering only.")
+            "PO.DAAC directly. Discovering only. (Set maap.granule_staging to "
+            "\"direct\" to silence this.)")
     return discover_day(collections, data_day,
                         collection_filter=collection_filter)

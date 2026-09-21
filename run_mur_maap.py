@@ -655,14 +655,18 @@ def _print_job_plan(config: Dict, days, reference_today, args) -> None:
     print(f"  mur-mrva   {'':<9}{per_day:>3}")
     print(f"  {'total':<20}{total_units + 3 * per_day:>3} job(s)")
 
-    if staging == "workspace" and total_units:
-        # A MODIS day was ~350 granules at ~20 MB. Other sensors are smaller,
-        # so this is an upper bound rather than a forecast.
+    if total_units:
+        # Nothing is copied through this process any more -- the container
+        # fetches each granule from PO.DAAC itself -- but the bytes still move,
+        # and knowing roughly how many explains a long-running L2P job. A MODIS
+        # day was ~350 granules at ~20 MB; other sensors are smaller, so this
+        # is an upper bound rather than a forecast.
         gb = total_units * 350 * 20 / 1024
         print()
-        print(f"  granule staging: up to ~{gb:,.0f} GB downloaded and re-uploaded")
+        print(f"  granule volume: up to ~{gb:,.0f} GB fetched by the containers")
         print(f"  (a MODIS day is ~350 granules at ~20 MB; other sensors are")
-        print(f"   smaller. Already-staged days are skipped, so re-runs are cheap.)")
+        print(f"   smaller. Nothing passes through this process or the")
+        print(f"   workspace bucket.)")
 
 
 def build_client(config: Dict, args):
@@ -1002,14 +1006,13 @@ def parse_args(argv=None):
     parser.add_argument("--collection", help="Only this PO.DAAC collection.")
     parser.add_argument("--queue", help="DPS queue (overrides maap.queue).")
     parser.add_argument("--granule-staging", choices=("workspace", "direct"),
-                        help="direct: hand L2P PO.DAAC's own s3:// hrefs (no copy, "
-                             "but only works if the DPS worker's role can read "
-                             "PO.DAAC). workspace: copy granules into the workspace "
-                             "bucket first, which always works. "
-                             "Default: maap.granule_staging, else workspace.")
+                        help="Obsolete; both values do the same thing. The "
+                             "container fetches PO.DAAC granules itself, minting "
+                             "DAAC credentials from MAAP_PGT, so nothing is "
+                             "copied into the workspace bucket. Kept so existing "
+                             "configs and scripts keep working.")
     parser.add_argument("--granule-workdir",
-                        help="Where granules are downloaded before staging. "
-                             "Default: a temp dir, removed afterwards.")
+                        help="Obsolete; nothing is downloaded here any more.")
     parser.add_argument("--poll-interval", type=float, default=30.0,
                         help="Seconds between job status checks (default: %(default)s).")
     parser.add_argument("--no-dedup", action="store_true",
