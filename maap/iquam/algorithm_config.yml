@@ -6,8 +6,8 @@ algorithm_description: >
   Global_IQUAM0_YYYY_DDD.bii per day across +/- buoy-day-range around the
   target day, for MRVA's in-situ fan-in.
 algorithm_name: mur-iquam
-algorithm_version: "2.0.0"
-algorithm_container_url: ghcr.io/podaac/mur/iquam-dps:2.0.0
+algorithm_version: "2.0.1"
+algorithm_container_url: ghcr.io/podaac/mur/iquam-dps:2.0.1
 
 keywords: MUR, SST, in-situ, iQuam, buoy, GHRSST
 code_repository: https://github.com/podaac/mur
