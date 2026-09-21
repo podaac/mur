@@ -56,10 +56,18 @@ COPY common/bin/localize.sh /opt/common/bin/localize.sh
 COPY ${MODULE}/bin/entrypoint.sh /opt/${MODULE}/bin/entrypoint.sh
 RUN chmod 0755 /opt/common/bin/localize.sh /opt/${MODULE}/bin/entrypoint.sh
 
-# Restore the unprivileged user the base image runs as. DPS may override the
-# UID anyway, which is why the entrypoints create their own directories and
-# mrva's stage-out has a copy fallback.
-USER matlab
+# NO `USER matlab` HERE, though an earlier version of this file had one.
+# `USER matlab` appears in every module Dockerfile, but in the BUILDER stage
+# -- the runtime stage is `FROM debian:bookworm-slim` and creates no users at
+# all, so the module images run as root and have no matlab account. Declaring
+# it here produced an image that could not start:
+#
+#     unable to find user matlab: no matching entries in passwd file
+#
+# Docker validates USER at run time, not build time, so the build succeeded
+# and every container made from it failed. Leave the base image's user alone.
+# DPS may override the UID anyway, which is why the entrypoints create their
+# own directories and mrva's stage-out has a copy fallback.
 
 # CWL supplies the command via baseCommand; an ENTRYPOINT would prefix it.
 ENTRYPOINT []

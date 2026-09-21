@@ -113,20 +113,40 @@ for module in $MODULES; do
   fi
   echo "    ok: ENTRYPOINT cleared"
 
+  # Can a container be made from this image at all? A bad USER is only
+  # detected at run time, so the build succeeds and every job dies on
+  # "unable to find user X: no matching entries in passwd file". Checking
+  # this first keeps that from being reported as a stale entrypoint.
+  if ! start_err=$(docker run --rm --entrypoint sh "$dps" -c 'exit 0' 2>&1); then
+    echo "    ERROR: this image cannot start a container:" >&2
+    echo "           ${start_err}" >&2
+    exit 1
+  fi
+  echo "    ok: starts, as $(docker run --rm --entrypoint sh "$dps" -c 'id -un 2>/dev/null || id -u')"
+
   # The point of refreshing the entrypoint is the stage-out fix; confirm it is
-  # really in the image rather than trusting the layer ordering.
-  if docker run --rm --entrypoint sh "$dps" -c \
-       'grep -q MUR_OUTPUT_ROOT /opt/'"$module"'/bin/entrypoint.sh' 2>/dev/null; then
+  # really in the image rather than trusting the layer ordering. Errors are
+  # NOT discarded -- a swallowed one here reads as "the entrypoint is stale",
+  # which sends you looking at the wrong thing entirely.
+  if grep_err=$(docker run --rm --entrypoint sh "$dps" -c \
+       'grep -q MUR_OUTPUT_ROOT /opt/'"$module"'/bin/entrypoint.sh' 2>&1); then
     echo "    ok: entrypoint carries the MUR_OUTPUT_ROOT stage-out fix"
   else
-    echo "    WARNING: entrypoint has no MUR_OUTPUT_ROOT -- CWL will collect nothing" >&2
-    echo "             (is the working tree on a commit that includes it?)" >&2
+    echo "    ERROR: /opt/${module}/bin/entrypoint.sh has no MUR_OUTPUT_ROOT," >&2
+    echo "           so CWL would collect an empty output directory." >&2
+    [ -n "$grep_err" ] && echo "           docker said: ${grep_err}" >&2
+    echo "           (is the working tree on a commit that includes it?)" >&2
+    exit 1
   fi
 
   # The stamp is what makes a rebuilt tag identifiable; if it did not land,
   # the job log will say "unknown" and prove nothing.
-  stamped=$(docker image inspect "$dps" --format '{{index .Config.Env}}' \
-            | tr ' ' '\n' | grep '^MUR_IMAGE_BUILD=' | cut -d= -f2- || true)
+  # `{{index .Config.Env}}` with no index prints the whole Go slice, brackets
+  # included -- so the LAST variable comes back with a trailing "]" and the
+  # comparison below fails on an image that is perfectly fine. Range over it.
+  stamped=$(docker image inspect "$dps" \
+              --format '{{range .Config.Env}}{{println .}}{{end}}' \
+            | grep '^MUR_IMAGE_BUILD=' | cut -d= -f2- || true)
   if [ "$stamped" = "$BUILD_STAMP" ]; then
     echo "    ok: build stamp ${stamped}"
   else

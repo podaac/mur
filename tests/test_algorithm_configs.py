@@ -357,3 +357,47 @@ def test_no_python_source_hardcodes_the_version():
                 offenders.append(f"{path.relative_to(REPO)}:{n}")
     assert not offenders, (
         f"the version is hardcoded at {offenders}; import ALGORITHM_VERSION")
+
+
+# --- the DPS layer must not change who the image runs as -------------------
+
+def _runtime_stage(module):
+    """The final stage of a module Dockerfile -- what actually ships."""
+    text = (REPO / module / "Dockerfile").read_text()
+    stages = text.split("\nFROM ")
+    return stages[-1]
+
+
+def test_no_module_image_creates_a_user_in_its_runtime_stage():
+    """The premise behind the next test. Every module builds MATLAB code in a
+    builder stage (which does have a matlab user) and copies the artifacts
+    into a plain debian:bookworm-slim runtime stage that creates none."""
+    for module in MODULES:
+        stage = _runtime_stage(module)
+        assert "useradd" not in stage and "adduser" not in stage, (
+            f"{module}: the runtime stage now creates a user -- "
+            f"test_the_dps_layer_does_not_switch_to_a_nonexistent_user "
+            f"may need updating")
+
+
+def test_the_dps_layer_does_not_switch_to_a_nonexistent_user():
+    """Dockerfile.dps once ended with `USER matlab`, copied from the module
+    Dockerfiles -- where it appears in the BUILDER stage. The runtime stage
+    has no such account, so the image could not start:
+
+        unable to find user matlab: no matching entries in passwd file
+
+    Docker validates USER at run time, not build time, so this built cleanly
+    and broke every `docker run`. DPS itself was unaffected, because cwltool
+    passes a numeric --user that needs no passwd entry (cwltool/docker.py:
+    `runtime.append("--user=%d:%d" % (euid, egid))`) -- which is precisely
+    what made it hard to spot: jobs worked, local runs did not."""
+    text = (REPO / "maap" / "Dockerfile.dps").read_text()
+    users = [line.split(maxsplit=1)[1].strip()
+             for line in text.splitlines()
+             if line.startswith("USER ")]
+    for user in users:
+        assert user in ("root", "0"), (
+            f"Dockerfile.dps switches to {user!r}, which the module runtime "
+            f"stages do not create. The image would build and then fail to "
+            f"start.")
