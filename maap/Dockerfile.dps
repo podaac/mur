@@ -13,13 +13,17 @@
 #      "ERROR: Unknown argument", exiting 1. (MAAP's own stac_clip reference
 #      Containerfile declares no ENTRYPOINT for exactly this reason.)
 #
-#   2. It refreshes the shell scripts. entrypoint.sh and localize.sh are
-#      COPY'd in the FINAL layer of every module image, after the MATLAB
-#      Runtime install -- so overwriting them here picks up changes without
-#      recompiling anything. That matters because an image built before the
-#      MUR_OUTPUT_ROOT stage-out fix writes to absolute paths CWL cannot
-#      collect, and would otherwise need a full MATLAB rebuild (licence
-#      server, ~30 minutes) just to change a bash script.
+#   2. It refreshes the text files. entrypoint.sh, localize.sh and
+#      maap_credentials.py are COPY'd in the FINAL layer of every module
+#      image, after the MATLAB Runtime install -- so overwriting them here
+#      picks up changes without recompiling anything. That matters because an
+#      image built before the MUR_OUTPUT_ROOT stage-out fix writes to absolute
+#      paths CWL cannot collect, and would otherwise need a full MATLAB
+#      rebuild (licence server, ~30 minutes) just to change a bash script.
+#
+#      A consequence worth knowing: when a release changes only these files,
+#      the base image does not need rebuilding at all. Retag it and rebuild
+#      this layer -- see utils/build_dps_images.sh --retag-base.
 #
 #   Both are metadata and text: the MATLAB Runtime, the compiled binaries and
 #   the Fortran executables are all inherited unchanged from the base image.
@@ -48,13 +52,27 @@ ARG BUILD_STAMP=unknown
 ENV MUR_IMAGE_BUILD=${BUILD_STAMP}
 LABEL org.opencontainers.image.revision="${BUILD_STAMP}"
 
-# Refresh the entrypoint and the localization helper from the working tree.
-# iquam neither installs awscli nor sources localize.sh, so its copy is inert
-# -- a few KB, and it keeps this one Dockerfile serving all four modules.
+# Refresh every file the module images take from the working tree: the
+# entrypoint, the localization helper, and the credential helper. All three
+# are COPY'd in the FINAL layer of each module image, so replacing them here
+# costs nothing and needs no MATLAB.
+#
+# All three, not some of them. maap_credentials.py was missing from this list,
+# which meant a change to it could only reach an image through a full base
+# rebuild -- a licence server and half an hour -- to update one Python file.
+# That is exactly the cost this layer exists to avoid, and the omission was
+# invisible: the image builds, and the stale helper runs.
+#
+# iquam neither installs awscli nor sources localize.sh, so its copies are
+# inert -- a few KB, and it keeps this one Dockerfile serving all four
+# modules.
 USER root
 COPY common/bin/localize.sh /opt/common/bin/localize.sh
+COPY common/bin/maap_credentials.py /opt/common/bin/maap_credentials.py
 COPY ${MODULE}/bin/entrypoint.sh /opt/${MODULE}/bin/entrypoint.sh
-RUN chmod 0755 /opt/common/bin/localize.sh /opt/${MODULE}/bin/entrypoint.sh
+RUN chmod 0755 /opt/common/bin/localize.sh \
+                /opt/common/bin/maap_credentials.py \
+                /opt/${MODULE}/bin/entrypoint.sh
 
 # NO `USER matlab` HERE, though an earlier version of this file had one.
 # `USER matlab` appears in every module Dockerfile, but in the BUILDER stage

@@ -401,3 +401,30 @@ def test_the_dps_layer_does_not_switch_to_a_nonexistent_user():
             f"Dockerfile.dps switches to {user!r}, which the module runtime "
             f"stages do not create. The image would build and then fail to "
             f"start.")
+
+
+def test_the_dps_layer_refreshes_every_text_file_the_modules_copy():
+    """maap/Dockerfile.dps exists so a change to a shell or Python file does
+    not require rebuilding a MATLAB image. That only holds if it refreshes
+    ALL of them -- one left out can reach an image only through a full base
+    rebuild, and the omission is invisible: the image builds and the stale
+    file runs."""
+    import re
+    dps = (REPO / "maap" / "Dockerfile.dps").read_text()
+    refreshed = set(re.findall(r"^COPY\s+(\S+)\s", dps, re.M))
+
+    # Substitute the build arg so module-specific paths compare.
+    def normalize(path, module):
+        return path.replace("${MODULE}", module)
+
+    for module in MODULES:
+        stage = _runtime_stage(module)
+        copied = set(re.findall(r"^COPY\s+([^-\s]\S*)\s", stage, re.M))
+        text_files = {c for c in copied
+                      if c.endswith((".sh", ".py"))}
+        refreshed_here = {normalize(r, module) for r in refreshed}
+        missing = text_files - refreshed_here
+        assert not missing, (
+            f"{module}/Dockerfile copies {sorted(missing)} from the working "
+            f"tree, but Dockerfile.dps does not refresh it. A change there "
+            f"would need a full MATLAB rebuild to reach an image.")

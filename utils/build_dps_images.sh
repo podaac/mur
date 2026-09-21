@@ -38,6 +38,14 @@
 #   ./utils/build_dps_images.sh --tag 2.0.0 --push       # build and push
 #   ./utils/build_dps_images.sh --tag 2.0.0 --modules landice
 #   ./utils/build_dps_images.sh --tag 2.0.0 --verify     # anonymous-pull check
+#
+#   ./utils/build_dps_images.sh --tag 2.0.1 --retag-base 2.0.0 --push
+#     For a release that changes ONLY the three text files this layer
+#     refreshes -- entrypoint.sh, localize.sh, maap_credentials.py. The
+#     compiled MATLAB and Fortran are identical, so the base image is retagged
+#     rather than rebuilt, and no MATLAB licence is needed. If anything under
+#     src/ changed, do not use this: build the base properly with
+#     build_and_push.sh.
 set -euo pipefail
 
 REGISTRY="${REGISTRY:-ghcr.io}"
@@ -47,14 +55,16 @@ MODULES="iquam l2p landice mrva"
 TAG=""
 PUSH=0
 VERIFY=0
+RETAG_BASE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --tag)     TAG="$2"; shift 2 ;;
-    --push)    PUSH=1; shift ;;
-    --verify)  VERIFY=1; shift ;;
-    --modules) MODULES="$2"; shift 2 ;;
-    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+    --tag)         TAG="$2"; shift 2 ;;
+    --push)        PUSH=1; shift ;;
+    --verify)      VERIFY=1; shift ;;
+    --modules)     MODULES="$2"; shift 2 ;;
+    --retag-base)  RETAG_BASE="$2"; shift 2 ;;
+    -h|--help)     sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -82,6 +92,25 @@ case "$BUILD_STAMP" in
   *-dirty-*) echo "          image cannot be reproduced from a commit." ;;
 esac
 echo
+
+if [ -n "$RETAG_BASE" ]; then
+  echo "==> Retagging base images ${RETAG_BASE} -> ${TAG}"
+  echo "    Only valid when nothing outside entrypoint.sh, localize.sh and"
+  echo "    maap_credentials.py changed -- this layer refreshes those three,"
+  echo "    and inherits everything else unchanged."
+  for module in $MODULES; do
+    from="${REGISTRY}/${REPO}/${module}:${RETAG_BASE}"
+    to="${REGISTRY}/${REPO}/${module}:${TAG}"
+    if ! docker image inspect "$from" >/dev/null 2>&1; then
+      echo "    $from not present locally; pulling"
+      docker pull --platform "$PLATFORM" "$from"
+    fi
+    docker tag "$from" "$to"
+    echo "    $from -> $to"
+    [ "$PUSH" -eq 1 ] && docker push "$to" >/dev/null && echo "        pushed"
+  done
+  echo
+fi
 
 for module in $MODULES; do
   base="${REGISTRY}/${REPO}/${module}:${TAG}"
