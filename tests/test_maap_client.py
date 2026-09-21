@@ -331,3 +331,78 @@ def test_a_bare_list_algorithm_listing_does_not_crash():
         {"id": "mur-landice", "version": "2.0.0", "processID": 65},
     ])
     assert c.resolve_algorithms(["mur-landice"]) == {"mur-landice": 65}
+
+
+# --- a long wait must look different from a hang ---------------------------
+#
+# Between the last submission and the next stage, wait_all printed nothing.
+# A run sitting in it is indistinguishable from a hung process -- and one real
+# way to hang is built in: normalize_status returns "" for a response shape it
+# does not recognize, "" is not terminal, so the loop polls forever. Silently.
+
+def test_an_unrecognized_status_is_warned_about_not_just_polled(caplog):
+    import logging
+    from mur_maap.client import MaapPyClient
+
+    c, maap, _ = make_client()
+    c.poll_interval = 0
+    seen = []
+
+    def status(job_id):
+        seen.append(job_id)
+        # Unknown twice, then terminal, so the loop ends.
+        return "" if len(seen) < 3 else "successful"
+
+    c.get_job_status = status
+    with caplog.at_level(logging.WARNING):
+        c.wait_all(["job-1"])
+    assert any("neither terminal nor a known running state" in r.getMessage()
+               for r in caplog.records), caplog.text
+
+
+def test_the_unknown_status_warning_fires_once_per_value(caplog):
+    """A 30-second poll over a long MRVA job would otherwise emit hundreds."""
+    import logging
+    c, _, _ = make_client()
+    c.poll_interval = 0
+    calls = []
+
+    def status(job_id):
+        calls.append(1)
+        return "" if len(calls) < 6 else "successful"
+
+    c.get_job_status = status
+    with caplog.at_level(logging.WARNING):
+        c.wait_all(["job-1"])
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+
+
+def test_wait_all_reports_when_it_starts_and_finishes(caplog):
+    import logging
+    c, _, _ = make_client()
+    c.poll_interval = 0
+    c.get_job_status = lambda jid: "successful"
+    with caplog.at_level(logging.INFO):
+        c.wait_all(["job-1", "job-2"])
+    text = caplog.text
+    assert "waiting on 2 job(s)" in text
+    assert "terminal" in text, "no line marks the wait ending"
+
+
+def test_a_known_active_status_is_not_warned_about(caplog):
+    """running/queued are normal; warning about them would train people to
+    ignore the warning that matters."""
+    import logging
+    c, _, _ = make_client()
+    c.poll_interval = 0
+    calls = []
+
+    def status(job_id):
+        calls.append(1)
+        return "running" if len(calls) < 3 else "successful"
+
+    c.get_job_status = status
+    with caplog.at_level(logging.WARNING):
+        c.wait_all(["job-1"])
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

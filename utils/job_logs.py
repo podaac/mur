@@ -69,6 +69,30 @@ def result_prefix_even_if_failed(client, job_id):
         return None, None
 
 
+def jobs_by_tag(client, tag_prefix):
+    """Job ids whose tag starts with `tag_prefix`.
+
+    A run tags every job mur.<mode>.<analysis-date>.<stage>[...], so one
+    prefix names a whole day -- which beats pasting eighteen UUIDs to find
+    out why a run is sitting still.
+    """
+    resp = client.maap.list_jobs()
+    body = resp.json() if resp.content else {}
+    rows = body if isinstance(body, list) else (
+        body.get("jobs") or body.get("results") or [])
+    found = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        tag = str(row.get("tags") or row.get("tag") or "")
+        if tag.startswith(tag_prefix):
+            jid = next((row[k] for k in ("jobID", "jobId", "job_id", "id")
+                        if row.get(k)), None)
+            if jid:
+                found.append(jid)
+    return found
+
+
 def show(client, job_id, *, full=False, status_only=False):
     status = client.get_job_status(job_id)
     print(f"\n{'=' * 70}\n{job_id}  [{status or 'unknown'}]\n{'=' * 70}")
@@ -122,7 +146,11 @@ def show(client, job_id, *, full=False, status_only=False):
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("job_ids", nargs="+")
+    parser.add_argument("job_ids", nargs="*",
+                        help="job ids, or use --tag to find them")
+    parser.add_argument("--tag",
+                        help="find jobs by tag prefix instead of listing ids, "
+                             "e.g. --tag mur.nrt.2026-09-20 for a whole day")
     parser.add_argument("--full", action="store_true",
                         help=f"print the whole log, not the last {TAIL_LINES} lines")
     parser.add_argument("--status-only", action="store_true")
@@ -134,7 +162,19 @@ def main(argv=None) -> int:
         print("ERROR: maap-py is not installed. Run this in a MAAP workspace.")
         return 1
 
-    for job_id in args.job_ids:
+    job_ids = list(args.job_ids)
+    if args.tag:
+        found = jobs_by_tag(client, args.tag)
+        if not found:
+            print(f"No jobs found with a tag starting {args.tag!r}.")
+            return 1
+        print(f"{len(found)} job(s) tagged {args.tag!r}")
+        job_ids.extend(found)
+    if not job_ids:
+        print("Give one or more job ids, or --tag.")
+        return 1
+
+    for job_id in job_ids:
         try:
             show(client, job_id, full=args.full, status_only=args.status_only)
         except Exception as exc:                           # noqa: BLE001

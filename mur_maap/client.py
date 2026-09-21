@@ -275,23 +275,56 @@ class MaapPyClient(MAAPClient):
         this.
         """
         pending = list(job_ids)
+        total = len(pending)
         started = time.monotonic()
         failures = {}
+        # Statuses that are neither terminal nor known-active. Each is warned
+        # about once: an unrecognized status is not treated as terminal (see
+        # normalize_status), so it keeps this loop polling -- forever, if the
+        # status never becomes one we know. Silently is the wrong way to do
+        # that, since from outside it is indistinguishable from a long job.
+        unknown_seen = set()
+        last_report = time.monotonic()
 
+        logger.info("  waiting on %d job(s)", total)
         while pending:
             still = []
+            counts = {}
             for jid in pending:
                 status = self.get_job_status(jid)
+                counts[status or "<empty>"] = counts.get(status or "<empty>", 0) + 1
                 if status in TERMINAL_BAD:
                     failures[jid] = status
                 elif status not in TERMINAL_OK:
                     still.append(jid)
+                    if status not in ACTIVE and status not in unknown_seen:
+                        unknown_seen.add(status)
+                        logger.warning(
+                            "    job %s reports status %r, which is neither "
+                            "terminal nor a known running state. Still polling; "
+                            "if every job reports this, the run will never "
+                            "finish and mur_maap.client.TERMINAL_OK/ACTIVE need "
+                            "this value.", jid, status)
+            done = total - len(still)
             pending = still
             if not pending:
                 break
             if timeout is not None and time.monotonic() - started > timeout:
                 raise TimeoutError(f"jobs still running after {timeout}s: {pending}")
+
+            # A heartbeat, so a long wait is visibly a wait. Without it the
+            # process prints nothing between the last submission and the next
+            # stage, which reads as a hang.
+            now = time.monotonic()
+            if now - last_report >= max(self.poll_interval, 60):
+                last_report = now
+                breakdown = ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
+                logger.info("    %d/%d done after %dm (%s)",
+                            done, total, (now - started) // 60, breakdown)
             time.sleep(self.poll_interval)
+
+        logger.info("  all %d job(s) terminal after %dm (%d failed)",
+                    total, (time.monotonic() - started) // 60, len(failures))
 
         if failures and raise_on_failure:
             # The ids alone are not a diagnosis, and this is where a run ends,
