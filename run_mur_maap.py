@@ -40,6 +40,7 @@ from iquam_date_flags import format_iquam_reference_date
 from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
 from mrva_static_files import MRVA_STATIC_RELATIVE_PATHS, seasonal_relative_path
 from mur_maap import paths
+from mur_maap.version import ALGORITHM_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -688,9 +689,25 @@ def build_client(config: Dict, args):
         for s, cfg in (l2p.get("sensors") or {}).items()
     }
 
+    # The version comes from the code, not from a config default. MAAP keeps
+    # every registered version, so asking for an old one succeeds and runs an
+    # old image -- a config that silently disagreed with the deployed packages
+    # would be indistinguishable from a working one. An explicit override is
+    # still allowed (rolling back, or testing a package deployed from another
+    # checkout), but it has to be deliberate and it says so.
+    version = ALGORITHM_VERSION
+    override = maap_cfg.get("algorithm_version")
+    if override and str(override) != ALGORITHM_VERSION:
+        version = str(override)
+        logger.warning(
+            "config pins algorithm_version %s, but this checkout builds %s. "
+            "Jobs will run the %s packages, which were deployed from a "
+            "different revision of this repo.",
+            version, ALGORITHM_VERSION, version)
+
     return MaapPyClient(
         queue=queue,
-        version=str(maap_cfg.get("algorithm_version", "2.0.0")),
+        version=version,
         sensor_collections=sensor_collections,
         granule_workdir=args.granule_workdir,
         queues=maap_cfg.get("queues"),

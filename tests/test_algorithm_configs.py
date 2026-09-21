@@ -291,3 +291,64 @@ def test_generate_cwl_can_pin_a_digest():
     assert "--pin-digest" in text
     assert "imagetools inspect" in text, "no way to resolve a tag to a digest"
     assert "sha256:" in text
+
+
+# --- one version, five places ----------------------------------------------
+#
+# MAAP keeps every registered version, so asking it for a version that is
+# merely OLD is not an error: it resolves, submits, and runs the old image.
+# A half-finished version bump therefore produces a working-looking pipeline
+# running previous code. These make the halves impossible to separate.
+
+def test_the_four_packages_declare_the_version_the_code_asks_for():
+    from mur_maap.version import ALGORITHM_VERSION
+    for module in MODULES:
+        declared = str(load_config(module)["algorithm_version"])
+        assert declared == ALGORITHM_VERSION, (
+            f"{module}: algorithm_config.yml says {declared}, but "
+            f"mur_maap/version.py says {ALGORITHM_VERSION}. The orchestrator "
+            f"would resolve {ALGORITHM_VERSION} and run whatever was deployed "
+            f"under it. Use utils/bump_algorithm_version.sh.")
+
+
+def test_the_image_tag_follows_the_version_everywhere():
+    """Already covered per-module; asserted across all four so a partial bump
+    fails loudly rather than leaving one module on the old image."""
+    from mur_maap.version import ALGORITHM_VERSION
+    for module in MODULES:
+        url = load_config(module)["algorithm_container_url"]
+        assert url.endswith(f":{ALGORITHM_VERSION}"), (
+            f"{module}: container URL {url} is not at {ALGORITHM_VERSION}")
+
+
+def test_the_committed_cwls_are_the_current_version():
+    """A CWL filename carries the version, so a bump leaves the previous
+    file behind. Deploying the stale one is a silent downgrade."""
+    from mur_maap.version import ALGORITHM_VERSION
+    cwl_dir = REPO / "maap" / "cwl_workflows"
+    for module in MODULES:
+        expected = cwl_dir / f"process_mur-{module}_{ALGORITHM_VERSION}.cwl"
+        assert expected.is_file(), (
+            f"{module}: {expected.name} does not exist -- regenerate with "
+            f"./utils/generate_cwl.sh")
+    stale = [p.name for p in cwl_dir.glob("process_mur-*.cwl")
+             if not p.name.endswith(f"_{ALGORITHM_VERSION}.cwl")]
+    assert not stale, (
+        f"CWLs from an older version are still committed: {sorted(stale)}. "
+        f"Delete them, or a deploy can pick the wrong file.")
+
+
+def test_no_python_source_hardcodes_the_version():
+    """The constant exists so there is exactly one. A literal elsewhere is a
+    default that outlives the next bump."""
+    from mur_maap.version import ALGORITHM_VERSION
+    import re
+    offenders = []
+    for path in [REPO / "run_mur_maap.py"] + sorted((REPO / "mur_maap").glob("*.py")):
+        if path.name == "version.py":
+            continue
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            if re.search(rf'["\']{re.escape(ALGORITHM_VERSION)}["\']', line):
+                offenders.append(f"{path.relative_to(REPO)}:{n}")
+    assert not offenders, (
+        f"the version is hardcoded at {offenders}; import ALGORITHM_VERSION")
