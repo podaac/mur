@@ -31,7 +31,7 @@ import logging
 import os
 import pathlib
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import mur_config
 import mur_date
@@ -103,8 +103,9 @@ def resolve_mrva_static_hrefs(static_resources_root: str, doy: int) -> Dict[str,
 class DayResult:
     process_date: datetime.date
     mode: str
-    mrva_job_id: str
-    netcdf_href: str
+    # None when --execute excluded mrva: the day ran, but produced no L4.
+    mrva_job_id: Optional[str]
+    netcdf_href: Optional[str]
 
 
 class MAAPClient:
@@ -203,6 +204,39 @@ class MAAPClient:
         raise NotImplementedError("MAAPClient.publish_stac_item: wire up STAC publish")
 
 
+ALL_STAGES = ("landice", "iquam", "l2p", "mrva")
+
+
+def validate_stages(stages: Optional[Iterable[str]]) -> set:
+    """Normalize a stage selection, rejecting one that cannot run.
+
+    MRVA consumes landice's three outputs and every sensor's BIC, and it reads
+    them from THIS run's job results -- get_job_output(landice_job, ...) needs
+    a landice_job. Excluding a stage MRVA depends on is not a smaller run, it
+    is a crash partway through, after the other jobs have already been
+    submitted and paid for. Say so before anything is submitted.
+    """
+    if stages is None:
+        return set(ALL_STAGES)
+    wanted = {s.strip().lower() for s in stages if s and s.strip()}
+    unknown = wanted - set(ALL_STAGES)
+    if unknown:
+        raise SystemExit(
+            f"--execute: unknown stage(s) {sorted(unknown)}. "
+            f"Choose from: {', '.join(ALL_STAGES)}")
+    if not wanted:
+        raise SystemExit("--execute: no stages selected.")
+    if "mrva" in wanted:
+        missing = {"landice", "l2p"} - wanted
+        if missing:
+            raise SystemExit(
+                f"--execute: mrva needs {', '.join(sorted(missing))} in the "
+                f"same run.\nIt reads their outputs from this run's jobs, so "
+                f"excluding them does not make\na smaller run -- it makes one "
+                f"that fails after submitting the rest.")
+    return wanted
+
+
 class MAAPOrchestrator:
     """
     Orchestrates MUR SST processing on MAAP via OGC Application Package
@@ -222,10 +256,14 @@ class MAAPOrchestrator:
         client: MAAPClient,
         force_nrt: bool = False,
         today_fn: Optional[Callable[[], datetime.date]] = None,
+        stages: Optional[Iterable[str]] = None,
     ):
         self.config = mur_config.normalize_config(config)
         self.client = client
         self.force_nrt = force_nrt
+        # Which of the four container stages to submit. Narrowing this is how
+        # you test one mechanism without paying for 23 jobs.
+        self.stages = validate_stages(stages)
         self._today_fn = today_fn or mur_date.today
 
     def get_reference_today(self) -> datetime.date:
@@ -393,26 +431,33 @@ class MAAPOrchestrator:
         year = process_date.year
         doy = process_date.timetuple().tm_yday
 
-        landice_hrefs = resolve_landice_static_hrefs(self.config["landice"]["static_resources_dir"])
-        landice_job = self.client.submit_job("mur-landice", {
-            "year": year,
-            "doy": doy,
-            "landmask_p011_file": landice_hrefs["landmask_p011"],
-            "gridindex_north_p011_file": landice_hrefs["gridindex_north_p011"],
-            "gridindex_south_p011_file": landice_hrefs["gridindex_south_p011"],
-            "landmask_p01_file": landice_hrefs["landmask_p01"],
-            "gridindex_north_p01_file": landice_hrefs["gridindex_north_p01"],
-            "gridindex_south_p01_file": landice_hrefs["gridindex_south_p01"],
-        })
-        iquam_config = self.config["iquam"]
-        iquam_job = self.client.submit_job("mur-iquam", {
-            "year": year,
-            "doy": doy,
-            "mode": mode,
-            "reference_date": format_iquam_reference_date(self.get_reference_today()),
-            "buoy_day_range": iquam_config["buoy_dayrange"],
-            "stability_latency": iquam_config["stable_latency"],
-        })
+        landice_job = None
+        if "landice" in self.stages:
+            landice_hrefs = resolve_landice_static_hrefs(
+                self.config["landice"]["static_resources_dir"])
+            landice_job = self.client.submit_job("mur-landice", {
+                "year": year,
+                "doy": doy,
+                "landmask_p011_file": landice_hrefs["landmask_p011"],
+                "gridindex_north_p011_file": landice_hrefs["gridindex_north_p011"],
+                "gridindex_south_p011_file": landice_hrefs["gridindex_south_p011"],
+                "landmask_p01_file": landice_hrefs["landmask_p01"],
+                "gridindex_north_p01_file": landice_hrefs["gridindex_north_p01"],
+                "gridindex_south_p01_file": landice_hrefs["gridindex_south_p01"],
+            })
+
+        iquam_job = None
+        if "iquam" in self.stages:
+            iquam_config = self.config["iquam"]
+            iquam_job = self.client.submit_job("mur-iquam", {
+                "year": year,
+                "doy": doy,
+                "mode": mode,
+                "reference_date": format_iquam_reference_date(
+                    self.get_reference_today()),
+                "buoy_day_range": iquam_config["buoy_dayrange"],
+                "stability_latency": iquam_config["stable_latency"],
+            })
 
         l2p_jobs = []
         # Maps (sensor, data_day) -> (cached_href_or_None, job_or_None) for
@@ -428,7 +473,7 @@ class MAAPOrchestrator:
         bic_results = {}
         reference_today = self.get_reference_today()
         l2p_config = self.config["l2p"]
-        for sensor in l2p_config["active_sensors"]:
+        for sensor in (l2p_config["active_sensors"] if "l2p" in self.stages else []):
             sensor_config = l2p_config["sensors"][sensor]
             stable = sensor_config.get("stable", 2)
             # skip_future matters: a T-1 analysis day with a forward range of
@@ -498,7 +543,8 @@ class MAAPOrchestrator:
                 l2p_jobs.append(job)
                 bic_results[(sensor, data_day)] = (None, job)
 
-        self.client.wait_all([landice_job, iquam_job, *l2p_jobs])
+        self.client.wait_all([j for j in (landice_job, iquam_job, *l2p_jobs)
+                              if j is not None])
 
         # Promote every BIC this run produced from its DPS path to the
         # canonical workspace key, so tomorrow's run can find it with a HEAD
@@ -518,6 +564,13 @@ class MAAPOrchestrator:
         sensor_inputs_manifest_href = self.client.write_manifest(
             paths.mrva_manifest_key(process_date), {"files": sensor_manifest_files}
         )
+
+        if "mrva" not in self.stages:
+            logger.info("  mrva not in --execute; stopping after %d job(s)",
+                        len([j for j in (landice_job, iquam_job, *l2p_jobs)
+                             if j is not None]))
+            return DayResult(process_date=process_date, mode=mode,
+                             mrva_job_id=None, netcdf_href=None)
 
         mrva_static_hrefs = resolve_mrva_static_hrefs(
             self.config["mrva"]["static_resources_dir"], doy
@@ -628,17 +681,22 @@ def _is_placeholder(value) -> bool:
 def _print_job_plan(config: Dict, days, reference_today, args) -> None:
     """How many jobs this will submit, and roughly how much data it moves.
 
-    Worth seeing before committing: in workspace mode every granule is
-    downloaded here and uploaded to the bucket, and a full five-sensor window
-    is a great deal more than a single-sensor test.
+    Worth seeing before committing: a full five-sensor window is a great deal
+    more than a single-sensor test, and the containers fetch every granule.
+
+    This must agree with what run_day actually submits -- a plan that ignored
+    --execute would report 23 jobs for a run that submits 4, or worse, the
+    reverse.
     """
     l2p = config.get("l2p", {})
-    sensors = l2p.get("active_sensors", [])
-    staging = args.granule_staging or config.get("maap", {}).get(
-        "granule_staging", "workspace")
+    stages = validate_stages(args.execute.split(",") if args.execute else None)
+    sensors = l2p.get("active_sensors", []) if "l2p" in stages else []
 
     total_units = 0
     print("\njobs")
+    if stages != set(ALL_STAGES):
+        print(f"  (--execute {','.join(sorted(stages))}: "
+              f"{', '.join(sorted(set(ALL_STAGES) - stages))} skipped)")
     for sensor in sensors:
         cfg = (l2p.get("sensors") or {}).get(sensor, {})
         units = 0
@@ -650,10 +708,12 @@ def _print_job_plan(config: Dict, days, reference_today, args) -> None:
         print(f"  mur-l2p    {sensor:<8} {units:>3} sensor-day(s)")
 
     per_day = len(days)
-    print(f"  mur-landice{'':<9}{per_day:>3}")
-    print(f"  mur-iquam  {'':<9}{per_day:>3}")
-    print(f"  mur-mrva   {'':<9}{per_day:>3}")
-    print(f"  {'total':<20}{total_units + 3 * per_day:>3} job(s)")
+    singles = 0
+    for stage in ("landice", "iquam", "mrva"):
+        if stage in stages:
+            singles += per_day
+            print(f"  mur-{stage:<7}{'':<9}{per_day:>3}")
+    print(f"  {'total':<20}{total_units + singles:>3} job(s)")
 
     if total_units:
         # Nothing is copied through this process any more -- the container
@@ -1084,6 +1144,7 @@ def main(argv=None) -> int:
         config, client,
         force_nrt=args.force_nrt,
         today_fn=lambda: reference_today,     # frozen: a run must not drift
+        stages=args.execute.split(",") if args.execute else None,
     )
 
     failed = []

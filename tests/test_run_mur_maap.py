@@ -597,3 +597,88 @@ def test_a_sensor_with_granules_is_unaffected():
         _single_sensor_config(), client, today_fn=lambda: datetime.date(2026, 8, 9))
     orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
     assert len([p for p, _ in client.submitted if p == "mur-l2p"]) == 1
+
+
+# --- --execute -------------------------------------------------------------
+#
+# The flag was declared in parse_args and read nowhere. `--execute l2p`
+# submitted all four stages while the operator believed it had been limited to
+# one -- silently spending compute on jobs they had explicitly excluded, which
+# is the worst direction for a scoping flag to fail in.
+
+import run_mur_maap as rmm
+
+
+def test_stage_selection_defaults_to_everything():
+    assert rmm.validate_stages(None) == set(rmm.ALL_STAGES)
+
+
+def test_an_unknown_stage_is_rejected_by_name():
+    with pytest.raises(SystemExit, match=r"l2pp"):
+        rmm.validate_stages(["l2pp"])
+
+
+def test_an_empty_selection_is_rejected():
+    with pytest.raises(SystemExit, match="no stages"):
+        rmm.validate_stages([" ", ""])
+
+
+def test_mrva_without_its_inputs_is_refused_before_anything_is_submitted():
+    """MRVA reads landice's outputs and the BICs from THIS run's jobs. Running
+    it alone is not a smaller run; it crashes after the others are paid for."""
+    with pytest.raises(SystemExit, match="mrva needs"):
+        rmm.validate_stages(["mrva"])
+    with pytest.raises(SystemExit, match="mrva needs"):
+        rmm.validate_stages(["mrva", "l2p"])
+    # With both present it is fine.
+    assert rmm.validate_stages(["mrva", "l2p", "landice"]) == {
+        "mrva", "l2p", "landice"}
+
+
+def test_stages_are_case_and_whitespace_tolerant():
+    assert rmm.validate_stages([" L2P ", "iquam"]) == {"l2p", "iquam"}
+
+
+def _submitted_processes(stages):
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=stages)
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    return [pid for pid, _ in client.submitted]
+
+
+def test_excluding_a_stage_actually_stops_its_submission():
+    """The regression: this is what the flag claimed to do and did not."""
+    assert "mur-landice" not in _submitted_processes(["l2p"])
+    assert "mur-iquam" not in _submitted_processes(["l2p"])
+    assert "mur-mrva" not in _submitted_processes(["l2p"])
+    assert "mur-l2p" in _submitted_processes(["l2p"])
+
+
+def test_l2p_alone_submits_no_other_process():
+    assert set(_submitted_processes(["l2p"])) == {"mur-l2p"}
+
+
+def test_landice_and_iquam_alone_submit_no_l2p():
+    assert set(_submitted_processes(["landice", "iquam"])) == {
+        "mur-landice", "mur-iquam"}
+
+
+def test_the_default_still_submits_all_four():
+    """Nobody passing --execute must be affected by any of this."""
+    assert set(_submitted_processes(None)) == {
+        "mur-landice", "mur-iquam", "mur-l2p", "mur-mrva"}
+
+
+def test_a_partial_run_returns_a_day_result_without_an_l4():
+    """Excluding mrva means no L4 granule. That is a real outcome, not an
+    error, and it must not be reported as a netcdf_href of some other day."""
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=["l2p"])
+    result = orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert result.process_date == datetime.date(2026, 8, 6)
+    assert result.mrva_job_id is None
+    assert result.netcdf_href is None
