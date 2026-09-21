@@ -221,22 +221,16 @@ fi
 
 echo
 if [ "$VALIDATED" -eq 1 ]; then
-  echo "All workflows generated and validated. Deploy from a MAAP workspace with:"
+  echo "All workflows generated and validated."
 else
   echo "All workflows generated. NOT fully validated -- see the SKIPPED lines"
   echo "above; they checked out against their configs, but no CWL validator ran."
-  echo "Deploy from a MAAP workspace with:"
 fi
 echo
-echo "  from maap.maap import MAAP"
-echo "  maap = MAAP()"
-echo "  for m in ['iquam', 'landice', 'l2p', 'mrva']:   # cheapest first"
-echo "      r = maap.deploy_algorithm_from_cwl_file("
-# Read the version back from a config rather than hardcoding it, so this hint
-# cannot drift from what was actually generated.
-version=$(sed -n 's/^algorithm_version: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' \
-            "$REPO_ROOT/maap/landice/algorithm_config.yml" | head -1)
-# An absolute path, not ~: a tilde inside a Python string is literal, so
-# deploy_algorithm_from_cwl_file would be handed a path that does not exist.
-echo "          file_path=f'$OUT_DIR/process_mur-{m}_${version}.cwl')"
-echo "      print(m, r.status_code, r.json())"
+echo "Deploy them from a MAAP workspace with:"
+echo
+echo "  python utils/deploy_algorithms.py --dry-run   # see what would happen"
+echo "  python utils/deploy_algorithms.py"
+echo
+echo "That cross-checks each CWL against its config, registers all four, and"
+echo "reports the processIDs MAAP assigns."

@@ -326,9 +326,14 @@ def test_the_image_tag_follows_the_version_everywhere():
             f"{module}: container URL {url} is not at {ALGORITHM_VERSION}")
 
 
-def test_the_committed_cwls_are_the_current_version():
-    """A CWL filename carries the version, so a bump leaves the previous
-    file behind. Deploying the stale one is a silent downgrade."""
+def test_a_cwl_exists_for_the_current_version():
+    """A CWL filename carries the version, so a bump needs a regenerate.
+
+    Older CWLs are deliberately NOT required to be deleted. They are how you
+    redeploy a previous version after a bad one -- utils/deploy_algorithms.py
+    --version 2.0.0 -- and keeping them costs nothing now that nothing picks a
+    CWL up by globbing the directory. That is the property worth asserting,
+    and test_nothing_deploys_a_cwl_by_globbing does."""
     from mur_maap.version import ALGORITHM_VERSION
     cwl_dir = REPO / "maap" / "cwl_workflows"
     for module in MODULES:
@@ -336,11 +341,26 @@ def test_the_committed_cwls_are_the_current_version():
         assert expected.is_file(), (
             f"{module}: {expected.name} does not exist -- regenerate with "
             f"./utils/generate_cwl.sh")
-    stale = [p.name for p in cwl_dir.glob("process_mur-*.cwl")
-             if not p.name.endswith(f"_{ALGORITHM_VERSION}.cwl")]
-    assert not stale, (
-        f"CWLs from an older version are still committed: {sorted(stale)}. "
-        f"Delete them, or a deploy can pick the wrong file.")
+
+
+def test_nothing_deploys_a_cwl_by_globbing():
+    """Old CWLs stay committed, so the deploy path must name the file it
+    wants. A glob would register whatever happens to be in the directory --
+    including last version's, which is a silent downgrade that looks like a
+    successful deploy."""
+    import ast
+    tree = ast.parse((REPO / "utils" / "deploy_algorithms.py").read_text())
+
+    # The AST, not the text: the file's own docstring explains why it does not
+    # glob, and a substring search flags that explanation as the offence.
+    directory_scans = {"glob", "rglob", "iterdir", "listdir", "scandir"}
+    found = [node.func.attr for node in ast.walk(tree)
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute)
+             and node.func.attr in directory_scans]
+    assert not found, (
+        f"deploy_algorithms.py scans a directory ({found}) to find a CWL; it "
+        f"must build the path from an explicit version instead.")
 
 
 def test_no_python_source_hardcodes_the_version():

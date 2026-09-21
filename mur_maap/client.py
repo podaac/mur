@@ -140,7 +140,10 @@ class MaapPyClient(MAAPClient):
         for name in names:
             resp = self.maap.list_algorithms()
             body = resp.json() if resp.content else {}
-            procs = body.get("processes", body if isinstance(body, list) else [])
+            # A bare list, not {"processes": [...]}: body.get would raise
+            # before the isinstance default is consulted -- that default only
+            # applies when body IS a dict lacking the key.
+            procs = body if isinstance(body, list) else body.get("processes", [])
             match = [
                 p for p in procs
                 if p.get("id") == name and str(p.get("version")) == self.version

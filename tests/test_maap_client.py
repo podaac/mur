@@ -319,3 +319,15 @@ def test_the_override_reaches_the_submission():
     c.submit_job("mur-landice", {})
     c.submit_job("mur-mrva", {})
     assert [s["queue"] for s in maap.submitted] == ["q", "big-queue"]
+
+
+def test_a_bare_list_algorithm_listing_does_not_crash():
+    """MAAP has returned both {"processes": [...]} and a bare list. The old
+    guard was `body.get("processes", body if isinstance(body, list) else [])`
+    -- which raises AttributeError on a list, because a dict default is only
+    consulted once .get() has already been called on a dict."""
+    c, maap, _ = make_client()
+    maap.list_algorithms = lambda: Resp([
+        {"id": "mur-landice", "version": "2.0.0", "processID": 65},
+    ])
+    assert c.resolve_algorithms(["mur-landice"]) == {"mur-landice": 65}

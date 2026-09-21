@@ -125,10 +125,13 @@ machine can actually do:
        ./utils/build_dps_images.sh --tag $NEW --push --verify
 
   IN THE MAAP WORKSPACE (needs neither)
-  2. Pull, regenerate the CWLs, and drop the $OLD ones.
+  2. Pull and regenerate the CWLs.
        git pull
        ./utils/generate_cwl.sh
-       git rm maap/cwl_workflows/process_mur-*_$OLD.cwl
+
+     Keep the $OLD files. They are how you redeploy $OLD if $NEW turns out
+     wrong -- deploy_algorithms.py --version $OLD -- and nothing picks a CWL
+     up by globbing the directory, so they sit there harmlessly.
 
      Here, not on the build host: deploy_algorithm_from_cwl_file() takes a
      file_path on the local filesystem, so the CWL must exist on the machine
@@ -140,7 +143,11 @@ machine can actually do:
      downgrade this whole exercise is about. That red is the reminder, not a
      bug.
 
-  3. Redeploy all four packages, then confirm from the first job's log:
+  3. Redeploy all four packages, still in the workspace:
+       python utils/deploy_algorithms.py --dry-run
+       python utils/deploy_algorithms.py
+
+     Then confirm from the first job's log:
        MUR image build: <sha>-<timestamp>
 
 Until step 3, MAAP only knows $OLD, and resolve_algorithms fails with "not
