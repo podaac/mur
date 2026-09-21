@@ -53,6 +53,43 @@ TERMINAL_BAD = {"failed", "dismissed", "deleted", "cancelled", "revoked", "error
 ACTIVE = {"accepted", "queued", "running", "started", "offline"}
 
 
+# requests.RequestException subclasses OSError, so one catch covers a DNS
+# failure, a refused connection, a read timeout and a dropped socket alike --
+# without importing requests here, which is maap-py's dependency, not ours.
+TRANSIENT_ERRORS = (OSError,)
+
+API_RETRIES = 4
+API_RETRY_DELAY = 5.0
+
+
+def _retrying(what: str, call, *, retries: int = API_RETRIES,
+              delay: float = API_RETRY_DELAY):
+    """Run `call`, retrying a transient network failure.
+
+    A workspace's DNS is not perfectly reliable, and a run that polls twenty
+    jobs every thirty seconds for an hour makes thousands of API calls. One of
+    them failing must not end the run:
+
+        Failed to resolve 'api.maap-project.org'
+        ([Errno -3] Temporary failure in name resolution)
+
+    killed a real run that had eleven healthy jobs on DPS, which then carried
+    on with nothing watching them.
+    """
+    import time as _time
+
+    for attempt in range(1, retries + 1):
+        try:
+            return call()
+        except TRANSIENT_ERRORS as exc:
+            if attempt == retries:
+                raise
+            wait = delay * attempt
+            logger.warning("    %s failed (%s); retry %d/%d in %.0fs",
+                           what, type(exc).__name__, attempt, retries - 1, wait)
+            _time.sleep(wait)
+
+
 def normalize_status(raw: Any) -> str:
     """Lowercase status from whatever shape the API returned.
 
@@ -270,9 +307,10 @@ class MaapPyClient(MAAPClient):
         return self.queues.get(process_id, self.queue)
 
     def get_job_status(self, job_id: str) -> str:
-        resp = self.maap.get_job_status(job_id)
-        body = resp.json() if resp.content else {}
-        return normalize_status(body)
+        def call():
+            resp = self.maap.get_job_status(job_id)
+            return normalize_status(resp.json() if resp.content else {})
+        return _retrying(f"status of {job_id}", call)
 
     def wait_all(self, job_ids: List[str], *, timeout: Optional[float] = None,
                  raise_on_failure: bool = True) -> Dict[str, str]:
@@ -300,11 +338,32 @@ class MaapPyClient(MAAPClient):
         last_report = time.monotonic()
 
         logger.info("  waiting on %d job(s)", total)
+        # Consecutive sweeps in which every single status check failed. One
+        # such sweep is a blip -- the next one is thirty seconds away, and the
+        # jobs are running on DPS regardless -- so the loop carries on. Only a
+        # sustained outage should end a run, and then it says so.
+        blind_sweeps = 0
+
         while pending:
             still = []
             counts = {}
+            errors = 0
             for jid in pending:
-                status = self.get_job_status(jid)
+                try:
+                    status = self.get_job_status(jid)
+                except TRANSIENT_ERRORS as exc:
+                    # Unknown, not failed: abandoning a running job because
+                    # the workspace could not resolve DNS would be a far
+                    # worse answer than looking again shortly.
+                    errors += 1
+                    still.append(jid)
+                    counts["<unreachable>"] = counts.get("<unreachable>", 0) + 1
+                    if errors == 1:
+                        logger.warning(
+                            "    could not reach MAAP for job status (%s); "
+                            "the jobs keep running and this will look again "
+                            "in %.0fs", type(exc).__name__, self.poll_interval)
+                    continue
                 counts[status or "<empty>"] = counts.get(status or "<empty>", 0) + 1
                 if status in TERMINAL_BAD:
                     failures[jid] = status
@@ -318,6 +377,19 @@ class MaapPyClient(MAAPClient):
                             "if every job reports this, the run will never "
                             "finish and mur_maap.client.TERMINAL_OK/ACTIVE need "
                             "this value.", jid, status)
+            if errors and errors == len(pending):
+                blind_sweeps += 1
+                if blind_sweeps >= 10:
+                    raise RuntimeError(
+                        f"MAAP has been unreachable for {blind_sweeps} "
+                        f"consecutive polls (~{blind_sweeps * self.poll_interval:.0f}s). "
+                        f"{len(pending)} job(s) are still running on DPS and "
+                        f"are NOT cancelled; re-running picks up whatever "
+                        f"finished. Pending: {pending[:5]}"
+                        + (" ..." if len(pending) > 5 else ""))
+            else:
+                blind_sweeps = 0
+
             done = total - len(still)
             pending = still
             if not pending:
@@ -369,7 +441,8 @@ class MaapPyClient(MAAPClient):
                 f"job {job_id} is {status!r}; results exist only once it is "
                 f"terminal (asking early returns HTTP 500)")
 
-        resp = self.maap.get_job_result(job_id)
+        resp = _retrying(f"result of {job_id}",
+                         lambda: self.maap.get_job_result(job_id))
         body = resp.json() if resp.content else {}
         href = _outputs.result_prefix(body)
         bucket, prefix = _outputs.parse_dps_href(href)

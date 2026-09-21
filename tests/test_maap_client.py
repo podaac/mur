@@ -433,3 +433,108 @@ def test_dedup_can_be_overridden_per_submission():
     assert maap.submitted[-1].get("dedup") is False
     c.submit_job("mur-landice", {"year": 2026})
     assert maap.submitted[-1].get("dedup") is c.dedup
+
+
+# --- a network blip must not end a run -------------------------------------
+#
+# A real run died on one status check:
+#
+#   Failed to resolve 'api.maap-project.org'
+#   ([Errno -3] Temporary failure in name resolution)
+#
+# Eleven jobs were healthy on DPS at the time. They carried on running with
+# nothing watching them, and the day was reported as failed.
+
+def test_a_transient_error_is_retried_not_raised(caplog):
+    import logging
+    from mur_maap import client as mod
+
+    c, _, _ = make_client()
+    calls = []
+
+    def flaky(job_id):
+        calls.append(1)
+        if len(calls) < 3:
+            raise OSError("Temporary failure in name resolution")
+        return "successful"
+
+    c.maap.get_job_status = lambda jid: (_ for _ in ()).throw(
+        AssertionError("should not reach maap"))
+    monkey = mod._retrying("status", lambda: flaky("j"), delay=0)
+    assert monkey == "successful"
+    assert len(calls) == 3
+
+
+def test_retries_are_bounded_and_the_error_survives():
+    """A genuinely dead API must still surface, not spin."""
+    from mur_maap import client as mod
+    calls = []
+
+    def always_fail():
+        calls.append(1)
+        raise OSError("nope")
+
+    with pytest.raises(OSError):
+        mod._retrying("thing", always_fail, retries=3, delay=0)
+    assert len(calls) == 3
+
+
+def test_one_unreachable_sweep_does_not_fail_the_run(caplog):
+    """The job is unknown, not failed. Abandoning a running job because the
+    workspace could not resolve DNS is the worst available answer."""
+    import logging
+    c, _, _ = make_client()
+    c.poll_interval = 0
+    calls = []
+
+    def status(job_id):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("Temporary failure in name resolution")
+        return "successful"
+
+    c.get_job_status = status
+    with caplog.at_level(logging.WARNING):
+        failures = c.wait_all(["job-1"])
+    assert failures == {}, "an unreachable status became a failure"
+    assert "could not reach MAAP" in caplog.text
+
+
+def test_an_unreachable_job_is_never_reported_as_failed():
+    c, _, _ = make_client()
+    c.poll_interval = 0
+    calls = []
+
+    def status(job_id):
+        calls.append(1)
+        if len(calls) < 4:
+            raise OSError("down")
+        return "successful"
+
+    c.get_job_status = status
+    assert c.wait_all(["job-1"], raise_on_failure=True) == {}
+
+
+def test_a_sustained_outage_stops_and_says_the_jobs_are_still_running():
+    """Polling forever against a dead API helps nobody, but the message must
+    make clear the jobs were not cancelled."""
+    c, _, _ = make_client()
+    c.poll_interval = 0
+
+    def always_down(job_id):
+        raise OSError("down")
+
+    c.get_job_status = always_down
+    with pytest.raises(RuntimeError, match="unreachable"):
+        c.wait_all(["job-1"])
+
+
+def test_the_outage_message_says_a_rerun_picks_up():
+    c, _, _ = make_client()
+    c.poll_interval = 0
+    c.get_job_status = lambda jid: (_ for _ in ()).throw(OSError("down"))
+    with pytest.raises(RuntimeError) as exc:
+        c.wait_all(["job-1"])
+    message = str(exc.value)
+    assert "NOT cancelled" in message
+    assert "re-running" in message
