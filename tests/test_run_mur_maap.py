@@ -132,6 +132,7 @@ class FakeMAAPClient(MAAPClient):
         self.tags = []
         # Job ids the test wants to come back failed.
         self.failing_jobs = set()
+        self.dedups = []
 
     def job_id_for(self, process_id, **match):
         """Job id of the single recorded submission for `process_id`,
@@ -153,7 +154,7 @@ class FakeMAAPClient(MAAPClient):
             )
         return hits[0]
 
-    def stac_search(self, collections, start, end):
+    def stac_search(self, collections, start, end, *, sensor=None):
         return [f"s3://podaac/{collections[0]}/{start.isoformat()}.nc"]
 
     def object_exists(self, s3_uri):
@@ -166,8 +167,9 @@ class FakeMAAPClient(MAAPClient):
         self.written_manifests.append((prefix, manifest))
         return f"s3://podaac/{prefix}"
 
-    def submit_job(self, process_id, args, *, tag=None):
+    def submit_job(self, process_id, args, *, tag=None, dedup=None):
         self.tags.append(tag)
+        self.dedups.append(dedup)
         job_id = f"job-{len(self.submitted)}"
         self.submitted.append((process_id, args))
         self.job_ids.append(job_id)
@@ -178,7 +180,7 @@ class FakeMAAPClient(MAAPClient):
         self.existing_objects.add(dest_uri)
         return dest_uri
 
-    def wait_all(self, job_ids, *, raise_on_failure=True):
+    def wait_all(self, job_ids, *, timeout=None, raise_on_failure=True):
         self.waited.append(list(job_ids))
         # Mirrors the real client: {job_id: status} for the failures, empty
         # when everything succeeded. Returning None here let run_day pass its
@@ -714,8 +716,8 @@ def _orch_with_failures(failing):
     orch._failing = failing
     real_submit = client.submit_job
 
-    def submit(process_id, args, *, tag=None):
-        jid = real_submit(process_id, args, tag=tag)
+    def submit(process_id, args, *, tag=None, **kw):
+        jid = real_submit(process_id, args, tag=tag, **kw)
         if process_id in failing and jid not in client.failing_jobs:
             client.failing_jobs.add(jid)
             failing.remove(process_id)          # only the first such job
@@ -774,3 +776,46 @@ def test_a_clean_day_still_promotes_and_reaches_mrva():
     orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
     assert any(pid == "mur-mrva" for pid, _ in client.submitted)
     assert client.copied
+
+
+# --- a rewrite must actually re-run ----------------------------------------
+#
+# The L2P manifest lives at a stable key -- manifests/l2p/<sensor>/<year>/
+# <doy>.json -- so reprocessing a day with late-arriving granules changes the
+# manifest's CONTENT while every input VALUE stays identical. MAAP deduplicates
+# on the values, refuses to run, and returns a job whose status is "deduped".
+#
+# Two consequences, both observed on a real run: wait_all polled that status
+# forever because it matched none of its sets, and the reprocess the stability
+# window exists to perform never happened.
+
+def test_a_rewrite_opts_out_of_dedup():
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    # day0 of the window is recent enough to be inside every sensor's
+    # stability latency, so these are rewrites.
+    orch.run_day(datetime.date(2026, 8, 8), mode="nrt")
+
+    l2p = [(pid, args, dedup)
+           for (pid, args), dedup in zip(client.submitted, client.dedups)
+           if pid == "mur-l2p"]
+    assert l2p, "no L2P jobs submitted"
+    rewrites = [d for _, args, d in l2p if str(args.get("rewrite")) == "1"]
+    assert rewrites, "no rewrite job in this window; the fixture needs a recent day"
+    assert all(d is False for d in rewrites), (
+        "a rewrite was submitted with dedup left on; MAAP will match the "
+        "earlier identical submission and the reprocess will not happen")
+
+
+def test_a_non_rewrite_still_dedups():
+    """Dedup is worth keeping everywhere else -- it is what stops an
+    interrupted run resubmitting work that already succeeded."""
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    for (pid, args), dedup in zip(client.submitted, client.dedups):
+        if pid == "mur-l2p" and str(args.get("rewrite")) != "1":
+            assert dedup is None, "a plain resubmission should keep dedup"

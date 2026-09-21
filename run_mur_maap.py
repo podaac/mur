@@ -556,10 +556,19 @@ class MAAPOrchestrator:
                 # sensor + data day: one analysis day submits a job per
                 # sensor per day in that sensor's window, and they are
                 # otherwise indistinguishable in MAAP's job table.
+                # A rewrite must defeat dedup. The manifest lives at a
+                # stable key -- manifests/l2p/<sensor>/<year>/<doy>.json -- so
+                # reprocessing a day with late-arriving granules rewrites the
+                # CONTENT while every input VALUE stays identical. MAAP dedups
+                # on the values, refuses to run, and the reprocess silently
+                # does not happen: the whole point of the stability window,
+                # quietly defeated. Only rewrites opt out, so an ordinary
+                # resubmission is still deduplicated.
                 job = self.client.submit_job(
                     "mur-l2p", l2p_args,
                     tag=tags.job_tag("l2p", process_date, mode,
-                                     sensor=sensor, data_date=data_day))
+                                     sensor=sensor, data_date=data_day),
+                    dedup=False if rewrite else None)
                 l2p_jobs.append(job)
                 bic_results[(sensor, data_day)] = (None, job)
 

@@ -43,7 +43,12 @@ logger = logging.getLogger(__name__)
 class GranuleSensorUnknown(RuntimeError):
     pass
 
-TERMINAL_OK = {"successful", "succeeded", "success", "completed", "done"}
+# "deduped" means MAAP refused to run the job because an identical
+# submission already exists -- so the work is done, by that earlier job. It is
+# terminal: it never becomes anything else. Observed on a real run, where it
+# matched none of these sets and wait_all polled it forever.
+DEDUPED = {"deduped", "job-deduped", "duplicate"}
+TERMINAL_OK = {"successful", "succeeded", "success", "completed", "done"} | DEDUPED
 TERMINAL_BAD = {"failed", "dismissed", "deleted", "cancelled", "revoked", "error"}
 ACTIVE = {"accepted", "queued", "running", "started", "offline"}
 
@@ -216,7 +221,8 @@ class MaapPyClient(MAAPClient):
 
     # -- jobs ---------------------------------------------------------------
 
-    def submit_job(self, process_id: str, args: Dict[str, Any], *, tag=None) -> str:
+    def submit_job(self, process_id: str, args: Dict[str, Any], *, tag=None,
+                   dedup: Optional[bool] = None) -> str:
         pid = self._process_id(process_id)
         # Two translations on the way out.
         #
@@ -238,7 +244,7 @@ class MaapPyClient(MAAPClient):
             process_id=pid,
             inputs=inputs,
             queue=self.queue_for(process_id),
-            dedup=self.dedup,
+            dedup=self.dedup if dedup is None else dedup,
             tag=tag or f"{self.tag_prefix}.{process_id}",
         )
         body = resp.json() if resp.content else {}
@@ -249,7 +255,14 @@ class MaapPyClient(MAAPClient):
                 f"{process_id}: no job id in the submit response "
                 f"(HTTP {resp.status_code}, keys {sorted(body)}): {body}")
         self._job_process[job_id] = process_id
-        logger.info("submitted %s -> %s", process_id, job_id)
+        status = normalize_status(body)
+        if status in DEDUPED:
+            logger.info(
+                "submitted %s -> %s (deduped: MAAP matched an identical earlier "
+                "submission and reused its result rather than running again)",
+                process_id, job_id)
+        else:
+            logger.info("submitted %s -> %s", process_id, job_id)
         return job_id
 
     def queue_for(self, process_id: str) -> str:
@@ -397,13 +410,13 @@ class MaapPyClient(MAAPClient):
         logger.info("recorded STAC item %s -> %s", item["id"], href)
 
     def stac_search(self, collections, start, end, *, sensor=None) -> List[str]:
-        """Granule hrefs a DPS job can actually read.
+        """PO.DAAC granule hrefs for one collection and day.
 
-        Not a STAC search: a DPS job cannot fetch from PO.DAAC (every DAAC
-        needs temporary S3 credentials via Earthdata Login, which
-        localize.sh's plain `aws s3 cp` cannot obtain). Granules are fetched
-        here, where Earthdata credentials live, copied into the workspace
-        bucket, and the job reads them from there.
+        Not a STAC search, and no longer a copy either. It once fetched every
+        granule here and re-uploaded it to the workspace bucket, because a DPS
+        job could not read a DAAC bucket. The container does that itself now --
+        localize.sh mints Earthdata credentials from MAAP_PGT -- so this
+        returns PO.DAAC's own hrefs and moves no bytes.
 
         The name is kept because run_day() calls it; what it returns is still
         "the hrefs for this collection and day".

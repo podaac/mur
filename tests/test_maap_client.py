@@ -51,7 +51,7 @@ class FakeMaapPy:
         self._n += 1
         jid = f"job-{self._n:04d}"
         self.submitted.append({"process_id": process_id, "inputs": inputs,
-                               "queue": queue, "tag": tag})
+                               "queue": queue, "tag": tag, "dedup": dedup})
         return Resp({"jobID": jid, "processID": process_id, "status": "accepted"})
 
     def get_job_status(self, job_id):
@@ -406,3 +406,30 @@ def test_a_known_active_status_is_not_warned_about(caplog):
     with caplog.at_level(logging.WARNING):
         c.wait_all(["job-1"])
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_deduped_is_terminal():
+    """MAAP returns "deduped" when it matched an identical earlier
+    submission. It is terminal -- it never becomes anything else -- and the
+    work exists, done by that earlier job. Matching none of the status sets
+    made wait_all poll it forever, which is exactly what happened on a real
+    run."""
+    from mur_maap.client import TERMINAL_OK, TERMINAL_BAD, ACTIVE
+    assert "deduped" in TERMINAL_OK
+    assert "deduped" not in TERMINAL_BAD
+    assert "deduped" not in ACTIVE
+
+
+def test_wait_all_returns_on_a_deduped_job(caplog):
+    c, _, _ = make_client()
+    c.poll_interval = 0
+    c.get_job_status = lambda jid: "deduped"
+    assert c.wait_all(["job-1"]) == {}, "deduped is not a failure"
+
+
+def test_dedup_can_be_overridden_per_submission():
+    c, maap, _ = make_client()
+    c.submit_job("mur-landice", {"year": 2026}, dedup=False)
+    assert maap.submitted[-1].get("dedup") is False
+    c.submit_job("mur-landice", {"year": 2026})
+    assert maap.submitted[-1].get("dedup") is c.dedup
