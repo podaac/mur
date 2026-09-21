@@ -112,3 +112,113 @@ def test_a_list_shaped_body_is_handled():
         def list_algorithms(self):
             return Resp([{"id": "mur-l2p", "version": "2.0.1", "processID": 7}])
     assert deploy.registrations(Bare(), "mur-l2p") == [("2.0.1", 7)]
+
+
+# --- deployment is asynchronous --------------------------------------------
+#
+# MAAP answers 202 Accepted with a deploymentJobID and a GitLab pipeline link.
+# The process is NOT registered when that arrives -- listing the algorithms
+# immediately shows only the previous version. The first version of this
+# script treated 202 as done and printed "Done", reporting success for a
+# deployment that had not happened.
+
+class DelayedMaap(FakeMaap):
+    """Registers each deployment only after `delay` listings."""
+    def __init__(self, delay=2, version="2.0.1"):
+        super().__init__()
+        self.delay, self.version = delay, version
+        self.listings = 0
+        self.pending = []
+
+    def deploy_algorithm_from_cwl_file(self, file_path):
+        module = pathlib.Path(file_path).name.split("_")[1].replace("mur-", "")
+        self.pending.append(module)
+        return Resp({"deploymentJobID": 178, "status": "accepted",
+                     "processPipelineLink": {"href": f"https://pipeline/{module}"}},
+                    202)
+
+    def list_algorithms(self):
+        self.listings += 1
+        if self.listings > self.delay:
+            self.processes = [
+                {"id": f"mur-{m}", "version": self.version, "processID": 90 + i}
+                for i, m in enumerate(self.pending)
+            ]
+        return Resp({"processes": self.processes})
+
+
+def test_waits_until_the_registration_actually_appears(capsys):
+    maap = DelayedMaap(delay=2)
+    maap.pending = ["l2p"]          # as a deploy call would have left it
+    done = deploy.wait_for_registration(
+        maap, ["l2p"], "2.0.1", timeout=30, poll_interval=0)
+    assert done == {"l2p"}
+    out = capsys.readouterr().out
+    assert "waiting on l2p" in out, "should report that it is still waiting"
+    assert "registered  mur-l2p" in out
+
+
+def test_a_registration_that_never_appears_times_out(capsys):
+    """A pipeline can fail. Waiting forever is not better than saying so."""
+    maap = DelayedMaap(delay=10_000)
+    done = deploy.wait_for_registration(
+        maap, ["l2p"], "2.0.1", timeout=0, poll_interval=0)
+    assert done == set()
+    assert "timed out" in capsys.readouterr().out
+
+
+def test_waiting_on_nothing_returns_immediately():
+    assert deploy.wait_for_registration(
+        FakeMaap(), [], "2.0.1", timeout=0, poll_interval=0) == set()
+
+
+def test_no_wait_reports_queued_not_registered(monkeypatch, capsys):
+    """--no-wait must not claim the deployment succeeded."""
+    monkeypatch.setattr(deploy, "cwl_for",
+                        lambda m, v: REPO / "maap" / "cwl_workflows" /
+                        f"process_mur-{m}_{v}.cwl")
+    versions = {p.name.rsplit("_", 1)[1][:-4]
+                for p in (REPO / "maap" / "cwl_workflows").glob("*.cwl")}
+    if not versions:
+        pytest.skip("no CWLs committed")
+    version = sorted(versions)[0]
+
+    fake = DelayedMaap(delay=10_000, version=version)
+    monkeypatch.setitem(sys.modules, "maap", type(sys)("maap"))
+    monkeypatch.setitem(sys.modules, "maap.maap", type(sys)("maap.maap"))
+    sys.modules["maap.maap"].MAAP = lambda: fake
+
+    rc = deploy.main(["--version", version, "--modules", "l2p", "--skip-check",
+                      "--no-wait"])
+    out = capsys.readouterr().out
+    assert "queued but not yet registered" in out
+    assert "https://pipeline/l2p" in out, "the pipeline link is how you check"
+    assert "Done" not in out
+    assert rc == 0
+
+
+def test_a_timed_out_deploy_exits_nonzero_and_warns_about_the_old_version(
+        monkeypatch, capsys):
+    """The dangerous outcome: 2.0.1 never registers, 2.0.0 still does, and
+    run_mur_maap.py resolves 2.0.0 and runs it without complaint."""
+    monkeypatch.setattr(deploy, "cwl_for",
+                        lambda m, v: REPO / "maap" / "cwl_workflows" /
+                        f"process_mur-{m}_{v}.cwl")
+    versions = {p.name.rsplit("_", 1)[1][:-4]
+                for p in (REPO / "maap" / "cwl_workflows").glob("*.cwl")}
+    if not versions:
+        pytest.skip("no CWLs committed")
+    version = sorted(versions)[0]
+
+    fake = DelayedMaap(delay=10_000, version=version)
+    monkeypatch.setitem(sys.modules, "maap", type(sys)("maap"))
+    monkeypatch.setitem(sys.modules, "maap.maap", type(sys)("maap.maap"))
+    sys.modules["maap.maap"].MAAP = lambda: fake
+
+    rc = deploy.main(["--version", version, "--modules", "l2p", "--skip-check",
+                      "--timeout", "0", "--poll-interval", "0"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert f"NOT registered at {version}" in out
+    assert "PREVIOUS version" in out
+    assert "https://pipeline/l2p" in out
