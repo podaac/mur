@@ -393,11 +393,19 @@ class MAAPOrchestrator:
                 process_date, day_range, reference_today=reference_today
             ):
                 if sensor == "IQUAM0":
-                    # iquam writes its whole +/- window in one job, so every
-                    # day resolves against that job's single output directory.
-                    entry_href = (
-                        f"{self.client.get_job_output(iquam_job, 'output').rstrip('/')}"
-                        f"/{data_day.year}/{paths.iquam_filename(data_day)}"
+                    # One iquam job writes its whole +/- window -- five .bii
+                    # files for a day_range of 2 -- so the day has to be named
+                    # when resolving, or the pattern's {year}/{doy} fall back
+                    # to wildcards, match all of them, and resolve_output
+                    # refuses the ambiguity ("expected 1 match ... found 5").
+                    #
+                    # Resolving per day also means each entry is a key the job
+                    # really produced, rather than a path built by string
+                    # concatenation and assumed to exist.
+                    entry_href = self.client.get_job_output(
+                        iquam_job, "output",
+                        year=data_day.year,
+                        doy=f"{data_day.timetuple().tm_yday:03d}",
                     )
                     files.append({
                         "path": entry_href,

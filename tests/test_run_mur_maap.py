@@ -188,8 +188,13 @@ class FakeMAAPClient(MAAPClient):
             raise RuntimeError(f"job(s) failed: {failures}")
         return failures
 
-    def get_job_output(self, job_id, output_name):
-        return f"s3://podaac/output/{job_id}/{output_name}"
+    def get_job_output(self, job_id, output_name, **fmt):
+        # **fmt mirrors the real client, where it selects WHICH file when a
+        # job produced several -- iquam writes one .bii per day of its window.
+        # A fake that ignored it returned the same href for every day, so a
+        # manifest referencing one file five times looked correct.
+        suffix = "".join(f"/{k}={v}" for k, v in sorted(fmt.items()))
+        return f"s3://podaac/output/{job_id}/{output_name}{suffix}"
 
     def publish_stac_item(self, netcdf_href, process_date, mode):
         self.published.append((netcdf_href, process_date, mode))

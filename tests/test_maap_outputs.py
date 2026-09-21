@@ -150,3 +150,77 @@ def test_resolve_all_omits_absent_outputs_instead_of_raising():
                                 prefix=PREFIX, year=2026, doy=164)
     assert "landice_grid_p01" in found
     assert "landice_ice_p011" not in found
+
+
+# --- iquam writes a whole window, not one file -----------------------------
+#
+# Observed on a real job: one mur-iquam job produced five .bii files, one per
+# day of its +/- 2 buoy window. resolve_output was asked for "output" with no
+# year or doy, so {year}/{doy} fell back to the \d{4}/\d{3} wildcards, matched
+# all five, and the run failed with
+#
+#   expected 1 match for '^iquam/\d{4}/Global_IQUAM0_\d{4}_\d{3}\.bii$',
+#   found 5
+#
+# Refusing was right -- picking one of five arbitrarily would feed MRVA the
+# wrong day's buoys. The caller had to name the day.
+
+IQUAM_KEYS = [f"iquam/2026/Global_IQUAM0_2026_{doy}.bii"
+              for doy in ("260", "261", "262", "263", "264")]
+
+
+def test_an_unqualified_iquam_lookup_is_refused_not_guessed():
+    """A wrong file here reaches MRVA as though it were the right one."""
+    with pytest.raises(LookupError, match="found 5"):
+        outputs.resolve_output(IQUAM_KEYS, "mur-iquam", "output")
+
+
+def test_naming_the_day_resolves_exactly_one():
+    got = outputs.resolve_output(IQUAM_KEYS, "mur-iquam", "output",
+                                 year=2026, doy="262")
+    assert got == "iquam/2026/Global_IQUAM0_2026_262.bii"
+
+
+def test_every_day_of_the_window_resolves_to_its_own_file():
+    """The property the manifest depends on: five days, five distinct files."""
+    resolved = [outputs.resolve_output(IQUAM_KEYS, "mur-iquam", "output",
+                                       year=2026, doy=doy)
+                for doy in ("260", "261", "262", "263", "264")]
+    assert len(set(resolved)) == 5
+
+
+def test_an_int_doy_is_zero_padded():
+    """doy 62 must not match Global_IQUAM0_2026_620.bii or miss _062."""
+    keys = ["iquam/2026/Global_IQUAM0_2026_062.bii"]
+    assert outputs.resolve_output(keys, "mur-iquam", "output",
+                                  year=2026, doy=62).endswith("_062.bii")
+
+
+def test_a_day_the_job_did_not_produce_is_an_error():
+    """Not a silently missing manifest entry."""
+    with pytest.raises(LookupError):
+        outputs.resolve_output(IQUAM_KEYS, "mur-iquam", "output",
+                               year=2026, doy="999")
+
+
+def test_the_orchestrator_names_the_day_when_resolving_iquam():
+    """The fix was at the call site: the pattern was always per-day, and the
+    caller asked for it unqualified and then built a path by hand."""
+    import datetime
+    import sys
+    import pathlib as _p
+    sys.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+    from run_mur_maap import MAAPOrchestrator
+    from tests.test_run_mur_maap import CONFIG, FakeMAAPClient
+
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    manifests = [m for m in client.written_manifests if "mrva" in str(m[0])]
+    assert manifests, "no MRVA manifest was written"
+    entries = [f for f in manifests[-1][1]["files"] if f["sensor"] == "IQUAM0"]
+    assert len(entries) > 1, "IQUAM0 should span a window of days"
+    assert len({e["path"] for e in entries}) == len(entries), \
+        f"IQUAM0 entries reuse one href: {[e['path'] for e in entries]}"
