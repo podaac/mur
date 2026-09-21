@@ -6,8 +6,8 @@ algorithm_description: >
   quality-screened observations onto the MUR grid, and emits
   Global_<SENSOR>_<YEAR>_<DOY>.bic plus its L2Plist text file.
 algorithm_name: mur-l2p
-algorithm_version: "2.0.1"
-algorithm_container_url: ghcr.io/podaac/mur/l2p-dps:2.0.1
+algorithm_version: "2.0.2"
+algorithm_container_url: ghcr.io/podaac/mur/l2p-dps:2.0.2
 
 keywords: MUR, SST, L2P, GHRSST, binning
 code_repository: https://github.com/podaac/mur
