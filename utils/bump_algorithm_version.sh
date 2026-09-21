@@ -116,25 +116,33 @@ echo "    ok: 4 configs + mur_maap/version.py"
 
 cat <<NEXT
 
-Version is now $NEW. Three steps remain, in this order:
+Version is now $NEW. Commit this, then three steps, split by what each
+machine can actually do:
 
-  1. Build and push the images at the new tag.
-     On the MATLAB host:
+  ON THE BUILD HOST (needs docker; the base images need MATLAB)
+  1. Build and push at the new tag.
        ./utils/build_and_push.sh --push --tag $NEW
-     Then, anywhere with docker:
        ./utils/build_dps_images.sh --tag $NEW --push --verify
 
-  2. Regenerate the CWLs, and delete the $OLD ones.
+  IN THE MAAP WORKSPACE (needs neither)
+  2. Pull, regenerate the CWLs, and drop the $OLD ones.
+       git pull
        ./utils/generate_cwl.sh
        git rm maap/cwl_workflows/process_mur-*_$OLD.cwl
 
-     tests/test_algorithm_configs.py FAILS until you do -- the committed CWLs
-     still say $OLD, and deploying one of those is the silent downgrade this
-     whole exercise is about. That red is the reminder, not a bug.
+     Here, not on the build host: deploy_algorithm_from_cwl_file() takes a
+     file_path on the local filesystem, so the CWL must exist on the machine
+     that deploys it. Generating it elsewhere means a commit-and-pull round
+     trip before step 3.
 
-  3. Redeploy all four packages, then confirm from a job log:
+     tests/test_algorithm_configs.py FAILS between step 1 and step 2 -- the
+     committed CWLs still say $OLD, and deploying one of those is the silent
+     downgrade this whole exercise is about. That red is the reminder, not a
+     bug.
+
+  3. Redeploy all four packages, then confirm from the first job's log:
        MUR image build: <sha>-<timestamp>
 
-Until step 3, MAAP still only knows $OLD, and resolve_algorithms will fail
-with "not registered" rather than silently running the old packages.
+Until step 3, MAAP only knows $OLD, and resolve_algorithms fails with "not
+registered" -- loudly, rather than silently running the old packages.
 NEXT

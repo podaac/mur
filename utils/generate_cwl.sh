@@ -47,6 +47,17 @@
 #   Requires the images to be pushed first -- the digest is assigned by the
 #   registry. Redeploy afterwards: a registration holds its own frozen copy of
 #   the CWL, so editing this file changes nothing already deployed.
+#
+#   Needs only a network, not docker, so it runs in the workspace like the
+#   rest of this script.
+#
+# WHERE TO RUN THIS
+#   The MAAP workspace, from a checkout of this repo. deploy_algorithm_from_
+#   cwl_file() takes a file_path on the local filesystem, so the generated
+#   CWL has to exist on the machine that deploys it. Generating it anywhere
+#   else means committing and pulling before you can deploy.
+#
+#   Nothing here needs docker or MATLAB -- it is config in, YAML out.
 set -euo pipefail
 
 GENERATOR_REPO="${GENERATOR_REPO:-https://github.com/MAAP-Project/ogc-app-pack-generator}"
@@ -67,22 +78,13 @@ while [ $# -gt 0 ]; do
 done
 
 # Resolve a tag to the immutable digest the registry published it under.
-# buildx queries the registry rather than the local cache, which is the point:
-# the local copy may be the very stale image we are trying to get away from.
+#
+# Over HTTPS, not through docker: this script runs in the MAAP workspace,
+# where the CWL is deployed from, and a workspace is a JupyterHub pod with no
+# Docker daemon. It also queries the REGISTRY rather than a local cache, which
+# is the point -- a local copy may be the very stale image being escaped.
 resolve_digest() {
-  local image="$1" repo="${1%%:*}" digest=""
-  digest=$(docker buildx imagetools inspect "$image" \
-             --format '{{.Manifest.Digest}}' 2>/dev/null || true)
-  if [ -z "$digest" ]; then
-    # Older docker without buildx imagetools --format. A local RepoDigest is
-    # accurate immediately after a push of this same image.
-    digest=$(docker image inspect "$image" \
-               --format '{{index .RepoDigests 0}}' 2>/dev/null | cut -d@ -f2 || true)
-  fi
-  case "$digest" in
-    sha256:*) echo "${repo}@${digest}" ;;
-    *) return 1 ;;
-  esac
+  "$PYTHON" "$REPO_ROOT/utils/resolve_image_digest.py" "$1"
 }
 
 cd "$(dirname "$0")/.."
@@ -127,10 +129,9 @@ if [ "$VALIDATE_ONLY" -eq 0 ]; then
 
     if [ "$PIN_DIGEST" -eq 1 ]; then
       echo "    resolving ${image} to its registry digest"
+      # resolve_image_digest.py explains the specific failure -- not pushed,
+      # not public, unreachable registry -- so do not paper over it here.
       if ! pinned=$(resolve_digest "$image"); then
-        echo "ERROR: could not resolve a digest for ${image}." >&2
-        echo "       Push the image first -- the registry assigns the digest." >&2
-        echo "       (docker buildx imagetools inspect ${image})" >&2
         exit 1
       fi
       echo "    ${image} -> ${pinned}"

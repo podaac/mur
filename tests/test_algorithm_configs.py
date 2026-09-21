@@ -286,11 +286,16 @@ def test_the_build_script_supplies_and_verifies_the_stamp():
 
 
 def test_generate_cwl_can_pin_a_digest():
-    """The only way to force a worker off a cached tag."""
+    """The only way to force a worker off a cached tag.
+
+    Resolution goes through utils/resolve_image_digest.py rather than docker:
+    this script runs in the MAAP workspace, which is where
+    deploy_algorithm_from_cwl_file() reads its file_path from, and a workspace
+    has no Docker daemon. tests/test_image_digest.py covers the resolver."""
     text = (REPO / "utils" / "generate_cwl.sh").read_text()
     assert "--pin-digest" in text
-    assert "imagetools inspect" in text, "no way to resolve a tag to a digest"
-    assert "sha256:" in text
+    assert "resolve_image_digest.py" in text, "no way to resolve a tag to a digest"
+    assert (REPO / "utils" / "resolve_image_digest.py").is_file()
 
 
 # --- one version, five places ----------------------------------------------
