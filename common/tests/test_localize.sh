@@ -289,6 +289,106 @@ mints=$(bash -c "
 assert_eq "DAAC credentials are minted once for a whole manifest" "1" "$mints"
 rm -rf "$scratch"
 
+# --- transient fetch failures are retried ---------------------------------
+#
+# A MODIS sensor-day is ~350 granules. Observed on a real job: `aws s3 cp`
+# died with SIGSEGV on one granule after the previous ones had transferred
+# cleanly at 30 MB/s, and that single failure discarded the whole job --
+# every granule already fetched included.
+
+scratch=$(mktemp -d)
+
+# Fails twice, then succeeds. A counter file survives the subshell the podaac
+# branch runs `aws` in, which a shell variable would not.
+cat > "$scratch/flaky_aws" <<'AWSEOF'
+#!/bin/bash
+# args: s3 cp <src> <dest>
+count_file="${FLAKY_COUNT_FILE}"
+n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$count_file"
+if [[ "$n" -lt 3 ]]; then
+    # Leave a partial file behind, exactly as a killed transfer would.
+    printf 'partial' > "$4"
+    exit 139        # SIGSEGV's shell status
+fi
+printf 'complete-and-good\n' > "$4"
+exit 0
+AWSEOF
+chmod +x "$scratch/flaky_aws"
+
+printf '0' > "$scratch/count"
+out=$(PATH="$scratch:$PATH" FLAKY_COUNT_FILE="$scratch/count" \
+      MUR_FETCH_RETRY_DELAY=0 bash -c "
+    source '$HELPER'
+    _ensure_podaac_credentials() { return 0; }
+    mv '$scratch/flaky_aws' '$scratch/aws'
+    fetch_uri 's3://podaac-ops-cumulus-protected/x.nc' '$scratch/x.nc' podaac
+" 2>&1)
+rc=$?
+
+if [[ "$rc" -eq 0 && "$(cat "$scratch/x.nc" 2>/dev/null)" == "complete-and-good" ]]; then
+    echo "PASS: a transient fetch failure is retried until it succeeds"
+else
+    echo "FAIL: retry did not recover (rc=$rc, content=$(cat "$scratch/x.nc" 2>/dev/null))"
+    FAILURES=$((FAILURES + 1))
+fi
+
+# The partial file from a failed attempt must not survive. localize_manifest's
+# readability check passes on a truncated file, so a leftover would be handed
+# to MATLAB as though it were data.
+if [[ "$(cat "$scratch/x.nc" 2>/dev/null)" != *partial* ]]; then
+    echo "PASS: a partial file from a failed attempt is discarded"
+else
+    echo "FAIL: a partial file survived the retry"
+    FAILURES=$((FAILURES + 1))
+fi
+
+# Retries are bounded: a genuinely dead source must still fail the job rather
+# than spin forever.
+cat > "$scratch/aws" <<'AWSEOF'
+#!/bin/bash
+printf 'partial' > "$4"
+exit 139
+AWSEOF
+chmod +x "$scratch/aws"
+out=$(PATH="$scratch:$PATH" MUR_FETCH_RETRIES=3 MUR_FETCH_RETRY_DELAY=0 bash -c "
+    source '$HELPER'
+    _ensure_podaac_credentials() { return 0; }
+    fetch_uri 's3://podaac-ops-cumulus-protected/y.nc' '$scratch/y.nc' podaac
+" 2>&1)
+rc=$?
+if [[ "$rc" -ne 0 ]]; then
+    echo "PASS: a permanently failing fetch still fails the job"
+else
+    echo "FAIL: a dead source reported success"
+    FAILURES=$((FAILURES + 1))
+fi
+attempts=$(grep -c 'attempt .* failed' <<< "$out")
+assert_eq "retries are bounded by MUR_FETCH_RETRIES" "2" "$attempts"
+if [[ ! -e "$scratch/y.nc" ]]; then
+    echo "PASS: nothing is left behind by a fetch that never succeeded"
+else
+    echo "FAIL: a partial file survived a permanent failure"
+    FAILURES=$((FAILURES + 1))
+fi
+
+# A missing mounted file will not appear on a second look. Retrying it only
+# delays a failure that is already certain.
+start=$(date +%s)
+out=$(MUR_FETCH_RETRY_DELAY=5 bash -c "
+    source '$HELPER'
+    fetch_uri '$scratch/definitely-not-here.nc' '$scratch/z.nc' local
+" 2>&1)
+elapsed=$(( $(date +%s) - start ))
+if [[ "$elapsed" -lt 3 ]]; then
+    echo "PASS: a missing local file fails immediately rather than retrying"
+else
+    echo "FAIL: a missing local file was retried (${elapsed}s)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+rm -rf "$scratch"
+
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
     echo "All tests passed."

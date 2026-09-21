@@ -84,16 +84,17 @@ _ensure_podaac_credentials() {
     return 0
 }
 
-fetch_uri() {
-    # fetch_uri <src> <dest> [access_kind]
-    #
-    # Copies one source to one local path. The only place that knows how a
-    # given kind of source is read.
-    local src="$1" dest="$2" kind="${3:-}"
-    [[ -n "$kind" && "$kind" != "null" ]] || kind=$(access_kind_for "$src")
+# Transient failures are normal at this scale. A MODIS sensor-day is ~350
+# granules, and a single `aws s3 cp` that segfaults, times out or hits a 5xx
+# would otherwise discard the entire job -- every granule already fetched
+# included. Observed on a real job: cp died with SIGSEGV on granule N after
+# N-1 had transferred cleanly at 30 MB/s.
+: "${MUR_FETCH_RETRIES:=4}"
+: "${MUR_FETCH_RETRY_DELAY:=3}"
 
-    mkdir -p "$(dirname "$dest")"
-
+_fetch_once() {
+    # One attempt. Knows how each kind of source is read, and nothing else.
+    local src="$1" dest="$2" kind="$3"
     case "$kind" in
         local)
             if [[ ! -e "$src" ]]; then
@@ -121,6 +122,52 @@ fetch_uri() {
             ;;
     esac
     return 0
+}
+
+fetch_uri() {
+    # fetch_uri <src> <dest> [access_kind]
+    #
+    # Copies one source to one local path, retrying a transient failure.
+    local src="$1" dest="$2" kind="${3:-}"
+    [[ -n "$kind" && "$kind" != "null" ]] || kind=$(access_kind_for "$src")
+
+    mkdir -p "$(dirname "$dest")"
+
+    # A missing mounted file will not appear on a second look, and an unknown
+    # kind will not become known. Retrying those just adds delay to a failure
+    # that is already certain.
+    local attempts="$MUR_FETCH_RETRIES"
+    case "$kind" in
+        local|"") attempts=1 ;;
+    esac
+
+    local attempt=1
+    while :; do
+        if _fetch_once "$src" "$dest" "$kind"; then
+            [[ "$attempt" -gt 1 ]] && \
+                echo "localize: fetched $src on attempt $attempt" >&2
+            return 0
+        fi
+
+        # A partial or zero-length file left by the failed attempt must not be
+        # mistaken for a good one -- localize_manifest's readability check
+        # passes on a truncated file, and MATLAB would read it as data.
+        # Symlinks are removed too: a dangling one is worse than nothing.
+        [[ "$kind" == "local" ]] || rm -f "$dest"
+
+        if [[ "$attempt" -ge "$attempts" ]]; then
+            [[ "$attempts" -gt 1 ]] && \
+                echo "ERROR: giving up on $src after $attempts attempts" >&2
+            return 1
+        fi
+
+        # Linear backoff: these failures are transient blips rather than a
+        # service being down, so waiting minutes buys nothing.
+        local delay=$(( MUR_FETCH_RETRY_DELAY * attempt ))
+        echo "localize: attempt $attempt/$attempts failed for $src; retrying in ${delay}s" >&2
+        sleep "$delay"
+        attempt=$(( attempt + 1 ))
+    done
 }
 
 localize_input() {
