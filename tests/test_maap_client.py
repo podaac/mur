@@ -538,3 +538,134 @@ def test_the_outage_message_says_a_rerun_picks_up():
     message = str(exc.value)
     assert "NOT cancelled" in message
     assert "re-running" in message
+
+
+# --- a freshly submitted job is not queryable straight away ----------------
+#
+# submit_job returns a job id before /ogc/jobs/<id> answers, so the first
+# polls 404. get_job_status parsed the 404 BODY -- {"status": 404, ...} --
+# and returned the literal status "404", which matched no set. wait_all then
+# polled it forever while warning that it did not recognize it:
+#
+#   job 990467cb-... reports status '404', which is neither terminal nor a
+#   known running state.
+#
+# With one job in the run, that is a permanent hang.
+
+class Resp404:
+    status_code = 404
+    content = b'{"status": 404, "message": "job not found"}'
+    def json(self):
+        return {"status": 404, "message": "job not found"}
+
+
+def test_a_404_is_a_state_not_a_status():
+    from mur_maap.client import UNINDEXED
+    c, maap, _ = make_client()
+    maap.get_job_status = lambda jid: Resp404()
+    assert c.get_job_status("j") == UNINDEXED
+    assert c.get_job_status("j") != "404"
+
+
+def test_not_yet_indexed_is_a_known_active_state():
+    """So it keeps polling without the alarming unknown-status warning."""
+    from mur_maap.client import UNINDEXED, ACTIVE, TERMINAL_OK, TERMINAL_BAD
+    assert UNINDEXED in ACTIVE
+    assert UNINDEXED not in TERMINAL_OK and UNINDEXED not in TERMINAL_BAD
+
+
+def test_a_job_that_appears_after_a_few_404s_completes(caplog):
+    import logging
+    c, maap, _ = make_client()
+    c.poll_interval = 0
+    calls = []
+
+    class Ok:
+        status_code = 200
+        content = b"{}"
+        def json(self):
+            return {"status": "successful"}
+
+    def status(jid):
+        calls.append(1)
+        return Resp404() if len(calls) < 4 else Ok()
+
+    maap.get_job_status = status
+    with caplog.at_level(logging.WARNING):
+        assert c.wait_all(["job-1"]) == {}
+    assert "neither terminal nor a known running state" not in caplog.text, \
+        "a normal indexing delay should not warn about an unknown status"
+
+
+def test_a_job_that_never_appears_eventually_fails():
+    """Waiting forever for a submission MAAP acknowledged and then lost is
+    not better than saying so."""
+    import mur_maap.client as mod
+    c, maap, _ = make_client()
+    c.poll_interval = 0
+    maap.get_job_status = lambda jid: Resp404()
+
+    original = mod.UNINDEXED_GRACE_SECONDS
+    mod.UNINDEXED_GRACE_SECONDS = -1          # expire immediately
+    try:
+        with pytest.raises(RuntimeError, match="not become visible"):
+            c.wait_all(["job-1"])
+    finally:
+        mod.UNINDEXED_GRACE_SECONDS = original
+
+
+def test_a_5xx_is_retried_rather_than_becoming_a_status():
+    """A server blip must not turn into the status string '503'."""
+    c, maap, _ = make_client()
+    calls = []
+
+    class Down:
+        status_code = 503
+        content = b"{}"
+        def json(self):
+            return {}
+
+    class Ok:
+        status_code = 200
+        content = b"{}"
+        def json(self):
+            return {"status": "successful"}
+
+    def status(jid):
+        calls.append(1)
+        return Down() if len(calls) < 3 else Ok()
+
+    maap.get_job_status = status
+    import mur_maap.client as mod
+    original = mod.API_RETRY_DELAY
+    mod.API_RETRY_DELAY = 0
+    try:
+        assert c.get_job_status("j") == "successful"
+    finally:
+        mod.API_RETRY_DELAY = original
+    assert len(calls) == 3
+
+
+def test_retry_settings_are_read_at_call_time():
+    """They were default arguments, bound at import -- so overriding
+    mur_maap.client.API_RETRY_DELAY did nothing, and a test meant to run
+    instantly slept for fifteen seconds instead. The same trap applies to
+    anyone tuning these in the field."""
+    import mur_maap.client as mod
+    calls = []
+
+    def always_fail():
+        calls.append(1)
+        raise OSError("down")
+
+    original_delay, original_retries = mod.API_RETRY_DELAY, mod.API_RETRIES
+    mod.API_RETRY_DELAY, mod.API_RETRIES = 0, 2
+    try:
+        import time
+        start = time.monotonic()
+        with pytest.raises(OSError):
+            mod._retrying("thing", always_fail)
+        assert time.monotonic() - start < 1, "the overridden delay was ignored"
+        assert len(calls) == 2, "the overridden retry count was ignored"
+    finally:
+        mod.API_RETRY_DELAY, mod.API_RETRIES = original_delay, original_retries

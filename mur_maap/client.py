@@ -50,7 +50,15 @@ class GranuleSensorUnknown(RuntimeError):
 DEDUPED = {"deduped", "job-deduped", "duplicate"}
 TERMINAL_OK = {"successful", "succeeded", "success", "completed", "done"} | DEDUPED
 TERMINAL_BAD = {"failed", "dismissed", "deleted", "cancelled", "revoked", "error"}
-ACTIVE = {"accepted", "queued", "running", "started", "offline"}
+# A job MAAP has accepted but not yet made visible on /ogc/jobs/<id>. The
+# submit returns a job id before the job is queryable, so the first few polls
+# can 404. That is a normal early state, not an error and not a status.
+UNINDEXED = "not-yet-indexed"
+
+ACTIVE = {"accepted", "queued", "running", "started", "offline", UNINDEXED}
+
+# How long a job may stay invisible before that stops being a timing artifact.
+UNINDEXED_GRACE_SECONDS = 900
 
 
 # requests.RequestException subclasses OSError, so one catch covers a DNS
@@ -62,8 +70,8 @@ API_RETRIES = 4
 API_RETRY_DELAY = 5.0
 
 
-def _retrying(what: str, call, *, retries: int = API_RETRIES,
-              delay: float = API_RETRY_DELAY):
+def _retrying(what: str, call, *, retries: Optional[int] = None,
+              delay: Optional[float] = None):
     """Run `call`, retrying a transient network failure.
 
     A workspace's DNS is not perfectly reliable, and a run that polls twenty
@@ -77,6 +85,13 @@ def _retrying(what: str, call, *, retries: int = API_RETRIES,
     on with nothing watching them.
     """
     import time as _time
+
+    # Read the module values at CALL time, not as default arguments: a
+    # default is bound at import, so setting mur_maap.client.API_RETRY_DELAY
+    # -- which is the obvious way to make a test not sleep, or to slow
+    # retries down in the field -- would have no effect at all.
+    retries = API_RETRIES if retries is None else retries
+    delay = API_RETRY_DELAY if delay is None else delay
 
     for attempt in range(1, retries + 1):
         try:
@@ -309,6 +324,21 @@ class MaapPyClient(MAAPClient):
     def get_job_status(self, job_id: str) -> str:
         def call():
             resp = self.maap.get_job_status(job_id)
+
+            # The HTTP code carries meaning the body does not. A 404 body is
+            # {"status": 404, ...}, and parsing it as a job status produced
+            # the literal status "404" -- which matched no set, so wait_all
+            # polled it forever while warning that it did not recognize it.
+            # It is not a status at all; it means the job is not queryable
+            # yet, which is normal for the first polls after a submit.
+            code = getattr(resp, "status_code", 200)
+            if code == 404:
+                return UNINDEXED
+            if code >= 500:
+                # A server-side blip. Raise so _retrying backs off and tries
+                # again, rather than turning it into a bogus status string.
+                raise OSError(f"MAAP returned HTTP {code} for job {job_id}")
+
             return normalize_status(resp.json() if resp.content else {})
         return _retrying(f"status of {job_id}", call)
 
@@ -343,6 +373,11 @@ class MaapPyClient(MAAPClient):
         # jobs are running on DPS regardless -- so the loop carries on. Only a
         # sustained outage should end a run, and then it says so.
         blind_sweeps = 0
+        # When each job was first seen as not-yet-indexed. A job that never
+        # becomes visible is a real failure -- a submission MAAP acknowledged
+        # and then lost -- and waiting forever for it is not better than
+        # saying so.
+        unindexed_since = {}
 
         while pending:
             still = []
@@ -365,6 +400,19 @@ class MaapPyClient(MAAPClient):
                             "in %.0fs", type(exc).__name__, self.poll_interval)
                     continue
                 counts[status or "<empty>"] = counts.get(status or "<empty>", 0) + 1
+
+                if status == UNINDEXED:
+                    first = unindexed_since.setdefault(jid, time.monotonic())
+                    waited = time.monotonic() - first
+                    if waited > UNINDEXED_GRACE_SECONDS:
+                        raise RuntimeError(
+                            f"job {jid} has not become visible to MAAP after "
+                            f"{waited / 60:.0f} minutes -- /ogc/jobs/{jid} is "
+                            f"still 404. The submission was accepted and the "
+                            f"job id issued, so this is not a client error; "
+                            f"check the job in the MAAP UI before resubmitting.")
+                else:
+                    unindexed_since.pop(jid, None)
                 if status in TERMINAL_BAD:
                     failures[jid] = status
                 elif status not in TERMINAL_OK:
