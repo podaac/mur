@@ -1126,9 +1126,17 @@ def _print_sizing_note() -> None:
     print("Put one in the config as maap.queue, and MRVA's in maap.queues.")
     print()
     print("Note the units. A queue named ...-64gb is likely 64 GB = 59.6 GiB,")
-    print("while mrva asks for 65536 MiB = 64 GiB, which would not fit. The")
-    print("32vcpu-64gb queue is the one that clearly satisfies both its memory")
-    print("and its 16-core request.")
+    print("while mrva asks for 65536 MiB = 64 GiB, which would not fit. On")
+    print("paper 32vcpu-64gb is the only queue satisfying both that and the")
+    print("16-core request.")
+    print()
+    print("In practice, as of 2026-09-22, every job sent to")
+    print("maap-dps-worker-32vcpu-64gb fails before it starts: cwltool cannot")
+    print("reach /var/run/docker.sock (permission denied on the inspect AND")
+    print("the pull). The same landice package succeeded on the small queue")
+    print("minutes earlier, so it is the worker pool, not the package. Until")
+    print("MAAP ops fixes it, mrva goes to maap-dps-worker-64gb -- watch for")
+    print("the opposite failure there, since it is nominally too small.")
 
 
 def init_config(dest: str) -> int:

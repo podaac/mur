@@ -170,7 +170,14 @@ def test_known_queues_are_offered_when_the_listing_is_denied(tmp_path, monkeypat
 def test_mrva_needs_more_than_a_64gb_queue_nominally_provides():
     """A queue named ...-64gb is likely 64 GB = 59.6 GiB, while mrva asks for
     65536 MiB = 64 GiB. The unit mismatch is easy to miss and would show up
-    as a job that never schedules."""
+    as a job that never schedules.
+
+    This matters more now, not less: 32vcpu-64gb is the queue that satisfies
+    the request, and it is the one whose workers cannot reach the Docker
+    socket, so mrva is parked on maap-dps-worker-64gb. If a job there dies on
+    resources rather than on Docker, this arithmetic is why, and the fix is to
+    lower ram_min in maap/mrva/algorithm_config.yml and redeploy.
+    """
     import yaml, pathlib as _p
     cfg = yaml.safe_load((_p.Path("maap/mrva/algorithm_config.yml")).read_text())
     gib_requested = cfg["ram_min"] / 1024

@@ -12,9 +12,10 @@
     "granule_staging": "direct",
     "_granule_staging_note": "direct = pass PO.DAAC's own s3:// hrefs to the job; the container fetches them itself, minting DAAC credentials from MAAP_PGT via common/bin/maap_credentials.py. This is the only behaviour now. 'workspace' is still accepted, for configs written when granules were copied into the workspace bucket first, and does the same thing.",
     "queues": {
-      "mur-mrva": "<a 64 GiB / 16 core queue, if different>"
+      "mur-mrva": "maap-dps-worker-64gb"
     },
-    "_queues_note": "maap.queue is the default for every module. maap.queues overrides it per process. Only MRVA needs a large worker (64 GiB / 16 cores); landice, iquam and l2p fit on 4-8 GiB. Run --list-queues to see what is available.",
+    "_queues_note": "maap.queue is the default for every module. maap.queues overrides it per process. Only MRVA needs a large worker; landice, iquam and l2p fit on 4-8 GiB. Run --list-queues to see what is available.",
+    "_queues_note_32vcpu": "maap-dps-worker-32vcpu-64gb is the queue that nominally fits mrva's 65536 MiB / 16 cores, but on 2026-09-22 every job submitted to it failed before starting: cwltool could not reach /var/run/docker.sock (permission denied on both the inspect and the pull). The identical landice package succeeded on the small queue minutes earlier, so it is the worker pool, not the package. mrva is on maap-dps-worker-64gb until MAAP ops fixes that. Watch for the opposite failure there: 64 GB is 59.6 GiB, less than mrva's ram_min of 65536 MiB.",
     "algorithm_version": null,
     "_algorithm_version_note": "null = use the version this checkout builds (mur_maap/version.py), which is almost always what you want. Set it only to run packages deployed from a different revision -- a rollback, say. MAAP keeps every version ever registered, so naming an old one here succeeds silently and runs old code."
   },
