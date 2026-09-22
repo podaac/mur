@@ -224,3 +224,85 @@ def test_the_orchestrator_names_the_day_when_resolving_iquam():
     assert len(entries) > 1, "IQUAM0 should span a window of days"
     assert len({e["path"] for e in entries}) == len(entries), \
         f"IQUAM0 entries reuse one href: {[e['path'] for e in entries]}"
+
+
+# --- the job-result body is not ours to predict ----------------------------
+#
+# result_prefix took the first value positionally, because the first response
+# ever observed had a single placeholder key. A real run then returned a body
+# whose first value was an int, and the day died with
+#
+#   'int' object has no attribute 'get'
+#
+# after all eleven of its jobs had succeeded.
+
+RESULT_PREFIX = "s3://s3.amazonaws.com:80/maap-dps/dps_output/mur-l2p_1/2.0.3/x/"
+
+
+def test_a_scalar_beside_the_entry_does_not_break_it():
+    """The reported crash, as a test."""
+    body = {"code": 200, "additionalProp1": {"links": [{"href": RESULT_PREFIX}]}}
+    assert outputs.result_prefix(body) == RESULT_PREFIX
+
+
+def test_a_scalar_first_in_iteration_order():
+    body = {"status": 404, "message": "still indexing",
+            "additionalProp1": {"links": [{"href": RESULT_PREFIX}]}}
+    assert outputs.result_prefix(body) == RESULT_PREFIX
+
+
+def test_the_original_observed_shape_still_works():
+    body = {"additionalProp1": {"links": [
+        {"href": "https://maap-dps.s3.amazonaws.com/x/"},
+        {"href": RESULT_PREFIX},
+        {"href": "https://console.aws.amazon.com/s3/buckets/x"},
+    ]}}
+    assert outputs.result_prefix(body) == RESULT_PREFIX
+
+
+def test_a_differently_named_key_works():
+    """The placeholder key was never guaranteed to be additionalProp1."""
+    assert outputs.result_prefix(
+        {"outputs_result": {"links": [{"href": RESULT_PREFIX}]}}) == RESULT_PREFIX
+
+
+def test_a_list_shaped_body_works():
+    assert outputs.result_prefix(
+        {"results": [{"links": [{"href": RESULT_PREFIX}]}]}) == RESULT_PREFIX
+
+
+def test_an_href_sitting_directly_on_the_entry_works():
+    assert outputs.result_prefix({"a": {"href": RESULT_PREFIX}}) == RESULT_PREFIX
+
+
+def test_only_s3_hrefs_are_returned():
+    """An https console URL is not machine-usable."""
+    body = {"a": {"links": [
+        {"href": "https://console.aws.amazon.com/s3/buckets/x"},
+        {"href": "https://maap-dps.s3.amazonaws.com/x/"},
+        {"href": RESULT_PREFIX},
+    ]}}
+    assert outputs.result_prefix(body) == RESULT_PREFIX
+
+
+def test_a_body_with_no_s3_link_reports_the_shape_it_saw():
+    """The next person needs to know what came back, not just that it failed."""
+    with pytest.raises(ValueError) as exc:
+        outputs.result_prefix({"status": 404, "message": "job not found"})
+    text = str(exc.value)
+    assert "404" in text and "message" in text, text
+
+
+def test_an_empty_body_is_still_an_error():
+    with pytest.raises(ValueError, match="empty"):
+        outputs.result_prefix({})
+
+
+def test_a_malformed_body_cannot_recurse_away():
+    """A cycle or a very deep structure must not blow the stack."""
+    deep = current = {}
+    for _ in range(50):
+        current["next"] = {}
+        current = current["next"]
+    with pytest.raises(ValueError):
+        outputs.result_prefix(deep)

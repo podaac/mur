@@ -61,23 +61,75 @@ def parse_dps_href(href: str) -> Tuple[str, str]:
     return head, tail
 
 
+def _s3_hrefs(node, depth: int = 0):
+    """Every s3:// href anywhere in a job-result body.
+
+    The observed response nests them as {<placeholder>: {"links": [{"href":
+    ...}]}}, but the placeholder key is not stable and the body can carry
+    other things beside it. Walking for the shape wanted, rather than
+    navigating a remembered path, survives both.
+    """
+    if depth > 6:                       # a malformed body must not recurse away
+        return
+    if isinstance(node, str):
+        if node.startswith("s3://"):
+            yield node
+    elif isinstance(node, dict):
+        for value in node.values():
+            yield from _s3_hrefs(value, depth + 1)
+    elif isinstance(node, (list, tuple)):
+        for value in node:
+            yield from _s3_hrefs(value, depth + 1)
+    # Anything else -- an int status code, None, a bool -- is simply not an
+    # href, and is skipped rather than being assumed to be a mapping.
+
+
 def result_prefix(result: Dict) -> str:
     """The s3:// href out of a get_job_result() body.
 
-    The top-level key is a placeholder name (`additionalProp1` in the
-    observed response), so the entry is taken positionally rather than by
-    name. Each entry carries several links -- an S3 website URL, an s3://
-    URI and a console URL -- and only the s3:// one is machine-usable.
+    Each entry carries several links -- an S3 website URL, an s3:// URI and a
+    console URL -- and only the s3:// one is machine-usable.
+
+    This used to take the first value positionally, on the grounds that the
+    top-level key is a placeholder (`additionalProp1` in the first response
+    ever observed). A real run then hit a body whose first value was an int,
+    and the day died on
+
+        'int' object has no attribute 'get'
+
+    after all eleven jobs had succeeded. The body shape is not ours to
+    predict, so this looks for what it needs anywhere in the structure
+    instead of assuming where it sits.
     """
     if not result:
         raise ValueError("empty job result")
-    entry = next(iter(result.values()))
-    links = entry.get("links") or []
-    for link in links:
-        href = link.get("href", "")
-        if href.startswith("s3://"):
-            return href
-    raise ValueError(f"no s3:// link in job result entry: {sorted(entry)}")
+
+    for href in _s3_hrefs(result):
+        return href
+
+    raise ValueError(
+        "no s3:// link anywhere in the job result. This is the body MAAP "
+        f"returned: {_describe(result)}")
+
+
+def _describe(node, depth: int = 0) -> str:
+    """A compact shape summary, for an error a human has to act on."""
+    if depth > 3:
+        return "..."
+    if isinstance(node, dict):
+        return "{" + ", ".join(
+            f"{k!r}: {_describe(v, depth + 1)}" for k, v in list(node.items())[:8]
+        ) + ("}" if len(node) <= 8 else ", ...}")
+    if isinstance(node, (list, tuple)):
+        inner = _describe(node[0], depth + 1) if node else ""
+        return f"[{inner}{', ...' if len(node) > 1 else ''}]"
+    if isinstance(node, str):
+        return repr(node if len(node) <= 60 else node[:57] + "...")
+    if isinstance(node, (int, float, bool)) or node is None:
+        # By value, not by type: an error saying 'status': 404 is actionable,
+        # 'status': int is not.
+        return repr(node)
+    return type(node).__name__
 
 
 # Per-process filename patterns, relative to the staged-out directory.
