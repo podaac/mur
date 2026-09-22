@@ -161,7 +161,13 @@ class MaapPyClient(MAAPClient):
         version: str,
         tag_prefix: str = "mur",
         workspace=None,
-        dedup: bool = True,
+        # Off, and not a tuning knob. MAAP's dedup does not reuse the
+        # earlier job's OUTPUTS -- it returns a new id with status "deduped"
+        # that has no DPS record, is absent from "View My Jobs", and 500s on
+        # get_job_result. Every job this pipeline submits has its outputs read
+        # by a later stage, so a deduped job is indistinguishable from a lost
+        # one. See _job_listing.
+        dedup: bool = False,
         poll_interval: float = 30.0,
         sensor_collections: Optional[Dict[str, List[str]]] = None,
         granule_workdir=None,
@@ -404,6 +410,7 @@ class MaapPyClient(MAAPClient):
         # and then lost -- and waiting forever for it is not better than
         # saying so.
         unindexed_since = {}
+        last_status = {}
 
         while pending:
             still = []
@@ -426,6 +433,7 @@ class MaapPyClient(MAAPClient):
                             "in %.0fs", type(exc).__name__, self.poll_interval)
                     continue
                 counts[status or "<empty>"] = counts.get(status or "<empty>", 0) + 1
+                last_status[jid] = status
 
                 if status == UNINDEXED:
                     first = unindexed_since.setdefault(jid, time.monotonic())
@@ -485,6 +493,18 @@ class MaapPyClient(MAAPClient):
         logger.info("  all %d job(s) terminal after %dm (%d failed)",
                     total, (time.monotonic() - started) // 60, len(failures))
 
+        # "deduped" is terminal, so the count above says 0 failed -- and then
+        # the run dies minutes later trying to read outputs that do not exist.
+        # Say it here, while the ids are still in hand.
+        deduped = [j for j in job_ids if last_status.get(j) in DEDUPED]
+        if deduped:
+            logger.warning(
+                "  %d job(s) came back DEDUPED and produced no output: %s. "
+                "MAAP reused an earlier identical submission rather than "
+                "running these, and a deduped job has no result to read. "
+                "Re-run without --dedup.",
+                len(deduped), ", ".join(j[:8] for j in deduped))
+
         if failures and raise_on_failure:
             # The ids alone are not a diagnosis, and this is where a run ends,
             # so say how to get one rather than leaving the reader holding
@@ -510,6 +530,19 @@ class MaapPyClient(MAAPClient):
             return self._prefix_cache[job_id], self._result_cache[job_id]
 
         status = self.get_job_status(job_id)
+        if status in DEDUPED:
+            # Verified against the API: status is 200 {"status": "deduped"},
+            # list_jobs does not contain the id, and get_job_result is a 500
+            # carrying MAAP's own traceback ("'NoneType' object has no
+            # attribute 'get'"). There is nothing to wait for and nothing to
+            # retry, so say so now rather than after 2.5 minutes of backoff.
+            raise RuntimeError(
+                f"job {job_id} was DEDUPED: MAAP matched it to an identical "
+                f"earlier submission instead of running it. A deduped job has "
+                f"no DPS output of its own -- it is absent from 'View My Jobs' "
+                f"and its result is a 500 -- so its outputs cannot be read. "
+                f"Submit with dedup=False (the default; --dedup turns it back "
+                f"on).")
         if status not in TERMINAL_OK:
             raise RuntimeError(
                 f"job {job_id} is {status!r}; results exist only once it is "

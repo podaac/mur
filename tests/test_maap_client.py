@@ -819,24 +819,46 @@ def test_an_ordinary_500_keeps_the_neutral_hint():
     assert "--no-dedup" not in hint
 
 
-def test_the_failure_message_names_the_job_status():
-    """'successful but no result' and 'deduped so no result' need different
-    responses, and the message has to distinguish them."""
-    mod = _no_result_delay()
+def test_a_deduped_job_fails_immediately_without_retrying():
+    """Confirmed against the live API:
+
+        get_job_status  200  {"status": "deduped"}
+        list_jobs            the id is not in it
+        get_job_result  500  "'NoneType' object has no attribute 'get'"
+
+    There is no DPS record behind a deduped id, so there is nothing to wait
+    for. Backing off for two and a half minutes first only delays the news.
+    """
     c, maap, _ = make_client(keys=LANDICE_KEYS)
     c._job_process["job-1"] = "mur-landice"
     maap.get_job_status = lambda jid: ResultResp({"status": "deduped"})
-    maap.get_job_result = lambda jid: ResultResp(
-        {"status": 500, "detail": "Failed to get job result"}, 500)
 
-    original = mod.RESULT_RETRY_DELAY
-    mod.RESULT_RETRY_DELAY = 0
-    try:
-        with pytest.raises(OSError) as err:
-            c.get_job_output("job-1", "landice_grid_p01")
-    finally:
-        mod.RESULT_RETRY_DELAY = original
+    calls = []
+    def result(jid):
+        calls.append(1)
+        return ResultResp({"status": 500, "detail": "x"}, 500)
+    maap.get_job_result = result
 
-    message = str(err.value)
-    assert "'deduped'" in message
-    assert "--no-dedup" in message
+    with pytest.raises(RuntimeError, match="DEDUPED"):
+        c.get_job_output("job-1", "landice_grid_p01")
+    assert calls == [], "a deduped job has no result; asking for it is waste"
+
+
+def test_dedup_is_off_by_default():
+    """Every job this pipeline submits has its outputs read by a later stage,
+    and a deduped job has none -- so dedup is not a safe default here."""
+    c, _, _ = make_client()
+    assert c.dedup is False
+
+
+def test_a_deduped_job_is_called_out_at_the_end_of_the_wait(caplog):
+    """wait_all counts deduped as terminal-OK, so the summary says 0 failed
+    and the run dies minutes later reading outputs that do not exist."""
+    import logging
+    c, maap, _ = make_client()
+    c.poll_interval = 0
+    maap.get_job_status = lambda jid: ResultResp({"status": "deduped"})
+    with caplog.at_level(logging.WARNING):
+        assert c.wait_all(["job-1", "job-2"]) == {}
+    assert "DEDUPED" in caplog.text
+    assert "job-1"[:8] in caplog.text

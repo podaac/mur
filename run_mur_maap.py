@@ -582,8 +582,10 @@ class MAAPOrchestrator:
                 # CONTENT while every input VALUE stays identical. MAAP dedups
                 # on the values, refuses to run, and the reprocess silently
                 # does not happen: the whole point of the stability window,
-                # quietly defeated. Only rewrites opt out, so an ordinary
-                # resubmission is still deduplicated.
+                # quietly defeated. Dedup is now off by default for a second
+                # and larger reason -- a deduped job has no readable output at
+                # all -- but this stays, so that --dedup cannot resurrect the
+                # first bug.
                 job = self.client.submit_job(
                     "mur-l2p", l2p_args,
                     tag=tags.job_tag("l2p", process_date, mode,
@@ -859,7 +861,7 @@ def build_client(config: Dict, args):
             "granule_staging", "workspace"),
         collection_filter=args.collection,
         poll_interval=args.poll_interval,
-        dedup=not args.no_dedup,
+        dedup=args.dedup,
     )
 
 
@@ -1155,8 +1157,15 @@ def parse_args(argv=None):
                         help="Obsolete; nothing is downloaded here any more.")
     parser.add_argument("--poll-interval", type=float, default=30.0,
                         help="Seconds between job status checks (default: %(default)s).")
+    parser.add_argument("--dedup", action="store_true",
+                        help="Let MAAP skip a job identical to an earlier one. "
+                             "Off by default: a deduped job returns a new id "
+                             "with no DPS output behind it, so its results "
+                             "cannot be read and the run fails on the next "
+                             "stage.")
     parser.add_argument("--no-dedup", action="store_true",
-                        help="Submit even if an identical job already ran.")
+                        help=argparse.SUPPRESS)   # now the default; kept so
+                                                  # existing commands still run
     parser.add_argument("--force-nrt", action="store_true",
                         help="Process every day in NRT mode.")
     parser.add_argument("--dry-run", action="store_true",
