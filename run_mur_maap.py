@@ -270,6 +270,7 @@ class MAAPOrchestrator:
         # Which of the four container stages to submit. Narrowing this is how
         # you test one mechanism without paying for 23 jobs.
         self.stages = validate_stages(stages)
+        self._warned_no_iquam = False
         self._today_fn = today_fn or mur_date.today
 
     def get_reference_today(self) -> datetime.date:
@@ -392,6 +393,25 @@ class MAAPOrchestrator:
             for data_day in mur_window.day_range_dates(
                 process_date, day_range, reference_today=reference_today
             ):
+                if sensor == "IQUAM0" and iquam_job is None:
+                    # No iquam job this run -- --execute excluded it. Omitting
+                    # the entries is the only coherent choice: get_job_output
+                    # needs a job, and a manifest naming a file nothing wrote
+                    # would fail MRVA on a missing input rather than on the
+                    # real reason.
+                    #
+                    # This is a scientifically degraded analysis, not a
+                    # configuration detail, so it is said once and loudly
+                    # rather than logged at debug and forgotten.
+                    if not self._warned_no_iquam:
+                        self._warned_no_iquam = True
+                        logger.warning(
+                            "  MRVA will run with NO in-situ buoy observations: "
+                            "iquam is not in --execute, so IQUAM0 contributes "
+                            "nothing to this analysis. The L4 product will "
+                            "differ from one built with buoys.")
+                    continue
+
                 if sensor == "IQUAM0":
                     # One iquam job writes its whole +/- window -- five .bii
                     # files for a day_range of 2 -- so the day has to be named

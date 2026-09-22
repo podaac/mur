@@ -819,3 +819,74 @@ def test_a_non_rewrite_still_dedups():
     for (pid, args), dedup in zip(client.submitted, client.dedups):
         if pid == "mur-l2p" and str(args.get("rewrite")) != "1":
             assert dedup is None, "a plain resubmission should keep dedup"
+
+
+# --- running without buoy data ---------------------------------------------
+#
+# NOAA's monthly iQuam file can be corrupt: the 2026-09 file had 11 of its 32
+# variables unreadable ("bad object header version number"), including every
+# field makedailyiquam reads -- day, hour, lon, sst, platform_type. Nothing in
+# this pipeline can fix that, and it blocks every analysis day in that month.
+#
+# --execute without iquam lets the rest of the pipeline run meanwhile. MRVA
+# fans in sensors from a manifest, so omitting IQUAM0 is expressible -- but it
+# is a degraded analysis and must say so.
+
+def test_mrva_runs_without_iquam_when_it_is_excluded():
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=["landice", "l2p", "mrva"])
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert any(pid == "mur-mrva" for pid, _ in client.submitted)
+
+
+def test_the_manifest_has_no_iquam_entries_when_iquam_did_not_run():
+    """An entry would name a file nothing wrote, and MRVA would fail on a
+    missing input rather than on the real reason."""
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=["landice", "l2p", "mrva"])
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    manifests = [m for m in client.written_manifests if "mrva" in str(m[0])]
+    assert manifests, "no MRVA manifest written"
+    sensors = {f["sensor"] for f in manifests[-1][1]["files"]}
+    assert "IQUAM0" not in sensors, sensors
+    assert sensors, "the manifest lost every sensor, not just IQUAM0"
+
+
+def test_running_without_buoys_warns_loudly(caplog):
+    import logging
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=["landice", "l2p", "mrva"])
+    with caplog.at_level(logging.WARNING):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert "NO in-situ buoy observations" in caplog.text
+
+
+def test_the_buoy_warning_is_said_once(caplog):
+    """It fires per IQUAM0 day in the fan-in window; seven copies of the same
+    warning trains people to scroll past it."""
+    import logging
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=["landice", "l2p", "mrva"])
+    with caplog.at_level(logging.WARNING):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert caplog.text.count("NO in-situ buoy observations") == 1
+
+
+def test_including_iquam_still_puts_it_in_the_manifest():
+    """The normal path is unchanged."""
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    manifests = [m for m in client.written_manifests if "mrva" in str(m[0])]
+    sensors = {f["sensor"] for f in manifests[-1][1]["files"]}
+    assert "IQUAM0" in sensors
