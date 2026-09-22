@@ -69,6 +69,14 @@ TRANSIENT_ERRORS = (OSError,)
 API_RETRIES = 4
 API_RETRY_DELAY = 5.0
 
+# The result fetch gets a longer budget than an ordinary call. It is
+# asked once per job, at the end of a wait that may have run half an
+# hour, and losing it throws away every job behind it -- so it is worth
+# waiting out an indexing lag or a server-side blip rather than giving
+# up in thirty seconds.
+RESULT_RETRIES = 6
+RESULT_RETRY_DELAY = 10.0
+
 
 def _retrying(what: str, call, *, retries: Optional[int] = None,
               delay: Optional[float] = None):
@@ -489,9 +497,9 @@ class MaapPyClient(MAAPClient):
                 f"job {job_id} is {status!r}; results exist only once it is "
                 f"terminal (asking early returns HTTP 500)")
 
-        resp = _retrying(f"result of {job_id}",
-                         lambda: self.maap.get_job_result(job_id))
-        body = resp.json() if resp.content else {}
+        body = _retrying(f"result of {job_id}",
+                         lambda: self._fetch_result_body(job_id),
+                         retries=RESULT_RETRIES, delay=RESULT_RETRY_DELAY)
         href = _outputs.result_prefix(body)
         bucket, prefix = _outputs.parse_dps_href(href)
         keys = [k[len(f"s3://{bucket}/"):] for k in
@@ -500,6 +508,36 @@ class MaapPyClient(MAAPClient):
         self._prefix_cache[job_id] = prefix
         self._result_cache[job_id] = keys
         return prefix, keys
+
+    def _fetch_result_body(self, job_id: str) -> Dict:
+        """One get_job_result call, with the HTTP code honoured.
+
+        The same lesson get_job_status learned, in the other half of the API.
+        A failed result fetch comes back as a 200-shaped body:
+
+            {"status": 500, "detail": "Failed to get job result of job with
+             id: f9799088-..."}
+
+        and handing that to result_prefix reports "no s3:// link anywhere in
+        the job result" -- which reads as "the job produced nothing" and sends
+        the operator to the logs of a job that was perfectly fine. It cost a
+        run that had ten successful jobs behind it.
+
+        A 5xx is the API failing, and a 404 on a job already known terminal is
+        the result not being indexed yet; both are worth another try, so they
+        are raised as transient and _retrying backs off.
+        """
+        resp = self.maap.get_job_result(job_id)
+        code = getattr(resp, "status_code", 200)
+        body = resp.json() if resp.content else {}
+        if code == 404 or code >= 500:
+            detail = body.get("detail") if isinstance(body, dict) else None
+            raise OSError(
+                f"MAAP returned HTTP {code} asking for the result of job "
+                f"{job_id}" + (f": {detail}" if detail else "")
+                + ". The job itself may be fine -- this is the result "
+                  "lookup failing.")
+        return body
 
     def get_job_output(self, job_id: str, output_name: str, **fmt) -> str:
         """The s3:// href of one named output of a completed job."""

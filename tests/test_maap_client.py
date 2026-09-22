@@ -669,3 +669,116 @@ def test_retry_settings_are_read_at_call_time():
         assert len(calls) == 2, "the overridden retry count was ignored"
     finally:
         mod.API_RETRY_DELAY, mod.API_RETRIES = original_delay, original_retries
+
+
+# --- the result fetch must honour the HTTP code too -------------------------
+#
+# A real run: ten jobs succeeded over twenty-five minutes, then the day died on
+#
+#   2026-09-21 FAILED: no s3:// link anywhere in the job result. This is the
+#   body MAAP returned: {'status': 500, 'detail': 'Failed to get job result of
+#   job with id: f9799088-...'}
+#
+# which reads as "landice produced nothing" and sends the operator to the logs
+# of a job that had in fact finished cleanly. The job was fine; the result
+# lookup 500'd, and the 500 body was parsed as though it were a result.
+
+class ResultResp:
+    def __init__(self, body, status=200):
+        self._body, self.status_code = body, status
+        self.content = b"x"
+    def json(self):
+        return self._body
+
+
+FIVE_HUNDRED = {"status": 500,
+                "detail": "Failed to get job result of job with id: j"}
+
+
+def _no_result_delay():
+    import mur_maap.client as mod
+    return mod
+
+
+def test_a_500_on_the_result_is_retried_not_parsed_as_a_result():
+    mod = _no_result_delay()
+    c, maap, s3 = make_client(keys=LANDICE_KEYS)
+    c._job_process["job-1"] = "mur-landice"
+    good = maap.get_job_result("job-1").json()
+    calls = []
+
+    def result(jid):
+        calls.append(1)
+        return (ResultResp(FIVE_HUNDRED, 500) if len(calls) < 3
+                else ResultResp(good))
+
+    maap.get_job_result = result
+    original = mod.RESULT_RETRY_DELAY
+    mod.RESULT_RETRY_DELAY = 0
+    try:
+        href = c.get_job_output("job-1", "landice_grid_p01")
+    finally:
+        mod.RESULT_RETRY_DELAY = original
+    assert href.startswith("s3://")
+    assert len(calls) == 3
+
+
+def test_a_persistent_500_says_the_api_failed_not_that_the_job_was_empty():
+    mod = _no_result_delay()
+    c, maap, _ = make_client(keys=LANDICE_KEYS)
+    c._job_process["job-1"] = "mur-landice"
+    maap.get_job_result = lambda jid: ResultResp(FIVE_HUNDRED, 500)
+
+    original = mod.RESULT_RETRY_DELAY
+    mod.RESULT_RETRY_DELAY = 0
+    try:
+        with pytest.raises(OSError) as err:
+            c.get_job_output("job-1", "landice_grid_p01")
+    finally:
+        mod.RESULT_RETRY_DELAY = original
+
+    message = str(err.value)
+    assert "HTTP 500" in message
+    assert "result" in message and "lookup failing" in message
+    assert "no s3:// link" not in message, \
+        "blaming the job for an API failure is what cost the last run"
+
+
+def test_a_404_on_the_result_of_a_terminal_job_is_also_retried():
+    """A job can go terminal a moment before its result is indexed."""
+    mod = _no_result_delay()
+    c, maap, _ = make_client(keys=LANDICE_KEYS)
+    c._job_process["job-1"] = "mur-landice"
+    good = maap.get_job_result("job-1").json()
+    calls = []
+
+    def result(jid):
+        calls.append(1)
+        return (ResultResp({"status": 404, "detail": "not found"}, 404)
+                if len(calls) < 2 else ResultResp(good))
+
+    maap.get_job_result = result
+    original = mod.RESULT_RETRY_DELAY
+    mod.RESULT_RETRY_DELAY = 0
+    try:
+        assert c.get_job_output("job-1", "landice_grid_p01").startswith("s3://")
+    finally:
+        mod.RESULT_RETRY_DELAY = original
+    assert len(calls) == 2
+
+
+def test_a_genuinely_empty_result_still_says_so():
+    """The old message is right when the body really is a result."""
+    c, maap, _ = make_client(keys=LANDICE_KEYS)
+    c._job_process["job-1"] = "mur-landice"
+    maap.get_job_result = lambda jid: ResultResp({"outputs": {"n": 3}})
+    with pytest.raises(ValueError, match="no s3:// link"):
+        c.get_job_output("job-1", "landice_grid_p01")
+
+
+def test_the_result_fetch_waits_longer_than_an_ordinary_call():
+    """It is asked once per job at the end of a long wait, and losing it
+    throws away every job behind it."""
+    import mur_maap.client as mod
+    assert mod.RESULT_RETRIES > mod.API_RETRIES
+    assert mod.RESULT_RETRY_DELAY > mod.API_RETRY_DELAY
