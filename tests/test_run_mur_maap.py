@@ -598,21 +598,28 @@ def test_a_day_with_no_granules_does_not_submit_l2p():
 
     orch = MAAPOrchestrator(
         _single_sensor_config(), client, today_fn=lambda: datetime.date(2026, 8, 9))
-    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    with pytest.raises(RuntimeError, match="no sensor inputs"):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
 
     assert [p for p, _ in client.submitted if p == "mur-l2p"] == []
 
 
-def test_an_empty_day_is_absent_from_the_mrva_manifest():
+def test_mrva_is_not_submitted_with_nothing_to_analyse():
+    """Previously this wrote an empty manifest and submitted MRVA anyway. The
+    job then staged nothing and died inside MATLAB, which is a slower and far
+    less legible way to learn that no BIC was ever produced."""
     client = FakeMAAPClient()
     client.stac_search = lambda collections, start, end: []
 
     orch = MAAPOrchestrator(
         _single_sensor_config(), client, today_fn=lambda: datetime.date(2026, 8, 9))
-    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    with pytest.raises(RuntimeError, match="not one BIC or IQUAM0"):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
 
-    _, manifest = client.written_manifests[-1]
-    assert [e for e in manifest["files"] if e["sensor"] == "AMSR2R"] == []
+    assert [p for p, _ in client.submitted if p == "mur-mrva"] == []
+    assert not any("manifests/mrva" in prefix
+                   for prefix, _ in client.written_manifests), \
+        "a manifest for a job that is refused is just litter"
 
 
 def test_a_sensor_with_granules_is_unaffected():
@@ -648,16 +655,69 @@ def test_an_empty_selection_is_rejected():
         rmm.validate_stages([" ", ""])
 
 
-def test_mrva_without_its_inputs_is_refused_before_anything_is_submitted():
-    """MRVA reads landice's outputs and the BICs from THIS run's jobs. Running
-    it alone is not a smaller run; it crashes after the others are paid for."""
-    with pytest.raises(SystemExit, match="mrva needs"):
-        rmm.validate_stages(["mrva"])
-    with pytest.raises(SystemExit, match="mrva needs"):
-        rmm.validate_stages(["mrva", "l2p"])
-    # With both present it is fine.
+def test_mrva_may_now_run_alone_against_what_is_in_the_bucket():
+    """This used to be refused, and the reason was sound at the time: MRVA
+    read landice's outputs and the BICs from THIS run's job results, so
+    running it alone crashed after the other jobs were paid for.
+
+    Promotion removed that dependency -- those outputs now sit at canonical
+    keys -- and MRVA is exactly the stage worth re-running on its own: it is
+    the expensive one, and re-attempting it should not mean re-running twenty
+    L2P jobs that already succeeded.
+    """
+    assert rmm.validate_stages(["mrva"]) == {"mrva"}
+    assert rmm.validate_stages(["mrva", "l2p"]) == {"mrva", "l2p"}
     assert rmm.validate_stages(["mrva", "l2p", "landice"]) == {
         "mrva", "l2p", "landice"}
+
+
+def test_mrva_alone_still_needs_landice_in_the_bucket(orchestrator):
+    """Permitting the selection is not promising the inputs exist.
+
+    The BICs are seeded so the run gets past the sensor-inputs check and
+    reaches the landice one -- otherwise this would pass for the wrong reason.
+    """
+    from mur_maap import paths
+    client = orchestrator.client
+    root = "s3://maap-ops-workspace/testuser"
+    for sensor in ("AMSR2R", "MODISA"):
+        for offset in range(-3, 4):
+            day = datetime.date(2026, 8, 6) + datetime.timedelta(days=offset)
+            client.existing_objects.add(
+                paths.href(root, paths.bic_key(sensor, day)))
+
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=["mrva"])
+    with pytest.raises(RuntimeError, match="no landice outputs"):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert [p for p, _ in client.submitted if p == "mur-mrva"] == []
+
+
+def test_mrva_alone_runs_when_the_bucket_has_everything(orchestrator):
+    """The point of the change: re-attempt the expensive stage on its own."""
+    from mur_maap import paths
+    client = orchestrator.client
+    root = "s3://maap-ops-workspace/testuser"
+    day0 = datetime.date(2026, 8, 6)
+    for sensor in ("AMSR2R", "MODISA"):
+        for offset in range(-3, 4):
+            day = day0 + datetime.timedelta(days=offset)
+            client.existing_objects.add(
+                paths.href(root, paths.bic_key(sensor, day)))
+    for output_name in paths.LANDICE_OUTPUTS:
+        client.existing_objects.add(paths.href(
+            root, paths.landice_key(output_name, day0,
+                                    paths.landice_filename(output_name, day0))))
+
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=["mrva"])
+    orch.run_day(day0, mode="nrt")
+
+    submitted = [p for p, _ in client.submitted]
+    assert submitted == ["mur-mrva"], \
+        "nothing upstream should be resubmitted; it is all already there"
 
 
 def test_stages_are_case_and_whitespace_tolerant():

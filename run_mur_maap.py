@@ -216,11 +216,20 @@ ALL_STAGES = ("landice", "iquam", "l2p", "mrva")
 def validate_stages(stages: Optional[Iterable[str]]) -> set:
     """Normalize a stage selection, rejecting one that cannot run.
 
-    MRVA consumes landice's three outputs and every sensor's BIC, and it reads
-    them from THIS run's job results -- get_job_output(landice_job, ...) needs
-    a landice_job. Excluding a stage MRVA depends on is not a smaller run, it
-    is a crash partway through, after the other jobs have already been
-    submitted and paid for. Say so before anything is submitted.
+    MRVA consumes landice's three outputs and every sensor's BIC. It used to
+    read them from THIS run's job results, so excluding landice or l2p was not
+    a smaller run but a crash partway through -- and that was rejected here.
+
+    Promotion changed it. Those outputs now live at canonical workspace keys,
+    so MRVA can be run alone against what is already in the bucket. That is
+    worth allowing, because MRVA is the expensive stage and the one most
+    likely to need another attempt: re-running it should not mean re-running
+    twenty L2P jobs that already succeeded.
+
+    What is NOT allowed is submitting MRVA with nothing to analyse. run_day
+    checks the assembled manifest and refuses an empty one, which is a cheaper
+    and clearer failure than a job that starts, stages nothing, and dies in
+    MATLAB.
     """
     if stages is None:
         return set(ALL_STAGES)
@@ -232,14 +241,6 @@ def validate_stages(stages: Optional[Iterable[str]]) -> set:
             f"Choose from: {', '.join(ALL_STAGES)}")
     if not wanted:
         raise SystemExit("--execute: no stages selected.")
-    if "mrva" in wanted:
-        missing = {"landice", "l2p"} - wanted
-        if missing:
-            raise SystemExit(
-                f"--execute: mrva needs {', '.join(sorted(missing))} in the "
-                f"same run.\nIt reads their outputs from this run's jobs, so "
-                f"excluding them does not make\na smaller run -- it makes one "
-                f"that fails after submitting the rest.")
     return wanted
 
 
@@ -741,6 +742,12 @@ class MAAPOrchestrator:
         sensor_manifest_files = self._build_sensor_inputs_manifest(
             process_date, bic_results, iquam_cached, reference_today
         )
+        if "mrva" in self.stages and not sensor_manifest_files:
+            raise RuntimeError(
+                f"no sensor inputs for {process_date}: not one BIC or IQUAM0 "
+                f"file was found, in this run's outputs or already in the "
+                f"bucket. MRVA would stage nothing and fail in MATLAB, so it "
+                f"is not submitted. Run l2p (and iquam) for this day first.")
         sensor_inputs_manifest_href = self.client.write_manifest(
             paths.mrva_manifest_key(process_date), {"files": sensor_manifest_files}
         )
