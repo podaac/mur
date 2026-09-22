@@ -233,3 +233,51 @@ def test_the_plan_excludes_future_days(capsys):
     out = capsys.readouterr().out
     # day_range [2,2] around 2026-09-17 spans 15th-19th; the 19th is future.
     assert "4 sensor-day(s)" in out
+
+
+# --- --queue must beat the per-process map ---------------------------------
+#
+# MRVA failed with "permission denied ... /var/run/docker.sock" -- cwltool
+# could not reach Docker at all on the worker, so nothing about the image or
+# the CWL was reachable as a cause. The queue is the one variable that differs
+# between MRVA and the three stages that work, and testing that means putting
+# a known-good stage on MRVA's queue. --queue only replaced maap.queue, so
+# maap.queues["mur-mrva"] kept sending MRVA back to its own pool and the
+# experiment could not be run at all.
+
+def test_an_explicit_queue_overrides_the_per_process_map(monkeypatch):
+    import run_mur_maap
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("mur_maap.client.MaapPyClient", FakeClient)
+    config = {"maap": {"queue": "small", "queues": {"mur-mrva": "huge"},
+                       "workspace_root": "s3://bucket/user"},
+              "l2p": {"active_sensors": [], "sensors": {}}}
+    args = run_mur_maap.parse_args(
+        ["--config", "x.json", "--queue", "forced"])
+    run_mur_maap.build_client(config, args)
+    assert captured["queue"] == "forced"
+    assert not captured["queues"], \
+        "a per-process queue would send MRVA back to the pool under test"
+
+
+def test_without_the_flag_the_per_process_map_still_applies(monkeypatch):
+    import run_mur_maap
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("mur_maap.client.MaapPyClient", FakeClient)
+    config = {"maap": {"queue": "small", "queues": {"mur-mrva": "huge"},
+                       "workspace_root": "s3://bucket/user"},
+              "l2p": {"active_sensors": [], "sensors": {}}}
+    args = run_mur_maap.parse_args(["--config", "x.json"])
+    run_mur_maap.build_client(config, args)
+    assert captured["queue"] == "small"
+    assert captured["queues"] == {"mur-mrva": "huge"}

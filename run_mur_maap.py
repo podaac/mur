@@ -960,7 +960,13 @@ def build_client(config: Dict, args):
         version=version,
         sensor_collections=sensor_collections,
         granule_workdir=args.granule_workdir,
-        queues=maap_cfg.get("queues"),
+        # An explicit --queue wins outright, per-process overrides included.
+        # Without this it only replaced maap.queue, so maap.queues["mur-mrva"]
+        # still sent MRVA to its own pool -- and "run this stage on that queue"
+        # is the single reason anyone passes the flag. It is how you find out
+        # whether a failure belongs to the job or to the worker pool: put a
+        # small, known-good job on the suspect queue and see what happens.
+        queues=None if args.queue else maap_cfg.get("queues"),
         granule_staging=args.granule_staging or maap_cfg.get(
             "granule_staging", "workspace"),
         collection_filter=args.collection,
@@ -1250,7 +1256,11 @@ def parse_args(argv=None):
                              "l2p while including mrva will fail.")
     parser.add_argument("--sensors", help="Comma-separated sensor subset.")
     parser.add_argument("--collection", help="Only this PO.DAAC collection.")
-    parser.add_argument("--queue", help="DPS queue (overrides maap.queue).")
+    parser.add_argument("--queue",
+                        help="Force every job onto this DPS queue, overriding "
+                             "both maap.queue and maap.queues. Mainly a "
+                             "diagnostic: it lets a known-good stage be run on "
+                             "a suspect worker pool.")
     parser.add_argument("--granule-staging", choices=("workspace", "direct"),
                         help="Obsolete; both values do the same thing. The "
                              "container fetches PO.DAAC granules itself, minting "
