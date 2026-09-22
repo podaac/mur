@@ -117,10 +117,73 @@ def prior_csp_href(workspace_root: str, process_date: datetime.date) -> str:
     return href(workspace_root, csp_key(prior_day))
 
 
+# --- landice (daily ice fields, MRVA input) --------------------------------
+#
+# Confirmed against a real mur-landice job (2026/164): DPS stages out
+# p01/<year>/ and p011/<year>/, with the two binaries gzipped and the file
+# list plain. As with BICs, the compressed form is probed first and the real
+# basename is carried into the key rather than assumed.
+
+LANDICE_OUTPUTS = {
+    #  output name           subdir  basename template                gzipped
+    "landice_ice_p011":      ("p011", "Global_ice_{year}_{doy}.bip",   True),
+    "landice_grid_p01":      ("p01",  "landiceP01_{year}_{doy}.gds",   True),
+    "landice_icefiles_p011": ("p011", "icefiles_{year}_{doy}.txt",     False),
+}
+
+
+def landice_filename(output_name: str, day: datetime.date,
+                     compressed: bool = True) -> str:
+    """The canonical name for one landice output.
+
+    Promotion goes through here rather than reusing the DPS object's own
+    basename, so the name written is by construction one of the names
+    landice_filenames() probes for. Deriving it from the source instead would
+    let the two drift apart, and a cache whose key does not match its probe is
+    not a cache -- it is a silent, permanent resubmission (which is how the
+    `s3://mur/...` bucket bug hid, above).
+    """
+    _sub, template, gzipped = LANDICE_OUTPUTS[output_name]
+    base = template.format(year=day.year, doy=f"{_doy(day):03d}")
+    return base + ".gz" if (gzipped and compressed) else base
+
+
+def landice_filenames(output_name: str, day: datetime.date) -> List[str]:
+    """Probe order for one landice output: compressed first, then plain."""
+    if LANDICE_OUTPUTS[output_name][2]:
+        return [landice_filename(output_name, day, True),
+                landice_filename(output_name, day, False)]
+    return [landice_filename(output_name, day, False)]
+
+
+def landice_key(output_name: str, day: datetime.date, filename: str) -> str:
+    subdir = LANDICE_OUTPUTS[output_name][0]
+    return f"{MUR_ROOT}/landice/{subdir}/{day.year}/{filename}"
+
+
+def landice_candidate_hrefs(workspace_root: str, output_name: str,
+                            day: datetime.date) -> List[str]:
+    return [href(workspace_root, landice_key(output_name, day, name))
+            for name in landice_filenames(output_name, day)]
+
+
 # --- iQuam (IQUAM0 fan-in input) -------------------------------------------
 
 def iquam_filename(data_day: datetime.date) -> str:
     return f"Global_IQUAM0_{data_day.year}_{_doy(data_day):03d}.bii"
+
+
+def iquam_key(data_day: datetime.date) -> str:
+    return f"{MUR_ROOT}/iquam/{data_day.year}/{iquam_filename(data_day)}"
+
+
+def iquam_href(workspace_root: str, data_day: datetime.date) -> str:
+    """Canonical href for one day's buoy file.
+
+    The year comes from the data day, matching iquam_relative_path: one job
+    writes its whole +/- window, which can straddle a year boundary.
+    """
+    return href(workspace_root, iquam_key(data_day))
 
 
 def iquam_relative_path(data_day: datetime.date) -> str:

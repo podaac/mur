@@ -383,10 +383,17 @@ def test_run_day_mrva_gets_named_static_and_landice_hrefs_not_raw_lists(orchestr
         "s3://podaac-bucket/mur/static-resources/landice/CylinderP01_edge.bip"
     assert mrva_args["seasonal_file"] == \
         "s3://podaac-bucket/mur/static-resources/seasonal/mur_218.nc"
-    landice_job_id = orchestrator.client.job_id_for("mur-landice")
-    assert mrva_args["landice_ice_p011_file"] == f"s3://podaac/output/{landice_job_id}/landice_ice_p011"
-    assert mrva_args["landice_grid_p01_file"] == f"s3://podaac/output/{landice_job_id}/landice_grid_p01"
-    assert mrva_args["landice_icefiles_p011_file"] == f"s3://podaac/output/{landice_job_id}/landice_icefiles_p011"
+    # Canonical workspace keys, not the DPS job path they came out of. A DPS
+    # path is only meaningful while you still hold the job id, so MRVA is
+    # handed the promoted copy -- which is also what lets tomorrow's run find
+    # these without resubmitting landice.
+    root = "s3://maap-ops-workspace/testuser/mur/landice"
+    assert mrva_args["landice_ice_p011_file"] == \
+        f"{root}/p011/2026/Global_ice_2026_218.bip"
+    assert mrva_args["landice_grid_p01_file"] == \
+        f"{root}/p01/2026/landiceP01_2026_218.gds"
+    assert mrva_args["landice_icefiles_p011_file"] == \
+        f"{root}/p011/2026/icefiles_2026_218.txt"
     # --l4-reference-root must NOT be passed: it names a directory tree, and
     # localize.sh's `aws s3 cp` has no --recursive, so an s3:// value passes
     # through unfetched and mrva's verify_inputs_exist rejects it as a missing
@@ -890,3 +897,105 @@ def test_including_iquam_still_puts_it_in_the_manifest():
     manifests = [m for m in client.written_manifests if "mrva" in str(m[0])]
     sensors = {f["sensor"] for f in manifests[-1][1]["files"]}
     assert "IQUAM0" in sensors
+
+
+# --- reuse instead of resubmit ---------------------------------------------
+#
+# MAAP's dedup was meant to stop a re-run from redoing finished work. It does
+# the opposite of what a pipeline needs: it skips the job AND discards the
+# handle on the earlier result -- a new id with no DPS record, absent from
+# "View My Jobs", 500 on get_job_result. Confirmed against the live API on two
+# consecutive failed runs, both landice, because landice's inputs never vary.
+#
+# The answer is the one L2P already used: promote each output to a canonical
+# key, then look before submitting. The object's existence IS the record, so
+# there is no second source of truth to lose or reconcile.
+
+def test_landice_is_promoted_to_a_canonical_key(orchestrator):
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    dests = [dest for _src, dest in orchestrator.client.copied]
+    assert "s3://maap-ops-workspace/testuser/mur/landice/p011/2026/" \
+           "Global_ice_2026_218.bip" in dests
+    assert "s3://maap-ops-workspace/testuser/mur/landice/p01/2026/" \
+           "landiceP01_2026_218.gds" in dests
+
+
+def test_a_second_run_does_not_resubmit_landice(orchestrator):
+    """The bug in one line: landice ran again on every single invocation."""
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    first = [pid for pid, _ in orchestrator.client.submitted]
+    assert first.count("mur-landice") == 1
+
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    second = [pid for pid, _ in orchestrator.client.submitted]
+    assert second.count("mur-landice") == 1, \
+        "landice was already in the bucket; running it again is pure waste"
+
+
+def test_a_second_run_still_hands_mrva_the_landice_files(orchestrator):
+    """Skipping the job must not mean skipping the inputs."""
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    mrva_args = orchestrator.client.submitted[-1][1]
+    root = "s3://maap-ops-workspace/testuser/mur/landice"
+    assert mrva_args["landice_ice_p011_file"] == \
+        f"{root}/p011/2026/Global_ice_2026_218.bip"
+    assert mrva_args["landice_grid_p01_file"] == \
+        f"{root}/p01/2026/landiceP01_2026_218.gds"
+
+
+def test_a_partial_landice_cache_reruns_the_job(orchestrator):
+    """All three or nothing. Skipping on a partial set would submit MRVA with
+    a missing input, which fails later and less clearly than re-running."""
+    orchestrator.client.existing_objects.add(
+        "s3://maap-ops-workspace/testuser/mur/landice/p011/2026/"
+        "Global_ice_2026_218.bip.gz")
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert [pid for pid, _ in orchestrator.client.submitted].count(
+        "mur-landice") == 1
+
+
+def test_iquam_days_are_promoted_one_file_per_day(orchestrator):
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    dests = [d for _s, d in orchestrator.client.copied
+             if "/mur/iquam/" in d]
+    assert len(dests) == len(set(dests)) and len(dests) > 1, \
+        "one iquam job writes its whole window; each day is its own object"
+    assert "s3://maap-ops-workspace/testuser/mur/iquam/2026/" \
+           "Global_IQUAM0_2026_218.bii" in dests
+
+
+def test_a_second_run_does_not_resubmit_iquam(orchestrator):
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert [pid for pid, _ in orchestrator.client.submitted].count(
+        "mur-iquam") == 1
+
+
+def test_the_manifest_uses_the_canonical_iquam_hrefs_on_a_rerun(orchestrator):
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    _prefix, manifest = orchestrator.client.written_manifests[-1]
+    iquam = [f for f in manifest["files"] if f["sensor"] == "IQUAM0"]
+    assert iquam, "the buoys must still be in the manifest"
+    for entry in iquam:
+        assert entry["path"].startswith(
+            "s3://maap-ops-workspace/testuser/mur/iquam/")
+
+
+def test_a_failed_landice_job_is_not_promoted(orchestrator):
+    """Promoting a failed job's output would poison the cache: every later
+    run would reuse it and never notice."""
+    client = orchestrator.client
+    real_submit = client.submit_job
+
+    def submit(process_id, args, *, tag=None, dedup=None):
+        job = real_submit(process_id, args, tag=tag, dedup=dedup)
+        if process_id == "mur-landice":
+            client.failing_jobs.add(job)
+        return job
+
+    client.submit_job = submit
+    with pytest.raises(RuntimeError):
+        orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert not [d for _s, d in client.copied if "/mur/landice/" in d]

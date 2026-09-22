@@ -121,3 +121,41 @@ def test_prior_csp_href_points_at_the_previous_day():
 def test_prior_csp_href_crosses_a_year_boundary():
     assert paths.prior_csp_href(WS, datetime.date(2026, 1, 1)) == \
         f"{WS}/mur/csp/2025/2025123109_MRVA4_Global.c06"
+
+
+# --- a cache whose key does not match its probe is not a cache -------------
+
+def test_every_promoted_landice_name_is_a_name_the_probe_looks_for():
+    """The whole reuse mechanism rests on this one equality. If promotion
+    writes `Global_ice_2026_218.bip.gz` and the probe asks for
+    `Global_ice_2026.bip.gz`, nothing errors -- landice simply resubmits
+    forever, silently, exactly as it did before."""
+    day = datetime.date(2026, 8, 6)
+    for output_name in paths.LANDICE_OUTPUTS:
+        probed = paths.landice_filenames(output_name, day)
+        for compressed in (True, False):
+            written = paths.landice_filename(output_name, day, compressed)
+            assert written in probed, (
+                f"{output_name}: promotion writes {written!r}, which "
+                f"_find_cached_landice never asks for {probed!r}")
+
+
+def test_the_compressed_landice_form_is_probed_first():
+    day = datetime.date(2026, 8, 6)
+    names = paths.landice_filenames("landice_ice_p011", day)
+    assert names == ["Global_ice_2026_218.bip.gz", "Global_ice_2026_218.bip"]
+
+
+def test_the_icefiles_list_is_never_looked_for_gzipped():
+    """DPS stages it plain -- confirmed on a real job (2026/164)."""
+    names = paths.landice_filenames("landice_icefiles_p011",
+                                    datetime.date(2026, 8, 6))
+    assert names == ["icefiles_2026_218.txt"]
+
+
+def test_an_iquam_day_keys_off_the_data_year_not_the_analysis_year():
+    """One job writes its whole +/- window, which can straddle 1 January."""
+    assert paths.iquam_key(datetime.date(2025, 12, 31)).startswith(
+        "mur/iquam/2025/")
+    assert paths.iquam_key(datetime.date(2026, 1, 1)).startswith(
+        "mur/iquam/2026/")

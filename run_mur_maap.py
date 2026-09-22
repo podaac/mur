@@ -337,6 +337,76 @@ class MAAPOrchestrator:
         )
         return self.client.copy_object(src, dest)
 
+    def _find_cached_landice(
+        self, process_date: datetime.date
+    ) -> Optional[Dict[str, str]]:
+        """Canonical hrefs for a day's landice outputs, or None if incomplete.
+
+        All three or nothing: MRVA needs every one, and a partial set would
+        skip the job and then fail on a missing input, which is a worse
+        failure than simply re-running landice.
+        """
+        found = {}
+        for output_name in paths.LANDICE_OUTPUTS:
+            for candidate in paths.landice_candidate_hrefs(
+                    self.workspace_root, output_name, process_date):
+                if self.client.object_exists(candidate):
+                    found[output_name] = candidate
+                    break
+            else:
+                return None
+        return found
+
+    def _promote_landice(
+        self, process_date: datetime.date, job: str
+    ) -> Dict[str, str]:
+        """Copy a fresh landice job's outputs to canonical keys.
+
+        Same reason as _promote_bic: DPS chooses where a job's outputs land,
+        that path is not reconstructable, and it is only meaningful while you
+        still hold the job id. Left where DPS put them, today's ice fields are
+        invisible to tomorrow's run -- so landice was resubmitted on every
+        single run, which is exactly the job MAAP's dedup then swallowed.
+        """
+        promoted = {}
+        for output_name in paths.LANDICE_OUTPUTS:
+            src = self.client.get_job_output(job, output_name)
+            dest = paths.href(
+                self.workspace_root,
+                paths.landice_key(
+                    output_name, process_date,
+                    paths.landice_filename(output_name, process_date,
+                                           compressed=src.endswith(".gz"))))
+            promoted[output_name] = self.client.copy_object(src, dest)
+        return promoted
+
+    def _iquam_window_days(
+        self, process_date: datetime.date, reference_today: datetime.date
+    ) -> List[datetime.date]:
+        """The days one iquam job covers -- the same window the manifest reads.
+
+        Taken from the mrva section, not iquam's own buoy_dayrange, because
+        what matters for reuse is which files the manifest will ask for.
+        """
+        sensors_config = self.config.get("mrva", {}).get("sensors", {})
+        day_range = sensors_config.get("IQUAM0", {}).get("day_range", 2)
+        return list(mur_window.day_range_dates(
+            process_date, day_range, reference_today=reference_today))
+
+    def _find_cached_iquam(self, data_day: datetime.date) -> Optional[str]:
+        candidate = paths.iquam_href(self.workspace_root, data_day)
+        return candidate if self.client.object_exists(candidate) else None
+
+    def _promote_iquam(self, data_day: datetime.date, job: str) -> str:
+        """Copy one day's buoy file out of a job that wrote its whole window."""
+        src = self.client.get_job_output(
+            job, "output",
+            year=data_day.year,
+            doy=f"{data_day.timetuple().tm_yday:03d}",
+        )
+        dest = paths.iquam_href(self.workspace_root, data_day)
+        return self.client.copy_object(src, dest)
+
     def _promote_csp(self, process_date: datetime.date, job: str) -> Optional[str]:
         """Copy MRVA's coefficient output to the canonical key, for tomorrow.
 
@@ -369,7 +439,7 @@ class MAAPOrchestrator:
         self,
         process_date: datetime.date,
         bic_results: Dict,
-        iquam_job: str,
+        iquam_hrefs: Dict[datetime.date, str],
         reference_today: datetime.date,
     ) -> List[Dict]:
         """MRVA's unified BIC + IQUAM0 fan-in manifest.
@@ -393,40 +463,33 @@ class MAAPOrchestrator:
             for data_day in mur_window.day_range_dates(
                 process_date, day_range, reference_today=reference_today
             ):
-                if sensor == "IQUAM0" and iquam_job is None:
-                    # No iquam job this run -- --execute excluded it. Omitting
-                    # the entries is the only coherent choice: get_job_output
-                    # needs a job, and a manifest naming a file nothing wrote
-                    # would fail MRVA on a missing input rather than on the
-                    # real reason.
-                    #
-                    # This is a scientifically degraded analysis, not a
-                    # configuration detail, so it is said once and loudly
-                    # rather than logged at debug and forgotten.
-                    if not self._warned_no_iquam:
-                        self._warned_no_iquam = True
-                        logger.warning(
-                            "  MRVA will run with NO in-situ buoy observations: "
-                            "iquam is not in --execute, so IQUAM0 contributes "
-                            "nothing to this analysis. The L4 product will "
-                            "differ from one built with buoys.")
-                    continue
-
                 if sensor == "IQUAM0":
-                    # One iquam job writes its whole +/- window -- five .bii
-                    # files for a day_range of 2 -- so the day has to be named
-                    # when resolving, or the pattern's {year}/{doy} fall back
-                    # to wildcards, match all of them, and resolve_output
-                    # refuses the ambiguity ("expected 1 match ... found 5").
-                    #
-                    # Resolving per day also means each entry is a key the job
-                    # really produced, rather than a path built by string
-                    # concatenation and assumed to exist.
-                    entry_href = self.client.get_job_output(
-                        iquam_job, "output",
-                        year=data_day.year,
-                        doy=f"{data_day.timetuple().tm_yday:03d}",
-                    )
+                    # Resolved before this point, either from the bucket or by
+                    # promoting a fresh iquam job's output. Keyed by day
+                    # because one job writes its whole +/- window -- five .bii
+                    # files for a day_range of 2 -- and the manifest needs one
+                    # named entry per day, not whichever the glob happened to
+                    # match ("expected 1 match ... found 5").
+                    entry_href = iquam_hrefs.get(data_day)
+                    if entry_href is None:
+                        if not iquam_hrefs:
+                            # Nothing at all: iquam did not run and nothing is
+                            # cached. A scientifically degraded analysis, not a
+                            # configuration detail, so it is said once and
+                            # loudly rather than logged at debug and forgotten.
+                            if not self._warned_no_iquam:
+                                self._warned_no_iquam = True
+                                logger.warning(
+                                    "  MRVA will run with NO in-situ buoy "
+                                    "observations: no IQUAM0 file is available "
+                                    "for any day of this analysis. The L4 "
+                                    "product will differ from one built with "
+                                    "buoys.")
+                        else:
+                            logger.warning(
+                                "No IQUAM0 file for %s -- omitting from MRVA "
+                                "manifest", data_day)
+                        continue
                     files.append({
                         "path": entry_href,
                         "sensor": sensor,
@@ -465,8 +528,21 @@ class MAAPOrchestrator:
         year = process_date.year
         doy = process_date.timetuple().tm_yday
 
+        reference_today = self.get_reference_today()
+
+        # Reuse before resubmitting. DPS puts a job's outputs at an
+        # unreconstructable path, so an output that is not promoted to a
+        # canonical key is lost the moment the run ends -- which is why
+        # landice and iquam were resubmitted every single run while L2P was
+        # not. MAAP's dedup was the wrong answer to that: it skips the work
+        # AND discards the handle on the earlier result. Checking the bucket
+        # is the right one, because the object's existence IS the record.
         landice_job = None
-        if "landice" in self.stages:
+        landice_cached = self._find_cached_landice(process_date)
+        if landice_cached is not None:
+            logger.info("    landice %s already in the bucket; not resubmitting",
+                        process_date)
+        elif "landice" in self.stages:
             landice_hrefs = resolve_landice_static_hrefs(
                 self.config["landice"]["static_resources_dir"])
             landice_job = self.client.submit_job("mur-landice", {
@@ -481,7 +557,13 @@ class MAAPOrchestrator:
             }, tag=tags.job_tag("landice", process_date, mode))
 
         iquam_job = None
-        if "iquam" in self.stages:
+        iquam_days = self._iquam_window_days(process_date, reference_today)
+        iquam_cached = {d: h for d in iquam_days
+                        if (h := self._find_cached_iquam(d)) is not None}
+        if iquam_days and len(iquam_cached) == len(iquam_days):
+            logger.info("    iquam %s: all %d day(s) already in the bucket; "
+                        "not resubmitting", process_date, len(iquam_days))
+        elif "iquam" in self.stages:
             iquam_config = self.config["iquam"]
             iquam_job = self.client.submit_job("mur-iquam", {
                 "year": year,
@@ -505,7 +587,6 @@ class MAAPOrchestrator:
         # L2P's production window (l2p.sensors[X].day_range) and has to look
         # entries up by day rather than consume them in submission order.
         bic_results = {}
-        reference_today = self.get_reference_today()
         l2p_config = self.config["l2p"]
         for sensor in (l2p_config["active_sensors"] if "l2p" in self.stages else []):
             sensor_config = l2p_config["sensors"][sensor]
@@ -619,6 +700,25 @@ class MAAPOrchestrator:
             bic_results[key] = (self._promote_bic(sensor, data_day, job), job)
             promoted += 1
 
+        # Landice and iquam get the same treatment for the same reason, and
+        # before the raise below, so a day that fails part way still banks
+        # what it finished.
+        if landice_job is not None and landice_job not in failures:
+            landice_cached = self._promote_landice(process_date, landice_job)
+        if iquam_job is not None and iquam_job not in failures:
+            for data_day in iquam_days:
+                if data_day in iquam_cached:
+                    continue
+                try:
+                    iquam_cached[data_day] = self._promote_iquam(
+                        data_day, iquam_job)
+                except LookupError as exc:
+                    # The mrva window can reach past what iquam's own
+                    # buoy_dayrange wrote. Not an error -- the manifest simply
+                    # omits that day.
+                    logger.warning("    no IQUAM0 output for %s: %s",
+                                   data_day, exc)
+
         if failures:
             if promoted:
                 logger.info(
@@ -639,7 +739,7 @@ class MAAPOrchestrator:
         # identical fan-in shape as the satellite sensors in
         # mrva4com_container.m's sensor table).
         sensor_manifest_files = self._build_sensor_inputs_manifest(
-            process_date, bic_results, iquam_job, reference_today
+            process_date, bic_results, iquam_cached, reference_today
         )
         sensor_inputs_manifest_href = self.client.write_manifest(
             paths.mrva_manifest_key(process_date), {"files": sensor_manifest_files}
@@ -661,9 +761,13 @@ class MAAPOrchestrator:
         # icefiles_YYYY_DDD.txt, which earlier notes doubted was a real output.
         # get_job_result returns a DIRECTORY prefix rather than named outputs,
         # so mur_maap/outputs.py matches filenames within it.
-        landice_ice_p011_href = self.client.get_job_output(landice_job, "landice_ice_p011")
-        landice_grid_p01_href = self.client.get_job_output(landice_job, "landice_grid_p01")
-        landice_icefiles_p011_href = self.client.get_job_output(landice_job, "landice_icefiles_p011")
+        if landice_cached is None:
+            raise RuntimeError(
+                f"no landice outputs for {process_date}: none in the bucket "
+                f"and no landice job ran. MRVA cannot be built without them.")
+        landice_ice_p011_href = landice_cached["landice_ice_p011"]
+        landice_grid_p01_href = landice_cached["landice_grid_p01"]
+        landice_icefiles_p011_href = landice_cached["landice_icefiles_p011"]
 
         mrva_args = {
             "year": year,
