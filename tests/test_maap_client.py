@@ -782,3 +782,61 @@ def test_the_result_fetch_waits_longer_than_an_ordinary_call():
     import mur_maap.client as mod
     assert mod.RESULT_RETRIES > mod.API_RETRIES
     assert mod.RESULT_RETRY_DELAY > mod.API_RETRY_DELAY
+
+
+# --- a failed result lookup should say what to do about it ------------------
+#
+# The second run failed the same way with a fuller detail:
+#
+#   Failed to get job result of job with id: 2898989c-... 'NoneType' object
+#   has no attribute 'get'. If you don't see expected results, please contact
+#   administrator of DPS.
+#
+# and the operator reported that the id does not appear under "View My Jobs".
+# A NoneType crash in MAAP's own lookup plus an id missing from the listing
+# means there is no DPS record behind the id -- which is exactly what a
+# deduped submission leaves behind.
+
+def test_a_deduped_job_says_so_rather_than_blaming_the_api():
+    from mur_maap.client import _result_failure_hint
+    hint = _result_failure_hint("deduped", "Failed to get job result")
+    assert "DEDUPED" in hint
+    assert "--no-dedup" in hint
+
+
+def test_a_nonetype_crash_points_at_view_my_jobs():
+    from mur_maap.client import _result_failure_hint
+    hint = _result_failure_hint("successful",
+                                "'NoneType' object has no attribute 'get'")
+    assert "View My Jobs" in hint
+    assert "--no-dedup" in hint
+
+
+def test_an_ordinary_500_keeps_the_neutral_hint():
+    from mur_maap.client import _result_failure_hint
+    hint = _result_failure_hint("successful", "upstream timeout")
+    assert "may be fine" in hint
+    assert "--no-dedup" not in hint
+
+
+def test_the_failure_message_names_the_job_status():
+    """'successful but no result' and 'deduped so no result' need different
+    responses, and the message has to distinguish them."""
+    mod = _no_result_delay()
+    c, maap, _ = make_client(keys=LANDICE_KEYS)
+    c._job_process["job-1"] = "mur-landice"
+    maap.get_job_status = lambda jid: ResultResp({"status": "deduped"})
+    maap.get_job_result = lambda jid: ResultResp(
+        {"status": 500, "detail": "Failed to get job result"}, 500)
+
+    original = mod.RESULT_RETRY_DELAY
+    mod.RESULT_RETRY_DELAY = 0
+    try:
+        with pytest.raises(OSError) as err:
+            c.get_job_output("job-1", "landice_grid_p01")
+    finally:
+        mod.RESULT_RETRY_DELAY = original
+
+    message = str(err.value)
+    assert "'deduped'" in message
+    assert "--no-dedup" in message

@@ -53,6 +53,24 @@ TERMINAL_BAD = {"failed", "dismissed", "deleted", "cancelled", "revoked", "error
 # A job MAAP has accepted but not yet made visible on /ogc/jobs/<id>. The
 # submit returns a job id before the job is queryable, so the first few polls
 # can 404. That is a normal early state, not an error and not a status.
+
+def _result_failure_hint(status: str, detail: Optional[str]) -> str:
+    """What the operator should actually do about a failed result lookup."""
+    if status in DEDUPED:
+        return (
+            "This job was DEDUPED: MAAP matched it to an identical earlier "
+            "submission instead of running it, so it has no DPS output of "
+            "its own and never appears under 'View My Jobs'. Re-run with "
+            "--no-dedup.")
+    if detail and "NoneType" in detail:
+        return (
+            "MAAP crashed server-side looking this job up, which usually "
+            "means there is no DPS record behind the id -- check whether the "
+            "job appears under 'View My Jobs', and if it does not, re-run "
+            "with --no-dedup.")
+    return "The job itself may be fine -- this is the result lookup failing."
+
+
 UNINDEXED = "not-yet-indexed"
 
 ACTIVE = {"accepted", "queued", "running", "started", "offline", UNINDEXED}
@@ -498,7 +516,7 @@ class MaapPyClient(MAAPClient):
                 f"terminal (asking early returns HTTP 500)")
 
         body = _retrying(f"result of {job_id}",
-                         lambda: self._fetch_result_body(job_id),
+                         lambda: self._fetch_result_body(job_id, status),
                          retries=RESULT_RETRIES, delay=RESULT_RETRY_DELAY)
         href = _outputs.result_prefix(body)
         bucket, prefix = _outputs.parse_dps_href(href)
@@ -509,7 +527,7 @@ class MaapPyClient(MAAPClient):
         self._result_cache[job_id] = keys
         return prefix, keys
 
-    def _fetch_result_body(self, job_id: str) -> Dict:
+    def _fetch_result_body(self, job_id: str, status: str = "") -> Dict:
         """One get_job_result call, with the HTTP code honoured.
 
         The same lesson get_job_status learned, in the other half of the API.
@@ -534,9 +552,9 @@ class MaapPyClient(MAAPClient):
             detail = body.get("detail") if isinstance(body, dict) else None
             raise OSError(
                 f"MAAP returned HTTP {code} asking for the result of job "
-                f"{job_id}" + (f": {detail}" if detail else "")
-                + ". The job itself may be fine -- this is the result "
-                  "lookup failing.")
+                f"{job_id}" + (f" (status {status!r})" if status else "")
+                + (f": {detail}" if detail else "")
+                + ". " + _result_failure_hint(status, detail))
         return body
 
     def get_job_output(self, job_id: str, output_name: str, **fmt) -> str:
