@@ -922,6 +922,41 @@ def _print_job_plan(config: Dict, days, reference_today, args) -> None:
         print(f"   workspace bucket.)")
 
 
+# Empirically broken pools, mapped to what is wrong with them. Proven by A/B
+# on 2026-09-22: an unmodified mur-landice job that had just succeeded on a
+# small queue failed on 32vcpu-64gb with "permission denied ...
+# /var/run/docker.sock" -- same image, same CWL, same inputs, same version.
+# cwltool cannot reach the Docker daemon there, so no MUR job can run on it at
+# all. Nothing in MAAP's docs mentions Docker access varying by pool, so this
+# is knowledge that exists only here until ops confirms it.
+BROKEN_QUEUES = {
+    "maap-dps-worker-32vcpu-64gb":
+        "its workers cannot reach /var/run/docker.sock, so cwltool fails to "
+        "pull the image and every job dies before the container starts",
+}
+
+
+def _warn_about_broken_queues(queue: str, queues: Optional[Dict[str, str]]) -> None:
+    """Say so at submit time rather than letting the job discover it.
+
+    A job sent here still takes minutes to fail, and fails with a Docker error
+    that looks like an image or registry problem rather than a queue problem --
+    which is exactly how it cost an afternoon the first time. This is a warning
+    and not a refusal because putting a known-good job on a suspect pool is a
+    legitimate diagnostic, and that experiment is how the entry above was
+    established in the first place.
+    """
+    targets = {"the default queue": queue}
+    targets.update({p: q for p, q in (queues or {}).items()})
+    for who, q in targets.items():
+        if q in BROKEN_QUEUES:
+            logger.warning(
+                "%s is %s, which is known to be broken: %s. Change it in your "
+                "config.maap.json (maap.queue / maap.queues) unless you are "
+                "deliberately testing this pool.",
+                who, q, BROKEN_QUEUES[q])
+
+
 def build_client(config: Dict, args):
     """Construct the real client from config plus CLI overrides."""
     from mur_maap.client import MaapPyClient
@@ -962,6 +997,9 @@ def build_client(config: Dict, args):
             "different revision of this repo.",
             version, ALGORITHM_VERSION, version)
 
+    queues = None if args.queue else maap_cfg.get("queues")
+    _warn_about_broken_queues(queue, queues)
+
     return MaapPyClient(
         queue=queue,
         version=version,
@@ -973,7 +1011,7 @@ def build_client(config: Dict, args):
         # is the single reason anyone passes the flag. It is how you find out
         # whether a failure belongs to the job or to the worker pool: put a
         # small, known-good job on the suspect queue and see what happens.
-        queues=None if args.queue else maap_cfg.get("queues"),
+        queues=queues,
         granule_staging=args.granule_staging or maap_cfg.get(
             "granule_staging", "workspace"),
         collection_filter=args.collection,

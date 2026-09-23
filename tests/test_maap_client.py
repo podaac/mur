@@ -321,6 +321,23 @@ def test_the_override_reaches_the_submission():
     assert [s["queue"] for s in maap.submitted] == ["q", "big-queue"]
 
 
+def test_the_submit_log_names_the_queue(caplog):
+    """Which pool a job ran on is the first question asked when it dies for an
+    environmental reason -- mrva's repeated "permission denied ...
+    /var/run/docker.sock" is a property of the worker, not of the job. The
+    queue also comes from the operator's own config.maap.json, which is not in
+    this repo, so without it in the log there is no way to tell a stale config
+    from a genuine failure on the intended queue.
+    """
+    import logging
+    c, _, _ = make_client()
+    c.queues = {"mur-mrva": "maap-dps-worker-64gb"}
+    c.algorithms = {"mur-mrva": 67}
+    with caplog.at_level(logging.INFO, logger="mur_maap.client"):
+        c.submit_job("mur-mrva", {})
+    assert "maap-dps-worker-64gb" in caplog.text
+
+
 def test_a_bare_list_algorithm_listing_does_not_crash():
     """MAAP has returned both {"processes": [...]} and a bare list. The old
     guard was `body.get("processes", body if isinstance(body, list) else [])`

@@ -324,10 +324,11 @@ class MaapPyClient(MAAPClient):
             for k, v in args.items()
         }
 
+        queue = self.queue_for(process_id)
         resp = self.maap.submit_job(
             process_id=pid,
             inputs=inputs,
-            queue=self.queue_for(process_id),
+            queue=queue,
             dedup=self.dedup if dedup is None else dedup,
             tag=tag or f"{self.tag_prefix}.{process_id}",
         )
@@ -340,13 +341,21 @@ class MaapPyClient(MAAPClient):
                 f"(HTTP {resp.status_code}, keys {sorted(body)}): {body}")
         self._job_process[job_id] = process_id
         status = normalize_status(body)
+        # The queue is named on every submit, not just on failure. Which pool
+        # a job landed on is otherwise invisible in the log, and it is the
+        # first thing you need when a job dies for an environmental reason
+        # rather than a scientific one -- the 32vcpu-64gb workers cannot reach
+        # /var/run/docker.sock, so "which queue was that?" has been the opening
+        # question of every mrva post-mortem. It is also the one setting that
+        # lives in the operator's own config.maap.json rather than in this
+        # repo, so the log is the only place the two can be reconciled.
         if status in DEDUPED:
             logger.info(
-                "submitted %s -> %s (deduped: MAAP matched an identical earlier "
-                "submission and reused its result rather than running again)",
-                process_id, job_id)
+                "submitted %s -> %s on %s (deduped: MAAP matched an identical "
+                "earlier submission and did NOT run it; the job has no output "
+                "of its own)", process_id, job_id, queue)
         else:
-            logger.info("submitted %s -> %s", process_id, job_id)
+            logger.info("submitted %s -> %s on %s", process_id, job_id, queue)
         return job_id
 
     def queue_for(self, process_id: str) -> str:

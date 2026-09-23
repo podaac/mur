@@ -288,3 +288,48 @@ def test_without_the_flag_the_per_process_map_still_applies(monkeypatch):
     run_mur_maap.build_client(config, args)
     assert captured["queue"] == "small"
     assert captured["queues"] == {"mur-mrva": "huge"}
+
+
+# --- the queue that cannot run anything ------------------------------------
+
+def test_a_known_broken_queue_is_called_out_before_submitting(monkeypatch, caplog):
+    """mur-mrva failed three times with "permission denied ...
+    /var/run/docker.sock" -- a five-minute failure whose message points at
+    Docker, not at the pool. The pool is the cause, and it is set in the
+    operator's own config file, so the check belongs here."""
+    import logging
+    import run_mur_maap
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+    monkeypatch.setattr("mur_maap.client.MaapPyClient", FakeClient)
+    config = {"maap": {"queue": "maap-dps-worker-8gb",
+                       "queues": {"mur-mrva": "maap-dps-worker-32vcpu-64gb"},
+                       "workspace_root": "s3://bucket/user"},
+              "l2p": {"active_sensors": [], "sensors": {}}}
+    args = run_mur_maap.parse_args(["--config", "x.json"])
+    with caplog.at_level(logging.WARNING):
+        run_mur_maap.build_client(config, args)
+    assert "mur-mrva" in caplog.text
+    assert "docker.sock" in caplog.text
+
+
+def test_a_good_queue_map_says_nothing(monkeypatch, caplog):
+    import logging
+    import run_mur_maap
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+    monkeypatch.setattr("mur_maap.client.MaapPyClient", FakeClient)
+    config = {"maap": {"queue": "maap-dps-worker-8gb",
+                       "queues": {"mur-mrva": "maap-dps-worker-64gb"},
+                       "workspace_root": "s3://bucket/user"},
+              "l2p": {"active_sensors": [], "sensors": {}}}
+    args = run_mur_maap.parse_args(["--config", "x.json"])
+    with caplog.at_level(logging.WARNING):
+        run_mur_maap.build_client(config, args)
+    assert "broken" not in caplog.text
