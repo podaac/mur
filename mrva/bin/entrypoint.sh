@@ -279,10 +279,23 @@ main() {
 
     setup_output_redirect
 
-    # The Fortran PCG solver uses large local arrays that can exceed default
-    # stack; unlimited stack prevents segfaults during solver iterations.
-    # KMP_STACKSIZE sets thread stack for Intel OpenMP parallel regions.
-    ulimit -s unlimited 2>/dev/null || echo "Warning: Could not set unlimited stack size"
+    # Raise the stack where we are allowed to. Under DPS we are not: the hard
+    # limit comes from the Docker daemon, cwltool passes no --ulimit, and the
+    # daemon is not ours -- job 50f7b39a ran with 10 MB and segfaulted in the
+    # PCG solver on a 16.1 MB automatic array.
+    #
+    # That is why the Fortran is built with -heap-arrays (see
+    # mrva/src/fortran/Makefile): correctness cannot rest on a limit the
+    # platform refuses to grant. This call is kept because where it DOES work
+    # it is still free, and the message below is worded so that a future
+    # segfault points at the right place instead of scrolling past as a
+    # warning nobody reads.
+    if ! ulimit -s unlimited 2>/dev/null; then
+        echo "Note: stack stays at $(ulimit -s) KB (the container's hard limit" \
+             "forbids raising it). Harmless while the Fortran is built with" \
+             "-heap-arrays; if you see SIGSEGV in a solver, check that flag" \
+             "survived the build before suspecting anything else." >&2
+    fi
     export KMP_STACKSIZE=${KMP_STACKSIZE:-128M}
 
     # Debug mode is enabled if the image was built with DEBUG=1, or via the

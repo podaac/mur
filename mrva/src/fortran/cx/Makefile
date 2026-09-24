@@ -28,7 +28,12 @@ DEBUG ?= 0
 FC = /opt/intel/bin/ifort
 
 # Base flags (always used)
-FCOPT_BASE = -80 -qopenmp
+FCOPT_BASE = -80 -qopenmp -heap-arrays 64
+# -heap-arrays 64 matches the parent Makefile. The segfault that forced it was
+# in mrva's PCG solver, not in these spline utilities, but they are built by
+# the same image for the same container and sized by the same grids -- there is
+# no reason for one of the two to keep depending on a stack limit the platform
+# refuses to grant. See mrva/src/fortran/Makefile for the full account.
 
 # Production optimization flags
 FCOPT_PROD = -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost
