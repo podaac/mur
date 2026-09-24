@@ -19,4 +19,4 @@ Change it with utils/bump_algorithm_version.sh, which edits every place at
 once rather than leaving four of five updated.
 """
 
-ALGORITHM_VERSION = "2.0.3"
+ALGORITHM_VERSION = "2.0.4"

@@ -11,8 +11,8 @@ algorithm_description: >
   the land/ice mask, emitting the GHRSST L4 MUR NetCDF granule, the MUR25
   sibling product, and the coefficient file carried into the next day.
 algorithm_name: mur-mrva
-algorithm_version: "2.0.3"
-algorithm_container_url: ghcr.io/podaac/mur/mrva-dps:2.0.3
+algorithm_version: "2.0.4"
+algorithm_container_url: ghcr.io/podaac/mur/mrva-dps:2.0.4
 
 keywords: MUR, SST, GHRSST, L4, variational analysis
 code_repository: https://github.com/podaac/mur

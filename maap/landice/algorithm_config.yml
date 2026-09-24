@@ -12,13 +12,13 @@ algorithm_description: >
   (p01) and 0.011-degree (p011) cylindrical grids, emitting the ice BIP, the
   ice-flagged land mask, and the icefiles listing for each resolution.
 algorithm_name: mur-landice
-algorithm_version: "2.0.3"
+algorithm_version: "2.0.4"
 
 # Pre-built image, so no Dockerfile build is needed at registration time. This
 # is the "-dps" variant, which clears ENTRYPOINT so CWL's baseCommand runs
 # directly rather than being appended to it (see maap/Dockerfile.dps). It must
 # be anonymously pullable: a CWL DockerRequirement carries no credentials.
-algorithm_container_url: ghcr.io/podaac/mur/landice-dps:2.0.3
+algorithm_container_url: ghcr.io/podaac/mur/landice-dps:2.0.4
 
 keywords: MUR, SST, sea ice, OSI-SAF, land mask, GHRSST
 code_repository: https://github.com/podaac/mur
