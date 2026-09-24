@@ -167,22 +167,45 @@ def test_known_queues_are_offered_when_the_listing_is_denied(tmp_path, monkeypat
     assert "maap-dps-worker-8gb" in out
 
 
-def test_mrva_needs_more_than_a_64gb_queue_nominally_provides():
-    """A queue named ...-64gb is likely 64 GB = 59.6 GiB, while mrva asks for
-    65536 MiB = 64 GiB. The unit mismatch is easy to miss and would show up
-    as a job that never schedules.
+def test_the_cwls_do_not_pretend_to_request_resources():
+    """ramMin/coresMin must not reach the CWL, because on DPS they do nothing.
 
-    This matters more now, not less: 32vcpu-64gb is the queue that satisfies
-    the request, and it is the one whose workers cannot reach the Docker
-    socket, so mrva is parked on maap-dps-worker-64gb. If a job there dies on
-    resources rather than on Docker, this arithmetic is why, and the fix is to
-    lower ram_min in maap/mrva/algorithm_config.yml and redeploy.
+    This replaces a test that asserted mrva's 65536 MiB exceeded what a queue
+    named ...-64gb provides, on the theory that the job would then never
+    schedule. Job 310fc265 disproved it: that exact CWL, asking for 64 GiB and
+    16 cores, pulled and ran on maap-dps-worker-16gb, with cwltool printing
+
+        Skipping Docker software container '--memory' limit despite presence
+        of ResourceRequirement with ramMin and/or ramMax setting.
+
+    DPS passes neither --strict-memory-limit nor --strict-cpu-limit, and
+    cwltool's evalResources has no branch that refuses an oversized request.
+    The fields reserve nothing and reject nothing; the queue decides. Leaving
+    them in costs a warning per run and, worse, offers a plausible-looking
+    knob that has never changed where a job ran.
+
+    The measurements still live in algorithm_config.yml, where they pick the
+    queue -- that is what the assertion on MODULE_NEEDS below guards.
+    """
+    import pathlib as _p
+    for cwl in sorted(_p.Path("maap/cwl_workflows").glob("*.cwl")):
+        text = cwl.read_text()
+        assert "ramMin" not in text, f"{cwl.name} still declares ramMin"
+        assert "coresMin" not in text, f"{cwl.name} still declares coresMin"
+        # outdirMax describes stage-out size, not scheduling, and is kept.
+        assert "outdirMax" in text, f"{cwl.name} lost its outdirMax"
+
+
+def test_the_measured_requirement_survives_where_it_picks_the_queue():
+    """Dropping ramMin from the CWL must not lose the number itself.
+
+    It is the only record of what mrva actually needs, and the thing an
+    operator reads when choosing maap.queues["mur-mrva"].
     """
     import yaml, pathlib as _p
-    cfg = yaml.safe_load((_p.Path("maap/mrva/algorithm_config.yml")).read_text())
-    gib_requested = cfg["ram_min"] / 1024
-    gib_in_a_64gb_queue = 64 * 1000**3 / 1024**3
-    assert gib_requested > gib_in_a_64gb_queue
+    cfg = yaml.safe_load(_p.Path("maap/mrva/algorithm_config.yml").read_text())
+    assert cfg["ram_min"] >= 61440, "below the documented L=9 working set"
+    assert f'{cfg["ram_min"] // 1024} GiB' in cli.MODULE_NEEDS["mur-mrva"]
     assert "maap-dps-worker-32vcpu-64gb" in cli.KNOWN_QUEUES
 
 

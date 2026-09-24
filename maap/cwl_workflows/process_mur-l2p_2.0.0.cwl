@@ -81,8 +81,6 @@ $graph:
     NetworkAccess:
       networkAccess: true
     ResourceRequirement:
-      ramMin: 8192
-      coresMin: 2
       outdirMax: 2048
   baseCommand: /opt/l2p/bin/entrypoint.sh
   inputs:

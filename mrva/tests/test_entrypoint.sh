@@ -314,6 +314,28 @@ assert_eq "config JSON: prior_csp_file is null when not provided" "" "$(json_fie
 assert_eq "config JSON: debug defaults to false" "False" "$(json_field "$scratch/tmp/mrva_config.json" debug)"
 rm -rf "$scratch" "$src_dir"
 
+# --- the stage-out root ------------------------------------------------------
+#
+# mrva called output_root as a function without ever defining one, so the very
+# first line of main() ran `mkdir -p ""` and DPS job 310fc265 died before it
+# localized an input -- reported by CWL as "Did not find output file with glob
+# pattern: ['./output*']", which points at stage-out rather than at the typo.
+# These assert the function exists and that all three callers agree.
+assert_eq "output_root defaults to \$PWD/output" \
+    "/tmp/ep-cwd-probe/output" \
+    "$(mkdir -p /tmp/ep-cwd-probe && cd /tmp/ep-cwd-probe && run_case 'output_root')"
+assert_eq "output_root honours MUR_OUTPUT_ROOT" \
+    "/data/output" \
+    "$(MUR_OUTPUT_ROOT=/data/output run_case 'output_root')"
+
+scratch="$(mktemp -d)"
+out="$(MUR_OUTPUT_ROOT="$scratch/out" run_case 'setup_output_redirect >/dev/null 2>&1; echo "$MUR_STAGE_OUT_MODE"')"
+assert_eq "setup_output_redirect resolves a root and picks a real mode" \
+    "0" "$([[ -n "$out" && "$out" != "none" ]] && echo 0 || echo 1)"
+assert_eq "setup_output_redirect creates the dirs main() globs" \
+    "0" "$([[ -d "$scratch/out/csp" && -d "$scratch/out/netcdf" ]] && echo 0 || echo 1)"
+rm -rf "$scratch" /tmp/ep-cwd-probe
+
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
     echo "All tests passed."

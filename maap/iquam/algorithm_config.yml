@@ -27,6 +27,14 @@ run_command: /opt/iquam/bin/entrypoint.sh
 
 # 4 GiB / 1 core. iquam downloads one monthly NetCDF and writes small
 # .bii files; the local --memory=8g is a generous cap, not a measurement.
+# These are measurements, not a request. They are deliberately NOT emitted into
+# the CWL as ResourceRequirement ramMin/coresMin: DPS runs cwltool without
+# --strict-memory-limit / --strict-cpu-limit, so those fields reserve nothing
+# and reject nothing -- a CWL asking for 64 GiB ran to completion on a 16 GiB
+# worker. The DPS queue picks the hardware, and it is set per process in the
+# operator's config.maap.json (maap.queue / maap.queues). Read the numbers
+# below as "which queue does this module need", and see MODULE_NEEDS in
+# run_mur_maap.py, which mirrors them next to the queue listing.
 ram_min: 4096
 cores_min: 1
 outdir_max: 1024   # a week of .bii files measures ~1.1 MB

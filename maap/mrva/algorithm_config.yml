@@ -36,6 +36,14 @@ run_command: /opt/mrva/bin/entrypoint.sh
 # mrva/docs/MEMORY_ANALYSIS_AND_MATRIX_FREE_PLAN.md puts at ~60 GB total
 # (infoMatrix alone is 53.71 GB) -- so the headroom here is real but thin.
 # If a job OOMs at the finest level, this is the first number to raise.
+# These are measurements, not a request. They are deliberately NOT emitted into
+# the CWL as ResourceRequirement ramMin/coresMin: DPS runs cwltool without
+# --strict-memory-limit / --strict-cpu-limit, so those fields reserve nothing
+# and reject nothing -- a CWL asking for 64 GiB ran to completion on a 16 GiB
+# worker. The DPS queue picks the hardware, and it is set per process in the
+# operator's config.maap.json (maap.queue / maap.queues). Read the numbers
+# below as "which queue does this module need", and see MODULE_NEEDS in
+# run_mur_maap.py, which mirrors them next to the queue listing.
 ram_min: 65536
 cores_min: 16
 outdir_max: 8192   # the L4 granule alone is ~760 MB, plus MUR25 and the .c06

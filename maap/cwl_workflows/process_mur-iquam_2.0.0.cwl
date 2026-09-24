@@ -64,8 +64,6 @@ $graph:
     NetworkAccess:
       networkAccess: true
     ResourceRequirement:
-      ramMin: 4096
-      coresMin: 1
       outdirMax: 1024
   baseCommand: /opt/iquam/bin/entrypoint.sh
   inputs:

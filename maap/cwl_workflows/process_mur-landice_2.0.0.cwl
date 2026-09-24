@@ -71,8 +71,6 @@ $graph:
     NetworkAccess:
       networkAccess: true
     ResourceRequirement:
-      ramMin: 6144
-      coresMin: 2
       outdirMax: 2048
   baseCommand: /opt/landice/bin/entrypoint.sh
   inputs:

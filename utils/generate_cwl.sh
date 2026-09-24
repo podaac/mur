@@ -179,6 +179,34 @@ if "maap-token" in text and "EnvVarRequirement" not in text:
     )
     print("    MAAP_PGT <- inputs[\"maap-token\"] (env, not argv)")
 
+# ramMin/coresMin are dropped: on DPS they are decoration that reads like a
+# request. cwltool says so itself, once per run --
+#
+#   Skipping Docker software container '--memory' limit despite presence of
+#   ResourceRequirement with ramMin and/or ramMax setting.
+#   Skipping Docker software container '--cpus' limit despite presence of
+#   ResourceRequirement with coresMin and/or coresMax setting.
+#
+# -- because DPS invokes cwltool without --strict-memory-limit or
+# --strict-cpu-limit, and nothing in cwltool's evalResources refuses a job
+# whose ramMin exceeds the host. So a CWL declaring 64 GiB ran happily on a
+# 16 GiB worker: the numbers neither reserved anything nor rejected anything.
+# What actually decides the hardware is the DPS queue, chosen at submit time
+# from maap.queue / maap.queues in the operator's config.maap.json. Leaving
+# these in invites the next reader to debug a resource problem by editing a
+# field that has never once changed where a job ran.
+#
+# The measured requirements still live in maap/<module>/algorithm_config.yml,
+# next to the queue each one implies -- they are documentation there, and
+# documentation is all they ever were here.
+#
+# outdirMax stays: it describes stage-out size rather than scheduling, and
+# cwltool does not warn about it.
+before = text
+text = re.sub(r"\n      (?:ramMin|coresMin): \d+", "", text)
+if text != before:
+    print("    dropped ramMin/coresMin (the queue picks the hardware)")
+
 path.write_text(text)
 PATCH
   done

@@ -118,8 +118,6 @@ $graph:
     NetworkAccess:
       networkAccess: true
     ResourceRequirement:
-      ramMin: 65536
-      coresMin: 16
       outdirMax: 8192
   baseCommand: /opt/mrva/bin/entrypoint.sh
   inputs:

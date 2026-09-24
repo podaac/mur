@@ -27,6 +27,14 @@ run_command: /opt/l2p/bin/entrypoint.sh
 
 # 8 GiB / 2 cores. The heaviest of the three light modules: it materializes
 # and bins up to ~288 granules for a MODIS day.
+# These are measurements, not a request. They are deliberately NOT emitted into
+# the CWL as ResourceRequirement ramMin/coresMin: DPS runs cwltool without
+# --strict-memory-limit / --strict-cpu-limit, so those fields reserve nothing
+# and reject nothing -- a CWL asking for 64 GiB ran to completion on a 16 GiB
+# worker. The DPS queue picks the hardware, and it is set per process in the
+# operator's config.maap.json (maap.queue / maap.queues). Read the numbers
+# below as "which queue does this module need", and see MODULE_NEEDS in
+# run_mur_maap.py, which mirrors them next to the queue listing.
 ram_min: 8192
 cores_min: 2
 outdir_max: 2048   # measured BIC files run ~12-54 MB

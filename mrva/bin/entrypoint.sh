@@ -213,8 +213,19 @@ build_command() {
 # Whether this works depends on DPS's UID/GID policy: the Dockerfile
 # group-0-chmods /data, and local runs pass --group-add 0, but DPS's is
 # unknown -- so fall back to copying and say which branch fired.
+# The stage-out root, resolved in exactly one place.
+#
+# landice and l2p have had this as a function since the CWL stage-out fix;
+# mrva grew the same expression twice by hand and then called output_root as
+# though it were a function -- which it was not, so `mkdir -p "$(output_root)"`
+# expanded to `mkdir -p ""` and the job died before localizing a single input.
+# One definition, three callers, no third spelling to drift.
+output_root() {
+    echo "${MUR_OUTPUT_ROOT:-$(pwd)/output}"
+}
+
 setup_output_redirect() {
-    local root="${MUR_OUTPUT_ROOT:-$(pwd)/output}"
+    local root; root="$(output_root)"
     MUR_STAGE_OUT_MODE="none"
     mkdir -p "$root/csp" "$root/netcdf"
 
@@ -239,7 +250,7 @@ setup_output_redirect() {
 
 finish_output_redirect() {
     [ "${MUR_STAGE_OUT_MODE:-none}" = "copy" ] || return 0
-    local root="${MUR_OUTPUT_ROOT:-$(pwd)/output}"
+    local root; root="$(output_root)"
     echo "stage-out: copying /data/output -> $root" >&2
     cp -a /data/output/csp/. "$root/csp/" 2>/dev/null || true
     cp -a /data/output/netcdf/. "$root/netcdf/" 2>/dev/null || true

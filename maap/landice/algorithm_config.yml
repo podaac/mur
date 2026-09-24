@@ -38,6 +38,14 @@ run_command: /opt/landice/bin/entrypoint.sh
 
 # 6 GiB / 2 cores, matching the proven local --memory=6g cap. DPS has no
 # swap, so this is the floor rather than the 8g memory-swap ceiling.
+# These are measurements, not a request. They are deliberately NOT emitted into
+# the CWL as ResourceRequirement ramMin/coresMin: DPS runs cwltool without
+# --strict-memory-limit / --strict-cpu-limit, so those fields reserve nothing
+# and reject nothing -- a CWL asking for 64 GiB ran to completion on a 16 GiB
+# worker. The DPS queue picks the hardware, and it is set per process in the
+# operator's config.maap.json (maap.queue / maap.queues). Read the numbers
+# below as "which queue does this module need", and see MODULE_NEEDS in
+# run_mur_maap.py, which mirrors them next to the queue listing.
 ram_min: 6144
 cores_min: 2
 outdir_max: 2048   # mebibytes; measured outputs are ~8.5 MB/day
