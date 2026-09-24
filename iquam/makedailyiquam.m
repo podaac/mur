@@ -61,19 +61,41 @@ function makedailyiquam(year, doy, rewrite, outputDir, sourceUrl)
   %% Download fresh (no caching - simpler and matches production)
   system(sprintf('wget -nH --cut-dirs 6 -r -l1 -np "%s" -A "%s"', sourceUrl, ifile), '-echo');
 
-  %% Find the downloaded file
+  %% Find the downloaded file(s)
   ddir = dir(ifile);
   if isempty(ddir)
       fprintf('ERROR: IQUAM download failed for %04d/%03d\n', year, doy);
       return;
   end
-  ncfile = ddir(1).name;
 
-  %% Read NetCDF data
-  [dayf, hour, minute, lon, lat, sst, qual, pt] = readnc(ncfile);
+  %% Read NetCDF data, best revision first, falling through unreadable ones
+  ranked = rank_by_file_version(ddir);
+  [dayf, hour, minute, lon, lat, sst, qual, pt, ncfile] = ...
+      read_best_candidate(ranked);
 
-  %% Clean up downloaded file
-  delete(ncfile);
+  %% Clean up every downloaded file, not just the one that was read
+  for ci = 1:numel(ranked)
+      if exist(ranked(ci).name, 'file'), delete(ranked(ci).name); end
+  end
+
+  if isempty(ncfile)
+      error('makedailyiquam:noReadableSource', ...
+            ['No readable iQuam file for %04d-%02d (tried %d revision(s)).\n' ...
+             'This is almost always NOAA''s live monthly file caught ' ...
+             'mid-rewrite, not a permanent loss:\n' ...
+             '  - fv00.0 for the CURRENT month is rewritten in place as days ' ...
+             'accrue, and is\n' ...
+             '    served while it is being written, so it is briefly ' ...
+             'unreadable.\n' ...
+             '  - Observed: the 2026-09-23 11:00Z revision had 14 of 32 ' ...
+             'variables damaged;\n' ...
+             '    the 2026-09-24 15:46Z rewrite of the same file was ' ...
+             'clean (32/32).\n' ...
+             '  - It heals on its own. Re-run this day later rather than ' ...
+             'chasing the file.\n' ...
+             'Check with: curl -sI %s'], ...
+            year, month, numel(ranked), sourceUrl);
+  end
 
   %% Data conversion
   hour = hour + minute/60;
@@ -231,3 +253,69 @@ function N = read_bii_count(filename)
   fread(f, 1, 'int32');       % Fortran record-length prefix
   raw = fread(f, 1, 'int32'); % N (observation count)
   if ~isempty(raw), N = raw; end
+
+
+function ranked = rank_by_file_version(ddir)
+% Order a month's downloaded files best-revision-first, by their fvNN.N suffix.
+%
+% NOAA publishes each month more than once. fv00.0 lands on the 1st of the
+% following month as a near-real-time rollup; a reprocessed fv01.0 or higher
+% follows weeks later carrying materially more observations:
+%
+%   202607  fv00.0  468,352,726 B (Aug 1)  ->  fv01.0  516,012,782 B (Sep 7)
+%   202608  fv00.0  475,160,069 B (Sep 1)  ->  fv05.0  508,360,933 B (Sep 17)
+%
+% Every month since 2025-07 has had one. The download glob matches all of
+% them and this used to take dir()'s first entry, which sorts alphabetically
+% -- so fv00.0 always won and the reprocessed file was downloaded, ignored,
+% and deleted. That is a silent ~7-10% loss of in-situ observations on any
+% reprocessing run, quite apart from the robustness this ordering buys.
+  n = numel(ddir);
+  fv = zeros(n, 1);
+  for k = 1:n
+      tok = regexp(ddir(k).name, '-fv(\d+)\.(\d+)\.nc$', 'tokens', 'once');
+      if isempty(tok)
+          fv(k) = -1;   % unrecognised naming sorts last, but is still tried
+      else
+          fv(k) = str2double(tok{1}) + str2double(tok{2}) / 10;
+      end
+  end
+  [~, order] = sort(fv, 'descend');
+  ranked = ddir(order);
+
+
+function [dayf, hour, minute, lon, lat, sst, qual, pt, used] = ...
+        read_best_candidate(ranked)
+% Try each revision in turn so that one unreadable file is not fatal.
+%
+% netcdf.open reports a damaged file as "HDF error (NC_EHDFERR)" and nothing
+% else -- no filename, no variable, no hint that the cause is upstream. That
+% one line cost two DPS runs before anyone looked at the file itself, so the
+% catch below names the file and moves on instead.
+%
+% What it is actually recovering from: the current month's fv00.0 is rewritten
+% in place as days accrue and is served mid-write. Caught in that window, the
+% HDF5 group metadata is inconsistent -- on 2026-09-23 day, hour, minute, lat,
+% lon, sst and platform_type were all unreadable, which is 7 of the 8
+% variables readnc needs, while quality_level survived. Every variable is
+% gzip-9 + shuffle in ~1900 chunks, so a damaged chunk B-tree makes the data
+% unreachable by any reader, at any level. The file healed on its own the
+% next day.
+  [dayf, hour, minute, lon, lat, sst, qual, pt] = deal([]);
+  used = '';
+  for k = 1:numel(ranked)
+      name = ranked(k).name;
+      try
+          [dayf, hour, minute, lon, lat, sst, qual, pt] = readnc(name);
+          used = name;
+          if k > 1
+              fprintf(['  NOTE: using %s after %d unreadable revision(s); ' ...
+                       'this is the fallback working as intended\n'], ...
+                      name, k - 1);
+          end
+          return
+      catch err
+          fprintf(['  WARNING: %s is unreadable (%s); ' ...
+                   'trying the next revision\n'], name, err.identifier);
+      end
+  end
