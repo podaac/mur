@@ -61,6 +61,7 @@
         <li><a href="#register">5. Generate, validate, deploy</a></li>
         <li><a href="#firstjob">6. One landice job, by hand</a></li>
         <li><a href="#day">7. A full day</a></li>
+        <li><a href="#rerelease">Re-releasing a new version</a></li>
       </ul>
     </div>
 
@@ -245,15 +246,29 @@ nohup python utils/upload_static_resources.py \
 
 <pre><code># an explicit tag, not the default branch-and-hash: the CWL pins
 # dockerPull to an exact tag and algorithm_version must match it
-./utils/build_and_push.sh --push --tag 2.0.0
+./utils/build_and_push.sh --push --tag 2.0.0 --with-dps</code></pre>
 
-./utils/build_dps_images.sh --tag 2.0.0 --push --verify</code></pre>
+    <p><code>--with-dps</code> chains <code>build_dps_images.sh</code> onto the
+    same run, passing the tag and <code>--push --verify</code> through. The two
+    can still be run separately, but they should not be: a <code>-dps</code>
+    variant captures the scripts of the image beneath it, so rebuilding a base
+    without rebuilding its variant leaves MAAP running whatever the previous
+    layer captured. Chaining removes the chance of doing one and forgetting the
+    other.</p>
 
     <p>A CWL <code>DockerRequirement</code> carries no registry credentials, so
     DPS cannot pull a private package. <code>--verify</code> checks anonymous
     pull; if it fails, make each package public in the registry's settings.</p>
 
     <h2 id="register">5. Generate, validate, deploy</h2>
+
+    <p><strong>Run this in the workspace, not on the build machine.</strong>
+    <code>deploy_algorithm_from_cwl_file()</code> takes a
+    <code>file_path</code> on the local filesystem, so the CWL has to exist on
+    the machine that deploys it. Generating it anywhere else means committing
+    and pulling before you can deploy &mdash; an extra round trip, and a chance
+    to deploy a CWL that does not match the configs beside it. Nothing here
+    needs Docker or MATLAB; it is config in, YAML out.</p>
 
 <pre><code>pip install cwltool ogc_ap_validator pyyaml
 ./utils/generate_cwl.sh</code></pre>
@@ -266,17 +281,32 @@ nohup python utils/upload_static_resources.py \
     generated CWL is committed, because it is the deployment artifact and the
     generator expects hand-edits.</p>
 
+    <div class="note">
+      <p><strong>If it fails on the build machine.</strong> Two preconditions
+      are easy to miss outside the workspace: the script clones
+      <code>ogc-app-pack-generator</code> from GitHub on first run, so it needs
+      outbound network; and the generator itself needs <code>pyyaml</code>
+      installed for whichever interpreter <code>PYTHON=</code> selects
+      (default <code>python3</code>, <em>not</em> a virtualenv unless you say
+      so). A missing <code>cwltool</code> or <code>ap-validator</code> is not a
+      failure &mdash; those are reported as SKIPPED and the CWL is still
+      written.</p>
+    </div>
+
     <p>Deploy from the workspace, cheapest first:</p>
-<pre><code>from maap.maap import MAAP
-maap = MAAP()
+<pre><code>python utils/deploy_algorithms.py --dry-run   # see what would happen
+python utils/deploy_algorithms.py</code></pre>
 
-for m in ['iquam', 'landice', 'l2p', 'mrva']:
-    r = maap.deploy_algorithm_from_cwl_file(
-        file_path=f'/home/jovyan/mur/maap/cwl_workflows/process_mur-{m}_2.0.0.cwl')
-    print(m, r.status_code, r.json())      # 202 == accepted
-
-maap.get_deployment_status(deployment_id).json()["status"]
-maap.list_algorithms().json()</code></pre>
+    <p>That cross-checks each CWL against its config, registers all four in
+    that order, and reports the <code>processID</code> MAAP assigns to each.
+    Use the script rather than a hand-written
+    <code>deploy_algorithm_from_cwl_file()</code> loop: deployment is
+    <em>asynchronous</em>, and MAAP answers <code>202 Accepted</code> with a
+    <code>deploymentJobID</code> before the process is registered. Listing the
+    algorithms straight away shows only the previous version, so treating the
+    202 as done reports success for a deployment that has not happened yet.
+    The script polls until each one appears and says plainly if it does
+    not.</p>
 
     <p>That order is not arbitrary. Each step proves exactly one new mechanism:
     iQUAM has no static inputs and no S3 reads, so it proves registration and
@@ -369,6 +399,131 @@ mur-maap resume --latest --once        # after each cull</code></pre>
 
 <pre><code>mur-viewer ~/my-private-bucket/dps_output/mur-mrva/&lt;tag&gt;/.../*.nc --info
 mur-web-viewer                          # Streamlit on :8501</code></pre>
+
+    <h2 id="rerelease">Re-releasing a new version</h2>
+
+    <p>Steps&nbsp;0&ndash;7 are the first time. Afterwards, shipping a code
+    change is a shorter loop &mdash; but it is not "rebuild the tag", and the
+    step people skip fails silently.</p>
+
+    <div class="warn">
+      <p><strong>Bump the version; never rebuild a tag in place.</strong>
+      <code>cwltool</code> runs <code>docker pull</code> only when
+      <code>docker inspect &lt;dockerPull&gt;</code> <em>fails</em>. A DPS
+      worker that has already run <code>l2p-dps:2.0.3</code> keeps its cached
+      copy of that tag for good, while a freshly scaled-up worker pulls the new
+      bits &mdash; so which code a job runs depends on which worker takes it,
+      and nothing in the output says which.</p>
+
+      <p>And MAAP keeps every version ever registered, so asking for a version
+      that is merely <em>old</em> is not an error: it resolves, it submits, the
+      job runs, and it runs the previous image. A half-finished bump produces a
+      pipeline that looks entirely healthy while running last week's code.</p>
+    </div>
+
+    <div class="warn">
+      <p><strong>Do the image on the build machine and everything else in the
+      workspace &mdash; both on the same commit.</strong> The build machine has
+      Docker and the MATLAB base image; the workspace is where
+      <code>deploy_algorithm_from_cwl_file()</code> needs the CWL to exist. So
+      the split is forced. What is <em>not</em> forced, and is the whole
+      discipline of a release, is that both halves sit on the same source.</p>
+
+      <p>A version number is a string you type in two places. It does not
+      certify that the image and the CWL describe the same code, and the
+      failure mode is silent: on 2026-09-24 an image built from a commit three
+      behind the fix was tagged 2.0.4, registered as 2.0.4, and ran &mdash;
+      reproducing a bug that had already been fixed, under a version number
+      that said otherwise. Nothing in the tag, the registration or the CWL
+      disagreed. Only the build stamp did.</p>
+    </div>
+
+    <h3>On the build machine &mdash; the image, and nothing else</h3>
+
+<pre><code>git pull
+git rev-parse --short HEAD              # note this; the image records it
+
+./utils/build_and_push.sh --push --tag 2.0.5 --with-dps</code></pre>
+
+    <p>No config edits here. The build reads its tag from the command line and
+    never opens <code>algorithm_config.yml</code>, so editing configs on this
+    machine buys nothing and gives the two checkouts a way to drift.</p>
+
+    <p><code>--with-dps</code> chains <code>build_dps_images.sh</code> onto the
+    same run. Do not split them: a <code>-dps</code> variant captures the
+    scripts of the image beneath it, so rebuilding a base and forgetting its
+    variant publishes a new tag carrying the <em>old</em> entrypoint &mdash;
+    which looks exactly like the bug you just fixed failing to be fixed.</p>
+
+    <h3>In the workspace &mdash; same commit, then everything else</h3>
+
+    <p>The version lives in five places &mdash; <code>algorithm_version</code>
+    and the image tag inside <code>algorithm_container_url</code> in each of
+    the four <code>maap/&lt;module&gt;/algorithm_config.yml</code> files, plus
+    <code>ALGORITHM_VERSION</code> in <code>mur_maap/version.py</code>, which is
+    what the orchestrator asks MAAP to resolve. One script edits all five, and
+    it runs here rather than on the build machine so that the configs, the CWL
+    and the deployment are all produced from one checkout:</p>
+
+<pre><code>git pull
+git rev-parse --short HEAD              # MUST match the build machine
+
+./utils/bump_algorithm_version.sh 2.0.5           # --dry-run to preview
+./utils/generate_cwl.sh                           # optionally --pin-digest
+python -m pytest tests/test_algorithm_configs.py
+
+python utils/deploy_algorithms.py --dry-run
+python utils/deploy_algorithms.py
+
+git commit -am "chore(maap): application packages 2.0.5"
+git push                                          # the CWL, if you want it tracked</code></pre>
+
+    <p>The tag passed to the build and the version bumped to here must be the
+    same string. Nothing checks that for you.</p>
+
+    <div class="warn">
+      <p><strong>Confirm the stamp on the first job of every new version.</strong>
+      Every module entrypoint prints its source commit to stderr before doing
+      anything:</p>
+
+<pre><code>MUR image build: 3d47aaa-20260924T154617Z (module: mrva)</code></pre>
+
+      <p>That short hash is the only end-to-end evidence that the image running
+      on DPS was built from the source you believe you shipped. Read it before
+      reading anything else in a failure log. A <code>-dirty</code> suffix means
+      the build machine had uncommitted changes, so the stamp names a commit the
+      image does not actually match &mdash; treat that as unreleasable.</p>
+    </div>
+
+    <div class="note">
+      <p><strong>Why the tests run after generation, not before.</strong>
+      <code>tests/test_algorithm_configs.py</code> asserts all five places agree
+      <em>and</em> that a CWL exists for the current version. Between the bump
+      and the regenerate, that last one fails by design &mdash; the configs say
+      2.0.4 and <code>maap/cwl_workflows/</code> still holds only 2.0.3. That is
+      the failure telling you the release is half-finished, so run the suite on
+      the side of the split where it can pass.</p>
+    </div>
+
+    <p>Old CWLs are deliberately kept rather than deleted: they are how you
+    redeploy a previous version after a bad one
+    (<code>python utils/deploy_algorithms.py --version 2.0.3</code>). That stays
+    safe only because nothing picks a CWL up by globbing the directory &mdash;
+    the path is built from an explicit version and must exist at that exact
+    name.</p>
+
+    <h3>When a tag may have been rebuilt anyway</h3>
+
+    <p><code>./utils/generate_cwl.sh --pin-digest</code> rewrites
+    <code>dockerPull</code> to an immutable <code>@sha256:</code> digest instead
+    of a tag. A digest cannot be served from a stale cache &mdash;
+    <code>docker inspect repo@sha256:new</code> fails on a host holding only the
+    old bits, so the pull happens. It resolves the digest over HTTPS against the
+    registry rather than through Docker, so it works in the workspace, and it
+    requires the images to have been pushed first.</p>
+
+    <p>Redeploy afterwards either way: a registration holds its own frozen copy
+    of the CWL, so editing the file changes nothing already deployed.</p>
 
     <footer>
       <p>Part of the <a href="https://github.com/podaac/mur">PO.DAAC MUR SST</a> project. This site is
