@@ -27,10 +27,43 @@
       integer coeffSize
       integer infoSize
 
+! Storage precision for infoMatrix ONLY. Build with -DINFOMATRIX_R4 to halve
+! it; the default is unchanged real*8.
+!
+! infoMatrix is 49 reals per coefficient and dominates everything else: at
+! L=11 it is 49.43 GiB of a 55.48 GiB working set. In real*4 that becomes
+! 24.72 GiB, for 30.77 GiB total.
+!
+! Why single precision is plausible here -- it is already the precision this
+! solver works in everywhere else:
+!   - the PCG vectors r,p,z,w and the arrays behind them (u,v,h) are real*4
+!   - csp/dsp, the coefficients being solved for, are real*4
+!   - there is no implicit none in this file, so rhoNew -- the convergence
+!     reduction, sum(r*z) over every coefficient -- is real*4 as well
+!   - the preconditioner is diagonal (diagPCG=.true.), and nothing here is
+!     factorized: the pointer named L is the thin-plate stencil accumulator,
+!     not a Cholesky factor
+!   - mrva.f already loosens the tolerance to 1.0e-3 for L>=9, which is far
+!     above what real*4 can resolve
+! So real*8 on the matrix is the only double left in a single-precision
+! solver, and the convergence test cannot perceive the extra digits.
+!
+! infoVector stays real*8: it is the right-hand side, it is 1.01 GiB, and
+! halving it would save nothing worth arguing about.
+!
+! UNVALIDATED. Nothing here has been run. Before trusting a real*4 build,
+! process one day both ways and diff the L4 output -- a precision change to a
+! scientific code that nobody diffed is a change nobody can defend.
+#ifdef INFOMATRIX_R4
+      integer, parameter :: imk = 4
+#else
+      integer, parameter :: imk = 8
+#endif
+
 ! Matrix-free mode: comment out infoMatrix allocation to save memory
 ! MATRIX_FREE mode computes stencil coefficients on-the-fly
 #ifndef MATRIX_FREE
-      real*8, allocatable, target :: infoMatrix(:,:,:,:,:,:,:)
+      real(imk), allocatable, target :: infoMatrix(:,:,:,:,:,:,:)
 #endif
       real*8, allocatable, target :: infoVector(:,:,:,:)
 
@@ -244,7 +277,7 @@
 !!!!!!!!!!
       subroutine spmDiagonal(w,n)
 #ifndef MATRIX_FREE
-      real*8,pointer:: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
       Asp=>infoMatrix
       do k=1,mz3
       do j=-1,my+1
@@ -262,7 +295,8 @@
       integer n,k
 
 #ifndef MATRIX_FREE
-      real*8, pointer :: bsp(:,:,:,:),Asp(:,:,:,:,:,:,:)
+      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
       bsp=>infoVector
       Asp=>infoMatrix
 
@@ -324,7 +358,7 @@
 
 #ifndef MATRIX_FREE
       real*8 L1(-1:1,-2:2),L2(-2:2,-2:2)
-      real*8, pointer :: L(:,:,:,:,:,:,:)
+      real(imk), pointer :: L(:,:,:,:,:,:,:)
       L=>infoMatrix
 
       L1(:,:)=0.; L1(0:1,-1)=-1.; L1(-1:0,1)=-1.
@@ -400,7 +434,8 @@
 #endif
 
 #ifndef MATRIX_FREE
-      real*8, pointer :: bsp(:,:,:,:),Asp(:,:,:,:,:,:,:)
+      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
       bsp=>infoVector
       Asp=>infoMatrix
 
@@ -553,7 +588,7 @@
 
 #ifndef MATRIX_FREE
       real*8 L1(-1:1,-2:2),L2(-2:2,-2:2)
-      real*8, pointer :: L(:,:,:,:,:,:,:)
+      real(imk), pointer :: L(:,:,:,:,:,:,:)
       L=>infoMatrix
 
       L1(:,:)=0.; L1(0:1,-1)=-1.; L1(-1:0,1)=-1.
@@ -637,7 +672,8 @@
       integer n,k,i,j
 
 #ifndef MATRIX_FREE
-      real*8, pointer :: bsp(:,:,:,:),Asp(:,:,:,:,:,:,:)
+      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
       bsp=>infoVector
       Asp=>infoMatrix
         if(j.le.1) then  
@@ -692,7 +728,7 @@
       real bx(4),by(4)
       real*8, pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
       bsp=>infoVector
 #ifndef MATRIX_FREE
@@ -753,7 +789,7 @@
       real bx(4),by(4)
       real*8, pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
       bsp=>infoVector
 #ifndef MATRIX_FREE
@@ -804,7 +840,7 @@
       real bx(4),by(4)
       real*8, pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
       bsp=>infoVector
 #ifndef MATRIX_FREE
@@ -858,7 +894,7 @@
       real bx(4),by(4)
       real*8, pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
       bsp=>infoVector
 #ifndef MATRIX_FREE
@@ -920,7 +956,7 @@
       real bx(4),by(4)
       real*8, pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
       bsp=>infoVector
 #ifndef MATRIX_FREE
@@ -983,7 +1019,7 @@
       real bx(4),by(4)
       real*8, pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
       bsp=>infoVector
 #ifndef MATRIX_FREE
@@ -1044,7 +1080,7 @@
       real bx(4),by(4)
       real*8, pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
       bsp=>infoVector
 #ifndef MATRIX_FREE
@@ -1223,7 +1259,8 @@
 #ifndef MATRIX_FREE
       real step,ratio,threshold
       real resSum,oldSum
-      real*8, pointer :: K4(:,:,:,:,:,:,:),bij(:,:,:,:)
+      real(imk), pointer :: K4(:,:,:,:,:,:,:)
+      real*8, pointer :: bij(:,:,:,:)
       K4=>infoMatrix
       bij=>infoVector
 
@@ -1300,7 +1337,7 @@
 
       real*8, pointer :: b(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: A(:,:,:,:,:,:,:)
+      real(imk), pointer :: A(:,:,:,:,:,:,:)
 #endif
       real, pointer :: r(:,:,:,:),p(:,:,:,:),z(:,:,:,:),w(:,:,:,:)
 

@@ -82,6 +82,17 @@ FCOPT_DEBUG = -g -traceback -check bounds -check uninit -fpe0 -warn all -O0
 # -warn all = Enable all compiler warnings
 # -O0 = No optimization (makes debugging easier, variables not optimized away)
 
+# infoMatrix storage precision. Off by default: real*8, exactly as before.
+# INFOMATRIX_R4=1 halves the dominant array (49.43 -> 24.72 GiB at L=11,
+# 55.48 -> 30.77 GiB total), which is the difference between needing the 64gb
+# pool and fitting it with headroom. See the comment block at the top of
+# spmm.f for why single precision is plausible here, and for the validation
+# this has NOT had.
+ifeq ($(INFOMATRIX_R4),1)
+    FCOPT_BASE += -DINFOMATRIX_R4
+    $(info *** infoMatrix in real*4 -- UNVALIDATED, diff the L4 output ***)
+endif
+
 # Select flags based on DEBUG setting
 ifeq ($(DEBUG),1)
     FCOPT = $(FCOPT_BASE) $(FCOPT_DEBUG) -DDEBUG
