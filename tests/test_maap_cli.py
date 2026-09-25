@@ -340,6 +340,14 @@ def test_a_known_broken_queue_is_called_out_before_submitting(monkeypatch, caplo
 
 
 def test_a_good_queue_map_says_nothing(monkeypatch, caplog):
+    """The healthy-queue example is maap-dps-worker-32gb, chosen deliberately.
+
+    It was maap-dps-worker-64gb until 2026-09-25, when that pool joined
+    BROKEN_QUEUES and this test went red -- which is the test doing its job.
+    32gb is the largest pool that has actually completed work: it carried mrva
+    2.0.6 through L=10. If it ever has to be swapped out too, the fix is not to
+    reach for another name but to notice MUR has nowhere left to run.
+    """
     import logging
     import run_mur_maap
 
@@ -349,7 +357,7 @@ def test_a_good_queue_map_says_nothing(monkeypatch, caplog):
 
     monkeypatch.setattr("mur_maap.client.MaapPyClient", FakeClient)
     config = {"maap": {"queue": "maap-dps-worker-8gb",
-                       "queues": {"mur-mrva": "maap-dps-worker-64gb"},
+                       "queues": {"mur-mrva": "maap-dps-worker-32gb"},
                        "workspace_root": "s3://bucket/user"},
               "l2p": {"active_sensors": [], "sensors": {}}}
     args = run_mur_maap.parse_args(["--config", "x.json"])
