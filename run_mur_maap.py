@@ -933,6 +933,25 @@ BROKEN_QUEUES = {
     "maap-dps-worker-32vcpu-64gb":
         "its workers cannot reach /var/run/docker.sock, so cwltool fails to "
         "pull the image and every job dies before the container starts",
+    # 2026-09-25, job at 23:23Z: an unmodified mur-mrva 2.0.6 submitted with
+    # --queue maap-dps-worker-64gb failed with the same docker.sock permission
+    # denied, at the same point -- before the image was pulled. The same image
+    # and CWL had run for over an hour on maap-dps-worker-32gb minutes earlier,
+    # reaching L=10.
+    #
+    # Weaker evidence than the entry above, which was established by A/B: this
+    # is ONE observation, and the previous single-sample verdict on this pool
+    # (a MAAP API connection refused) turned out to be transient. Confirm with
+    # a cheap job -- --execute iquam --queue maap-dps-worker-64gb on a day not
+    # already in the bucket -- and delete this entry if it passes.
+    #
+    # If it holds, MAAP has no working pool above 32 GB, which is a platform
+    # problem rather than a queue quirk, and the ops ticket becomes the
+    # critical path for reaching L=11 at all.
+    "maap-dps-worker-64gb":
+        "its workers appear to hit the same /var/run/docker.sock permission "
+        "denial as 32vcpu-64gb, so no MUR job gets as far as starting "
+        "(observed once, 2026-09-25 -- see the note in the source)",
 }
 
 
