@@ -31,11 +31,23 @@ release_notes: >
 
 run_command: /opt/mrva/bin/entrypoint.sh
 
-# 64 GiB / 16 cores. The local docker settings are 72g/32, but those are
-# ceilings rather than measurements. Note MRVA reaches L=9, which
-# mrva/docs/MEMORY_ANALYSIS_AND_MATRIX_FREE_PLAN.md puts at ~60 GB total
-# (infoMatrix alone is 53.71 GB) -- so the headroom here is real but thin.
-# If a job OOMs at the finest level, this is the first number to raise.
+# 64 GiB / 16 cores. MRVA runs L0..LF = 2..11 (NRT restarts at L0=6), and the
+# cost is dominated by the finest level: infoMatrix is 49.3 GiB at L=11 in NRT,
+# 53.7 GiB in REA, with a total working set near 55 GiB. Production peaks at
+# ~72 GB once MATLAB -- still resident while the Fortran runs -- is counted, so
+# 64 GiB is not comfortable, it is the largest pool available that is not
+# maap-dps-worker-32vcpu-64gb (which cannot reach the Docker socket).
+#
+# Every earlier version of this comment, and the memory analysis it cited, was
+# 17.4x too high: that document's table is shifted two levels, so its "L=9,
+# 53.71 GB" is really L=11. Corrected figures and the three confirmations are
+# at the top of mrva/docs/MEMORY_ANALYSIS_AND_MATRIX_FREE_PLAN.md. The real
+# L=9 needs 3.46 GiB, and the crash once attributed to it was the container
+# stack, fixed by -heap-arrays rather than by more RAM.
+#
+# DPS has no swap, and it would not help if it did -- the PCG streams the whole
+# matrix every iteration, so paging it costs ~18 s/iteration on NVMe before any
+# arithmetic.
 # These are measurements, not a request. They are deliberately NOT emitted into
 # the CWL as ResourceRequirement ramMin/coresMin: DPS runs cwltool without
 # --strict-memory-limit / --strict-cpu-limit, so those fields reserve nothing

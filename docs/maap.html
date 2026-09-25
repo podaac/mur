@@ -162,12 +162,27 @@
     </table>
     </div>
 
-    <p>Only MRVA needs a large instance. Its figure is not arbitrary: the
-    analysis reaches L=9, whose working set the memory analysis puts at roughly
-    60&nbsp;GB, with <code>infoMatrix</code> alone at 53.71&nbsp;GB. DPS has no
-    swap, so a request below that produces an out-of-memory failure at the
-    finest level rather than a clean scheduling refusal &mdash; which is much
-    harder to read from a job log.</p>
+    <p>Only MRVA needs a large instance, and the cost is almost entirely the
+    finest level. The analysis runs to <code>LF=11</code>, where
+    <code>infoMatrix</code> is 49.3&nbsp;GiB in NRT and 53.7&nbsp;GiB in REA,
+    for a working set near 55&nbsp;GiB. Production peaks around 72&nbsp;GB once
+    MATLAB is counted &mdash; it stays resident while the Fortran runs &mdash;
+    so 64&nbsp;GiB is the largest pool available rather than a comfortable
+    one.</p>
+
+    <p>DPS has no swap, and swap would not rescue this anyway: the PCG solver
+    streams the entire matrix once per iteration, so paging it would cost about
+    18&nbsp;seconds per iteration on NVMe before any arithmetic, against
+    thousands of iterations. Note also that cwltool runs containers without
+    <code>--memory</code>, so there is no cgroup limit and an exit&nbsp;137 is
+    the host kernel's OOM killer.</p>
+
+    <p>An earlier version of this page said the analysis reached L=9 at roughly
+    60&nbsp;GB. That came from a memory analysis whose table is shifted two
+    levels, overstating every level by 17.4&times;; its &ldquo;L=9,
+    53.71&nbsp;GB&rdquo; is really L=11. The real L=9 needs 3.46&nbsp;GiB. See
+    the correction at the top of
+    <code>mrva/docs/MEMORY_ANALYSIS_AND_MATRIX_FREE_PLAN.md</code>.</p>
 
     <p>Two flags are deliberately not exposed.
     <code>--l4-reference-root</code> names a <em>directory</em> tree, and
