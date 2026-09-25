@@ -27,14 +27,22 @@
       integer coeffSize
       integer infoSize
 
-! Storage precision for infoMatrix ONLY. Build with -DINFOMATRIX_R4 to halve
-! it; the default is unchanged real*8.
+! Storage precision for infoMatrix ONLY. real*4 by default; build with
+! -DINFOMATRIX_R8 to restore real*8.
 !
-! infoMatrix is 49 reals per coefficient and dominates everything else: at
-! L=11 it is 49.43 GiB of a 55.48 GiB working set. In real*4 that becomes
-! 24.72 GiB, for 30.77 GiB total.
+! infoMatrix is 49 reals per coefficient and dominates everything else. At
+! L=11 the working set is 55.48 GiB with real*8, of which infoMatrix is
+! 49.43. In real*4 that becomes 24.72, for 30.77 GiB total.
 !
-! Why single precision is plausible here -- it is already the precision this
+! real*4 is the DEFAULT because real*8 does not fit anywhere we can run. The
+! largest usable DPS pool is 64 GiB, production peaks near 72 GB at L=11 once
+! MATLAB -- still resident while this runs -- is counted, and the one 64 GiB
+! pool with more cores cannot reach the Docker socket. A real*8 build is
+! therefore not a fallback we can select; it is a configuration with no
+! machine. Leaving it the default would mean shipping something that cannot
+! execute.
+!
+! Why single precision is defensible here -- it is already the precision this
 ! solver works in everywhere else:
 !   - the PCG vectors r,p,z,w and the arrays behind them (u,v,h) are real*4
 !   - csp/dsp, the coefficients being solved for, are real*4
@@ -43,21 +51,25 @@
 !   - the preconditioner is diagonal (diagPCG=.true.), and nothing here is
 !     factorized: the pointer named L is the thin-plate stencil accumulator,
 !     not a Cholesky factor
-!   - mrva.f already loosens the tolerance to 1.0e-3 for L>=9, which is far
-!     above what real*4 can resolve
-! So real*8 on the matrix is the only double left in a single-precision
-! solver, and the convergence test cannot perceive the extra digits.
+!   - mrva.f already loosens the tolerance to 1.0e-3 for L>=9, far above what
+!     real*4 can resolve
+! So real*8 on the matrix was the last double in a single-precision solver,
+! and the convergence test could not perceive the digits it cost 25 GiB for.
 !
 ! infoVector stays real*8: it is the right-hand side, it is 1.01 GiB, and
 ! halving it would save nothing worth arguing about.
 !
-! UNVALIDATED. Nothing here has been run. Before trusting a real*4 build,
-! process one day both ways and diff the L4 output -- a precision change to a
-! scientific code that nobody diffed is a change nobody can defend.
-#ifdef INFOMATRIX_R4
-      integer, parameter :: imk = 4
-#else
+! STILL UNVALIDATED. The obvious check -- process a day both ways and diff --
+! cannot be run, because the real*8 side does not fit. Validation is therefore
+! against PRODUCTION output for the same day, which is the real reference
+! anyway. Until that comparison exists, treat any L4 granule this produces as
+! provisional. A cheaper partial check is available if wanted: at LF=9 both
+! precisions fit easily (3.46 GiB), so a reduced-level run could be diffed
+! both ways to catch a gross error, though it would not exercise L=10-11.
+#ifdef INFOMATRIX_R8
       integer, parameter :: imk = 8
+#else
+      integer, parameter :: imk = 4
 #endif
 
 ! Matrix-free mode: comment out infoMatrix allocation to save memory

@@ -19,13 +19,15 @@
 # DEBUG: Set to 1 to enable debug build with symbols, bounds checking, and tracebacks
 #        Default is 0 (production build with full optimizations)
 ARG DEBUG=0
-# infoMatrix storage precision for the main mrva solver. 0 (default) keeps
-# real*8. 1 builds it real*4, halving the dominant array -- see the comment
-# block at the top of mrva/src/fortran/spmm.f, including the validation it has
-# not had. Applied only to the main Fortran build: cx/ carries its own copy of
-# spmm.f with no preprocessor guards and cx/Makefile has no -fpp, so the flag
-# would be silently ignored there.
-ARG INFOMATRIX_R4=0
+# infoMatrix storage precision for the main mrva solver. 0 (default) builds it
+# real*4: 30.77 GiB at L=11 rather than 55.48, which is what makes the run fit
+# a 64 GiB pool at all. 1 restores real*8, which needs more memory than any
+# pool we can reach -- see the comment block at the top of
+# mrva/src/fortran/spmm.f, including the validation this has not had. Applied
+# only to the main Fortran build: cx/ carries its own copy of spmm.f with no
+# preprocessor guards and cx/Makefile has no -fpp, so the flag would be
+# silently ignored there.
+ARG INFOMATRIX_R8=0
 
 # ========================================================================
 # Stage 1: Fortran Build Stage (Intel oneAPI HPC Toolkit with ifort)
@@ -34,7 +36,7 @@ FROM intel/oneapi-hpckit:2024.0.1-devel-ubuntu22.04 AS fortran-builder
 
 # Re-declare ARGs after FROM to make them available in this stage
 ARG DEBUG
-ARG INFOMATRIX_R4
+ARG INFOMATRIX_R8
 
 # Remove problematic Intel GPU repository (not needed for Fortran compilation)
 RUN rm -f /etc/apt/sources.list.d/intel-graphics.list 2>/dev/null || true
@@ -91,7 +93,7 @@ RUN cd /app/fortran && \
     fi && \
     ifort --version && \
     make clean && \
-    make DEBUG=${DEBUG:-0} INFOMATRIX_R4=${INFOMATRIX_R4:-0} && \
+    make DEBUG=${DEBUG:-0} INFOMATRIX_R8=${INFOMATRIX_R8:-0} && \
     echo "Main Fortran executables compiled successfully" && \
     echo "Verifying main executables:" && \
     ls -lh /app/fortran/mrva \

@@ -164,11 +164,24 @@
 
     <p>Only MRVA needs a large instance, and the cost is almost entirely the
     finest level. The analysis runs to <code>LF=11</code>, where
-    <code>infoMatrix</code> is 49.3&nbsp;GiB in NRT and 53.7&nbsp;GiB in REA,
-    for a working set near 55&nbsp;GiB. Production peaks around 72&nbsp;GB once
-    MATLAB is counted &mdash; it stays resident while the Fortran runs &mdash;
-    so 64&nbsp;GiB is the largest pool available rather than a comfortable
-    one.</p>
+    <code>infoMatrix</code> &mdash; 49 reals per spline coefficient &mdash;
+    dominates everything else.</p>
+
+    <p>In <code>real*8</code> that is a 55.48&nbsp;GiB working set, and
+    production peaks near 72&nbsp;GB once MATLAB is counted, since it stays
+    resident while the Fortran runs. That does not fit any pool available to
+    us, so since 2.0.6 <code>infoMatrix</code> is built <code>real*4</code>,
+    giving 30.77&nbsp;GiB. Use <code>maap-dps-worker-64gb</code> even so:
+    30.77&nbsp;GiB in a 32&nbsp;GiB pool leaves about 1.2&nbsp;GiB for MATLAB
+    and the OS, which is not headroom.</p>
+
+    <p>The precision change is <strong>not yet validated against a reference
+    run</strong>. The obvious check &mdash; the same day both ways &mdash;
+    cannot be performed, because the <code>real*8</code> side has nowhere to
+    run. Validation is against production output for the same day; until that
+    comparison exists, treat the L4 granule as provisional. Build with
+    <code>--build-arg INFOMATRIX_R8=1</code> to restore the old precision on a
+    machine large enough for it.</p>
 
     <p>DPS has no swap, and swap would not rescue this anyway: the PCG solver
     streams the entire matrix once per iteration, so paging it would cost about

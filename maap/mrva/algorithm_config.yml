@@ -31,12 +31,15 @@ release_notes: >
 
 run_command: /opt/mrva/bin/entrypoint.sh
 
-# 64 GiB / 16 cores. MRVA runs L0..LF = 2..11 (NRT restarts at L0=6), and the
-# cost is dominated by the finest level: infoMatrix is 49.3 GiB at L=11 in NRT,
-# 53.7 GiB in REA, with a total working set near 55 GiB. Production peaks at
-# ~72 GB once MATLAB -- still resident while the Fortran runs -- is counted, so
-# 64 GiB is not comfortable, it is the largest pool available that is not
-# maap-dps-worker-32vcpu-64gb (which cannot reach the Docker socket).
+# 64 GiB / 16 cores. MRVA runs L0..LF = 2..11 (NRT restarts at L0=6) and the
+# cost is dominated by the finest level. Since 2.0.6 infoMatrix is built
+# real*4, so L=11 is a 30.77 GiB working set rather than 55.48.
+#
+# Still put mrva on maap-dps-worker-64gb, not -32gb. 30.77 GiB against a
+# 32 GiB pool leaves ~1.2 GiB for MATLAB, which is still resident while the
+# Fortran runs, plus the OS -- that is not headroom, it is a coin flip. On
+# 64 GiB there is 33 GiB spare. The larger pool, maap-dps-worker-32vcpu-64gb,
+# remains unusable: its workers cannot reach the Docker socket.
 #
 # Every earlier version of this comment, and the memory analysis it cited, was
 # 17.4x too high: that document's table is shifted two levels, so its "L=9,
