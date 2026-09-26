@@ -256,6 +256,81 @@ finish_output_redirect() {
     cp -a /data/output/netcdf/. "$root/netcdf/" 2>/dev/null || true
 }
 
+# What the box actually has, and where scratch really lives.
+#
+# The finest analysis level dominates everything: at L=11 the Fortran holds
+# ~28.8 GiB of grid, against a worker whose size we only know from the queue
+# name. Three runs have now been lost to an out-of-memory kill whose margin
+# nobody could quantify afterwards, because the log recorded neither the RAM
+# available nor how much of it scratch was consuming.
+#
+# The /tmp question is the one worth asking out loud. DPS bind-mounts the
+# host's /tmp into the container, and localize_all_inputs stages every BIC
+# and BIP under it. If that filesystem is tmpfs, those files are RAM -- they
+# compete directly with the solver and never appear in any process's RSS, so
+# the job dies with gigabytes seemingly unaccounted for. If it is real disk,
+# they cost nothing and this line says so.
+report_memory_budget() {
+    # Gated on /proc, which is the honest condition: /proc/meminfo and GNU
+    # `stat -f -c` are both Linux-only, and on a developer's Mac this would
+    # otherwise print nonsense (BSD stat reads -c as a format string). The
+    # container is Linux; anywhere else, say nothing rather than guess.
+    [ -r /proc/meminfo ] || return 0
+
+    awk '/^MemTotal:/     {t=$2}
+         /^MemAvailable:/ {a=$2}
+         END {printf "Memory:   %.1f GiB total, %.1f GiB available at start\n",
+                     t/1048576, a/1048576}' /proc/meminfo
+
+    local tmpdir="${TMP_DIR:-/tmp/mrva_tmp}" fstype
+    fstype=$(stat -f -c %T "$(dirname "$tmpdir")" 2>/dev/null | head -1)
+    [ -n "$fstype" ] || fstype=unknown
+    case "$fstype" in
+        tmpfs|ramfs)
+            echo "Scratch:  $tmpdir is on $fstype -- STAGED INPUTS CONSUME RAM and compete with the solver" ;;
+        unknown)
+            echo "Scratch:  $tmpdir filesystem could not be determined" ;;
+        *)
+            echo "Scratch:  $tmpdir is on $fstype (disk-backed, costs no RAM)" ;;
+    esac
+}
+
+# Sample how close the box came to full, for the whole process tree.
+#
+# An OOM kill leaves no message of its own: the kernel writes "Killed" and the
+# status is 137. Three runs have died that way with nobody able to say
+# afterwards whether the margin was 200 MB or 8 GB.
+#
+# This samples MemAvailable rather than any process's RSS, deliberately. The
+# solver is three levels down (this shell -> MATLAB -> mrva), a shell's own
+# VmHWM says nothing about its children, and RSS would miss page cache and a
+# tmpfs scratch entirely -- which are exactly the things that might be eating
+# the headroom. What matters is how much the machine had left, and that is
+# what this records.
+start_memory_watch() {
+    MEMWATCH_FILE="${TMP_DIR:-/tmp/mrva_tmp}/.mem-low-water"
+    [ -r /proc/meminfo ] || return 0
+    (
+        low=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+        echo "$low" > "$MEMWATCH_FILE"
+        while sleep 15; do
+            now=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null) || break
+            if [ -n "$now" ] && [ "$now" -lt "$low" ]; then
+                low=$now
+                echo "$low" > "$MEMWATCH_FILE"
+            fi
+        done
+    ) &
+    MEMWATCH_PID=$!
+}
+
+stop_memory_watch() {
+    [ -n "${MEMWATCH_PID:-}" ] && kill "$MEMWATCH_PID" 2>/dev/null
+    [ -r "${MEMWATCH_FILE:-}" ] || return 0
+    awk '{printf "Memory low-water mark: %.2f GiB available at the tightest\n", $1/1048576}' \
+        "$MEMWATCH_FILE" >&2
+}
+
 main() {
     set -e
     parse_args "$@" || exit 1
@@ -341,6 +416,7 @@ main() {
     echo "-----------------------------------------"
     echo "Stack:    $(ulimit -s) (soft limit)"
     echo "KMP_STACKSIZE: $KMP_STACKSIZE"
+    report_memory_budget
     echo "========================================="
     echo ""
 
@@ -360,15 +436,26 @@ main() {
 
     echo "Starting MATLAB runtime..."
     build_command || exit 1
-    # Not `exec` when a copy-mode stage-out still has to run afterwards;
-    # exec would replace this shell and the copy would never happen.
+
+    # No `exec` any more. It used to be the default, and was given up so that
+    # this shell outlives the run and can report the memory low-water mark --
+    # the number three OOM post-mortems have wanted and not had. The cost is a
+    # bash process of a few MB and the need to forward signals by hand, which
+    # is done below; on a machine where the question is whether 28.8 GiB fits
+    # in 32, that trade is obviously worth it.
+    start_memory_watch
+    "${CMD[@]}" &
+    local child=$!
+    trap 'kill -TERM '"$child"' 2>/dev/null' TERM INT
+    wait "$child"
+    local rc=$?
+    trap - TERM INT
+
+    stop_memory_watch
     if [ "${MUR_STAGE_OUT_MODE:-none}" = "copy" ]; then
-        "${CMD[@]}"
-        local rc=$?
         finish_output_redirect
-        exit "$rc"
     fi
-    exec "${CMD[@]}"
+    exit "$rc"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
