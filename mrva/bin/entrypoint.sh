@@ -312,12 +312,29 @@ start_memory_watch() {
     [ -r /proc/meminfo ] || return 0
     (
         low=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+        reported=$low
         echo "$low" > "$MEMWATCH_FILE"
-        while sleep 15; do
+        # Every 2 s, not 15. The allocation that kills this job is one
+        # `infoMatrix=0.` faulting in 24.72 GiB, which takes seconds -- a
+        # 15 s sampler walks straight past it and reports a low-water mark
+        # from before the event that mattered.
+        while sleep 2; do
             now=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null) || break
-            if [ -n "$now" ] && [ "$now" -lt "$low" ]; then
+            [ -n "$now" ] || continue
+            if [ "$now" -lt "$low" ]; then
                 low=$now
                 echo "$low" > "$MEMWATCH_FILE"
+                # Emit each new low as it happens, not just once at the end.
+                # Job 890a1c7a proved the end-of-run report is unreliable: the
+                # OOM killer took this shell along with the solver, so nothing
+                # was ever printed and the run taught us nothing about its own
+                # margin. A line already in the log cannot be killed. The
+                # 256 MiB threshold keeps a long run from filling stderr while
+                # still resolving every allocation that matters here.
+                if [ $((reported - low)) -ge 262144 ]; then
+                    reported=$low
+                    awk -v k="$low" 'BEGIN{printf "  [mem] %.2f GiB available\n", k/1048576}' >&2
+                fi
             fi
         done
     ) &

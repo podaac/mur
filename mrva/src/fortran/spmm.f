@@ -56,8 +56,9 @@
 ! So real*8 on the matrix was the last double in a single-precision solver,
 ! and the convergence test could not perceive the digits it cost 25 GiB for.
 !
-! infoVector stays real*8: it is the right-hand side, it is 1.01 GiB, and
-! halving it would save nothing worth arguing about.
+! infoVector follows the same kind. It was left real*8 at first on the grounds
+! that 1.01 GiB was not worth arguing about; job 890a1c7a then missed by
+! roughly that much, on a 31.0 GiB worker with 29.3 GiB free at start.
 !
 ! STILL UNVALIDATED. The obvious check -- process a day both ways and diff --
 ! cannot be run, because the real*8 side does not fit. Validation is therefore
@@ -77,7 +78,11 @@
 #ifndef MATRIX_FREE
       real(imk), allocatable, target :: infoMatrix(:,:,:,:,:,:,:)
 #endif
-      real*8, allocatable, target :: infoVector(:,:,:,:)
+! infoVector follows infoMatrix. It is only 1.01 GiB at L=11, but the run is
+! short by about that much, and the argument is if anything stronger: spmPCG
+! does `r(i,j,n,k)=b(i,j,n,k)` where r is real*4, so the solver has always
+! truncated this to single precision on the very first line it reads it.
+      real(imk), allocatable, target :: infoVector(:,:,:,:)
 
       real S00(-3:3,-3:3),S11(-3:3,-3:3),S22(-3:3,-3:3)
       real S01(-3:3,-3:3),S10(-3:3,-3:3)
@@ -307,7 +312,7 @@
       integer n,k
 
 #ifndef MATRIX_FREE
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
       real(imk), pointer :: Asp(:,:,:,:,:,:,:)
       bsp=>infoVector
       Asp=>infoMatrix
@@ -446,7 +451,7 @@
 #endif
 
 #ifndef MATRIX_FREE
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
       real(imk), pointer :: Asp(:,:,:,:,:,:,:)
       bsp=>infoVector
       Asp=>infoMatrix
@@ -684,7 +689,7 @@
       integer n,k,i,j
 
 #ifndef MATRIX_FREE
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
       real(imk), pointer :: Asp(:,:,:,:,:,:,:)
       bsp=>infoVector
       Asp=>infoMatrix
@@ -738,7 +743,7 @@
       real xd(nd),yd(nd),Ex(nd),Ey(nd),Et(nd),wd(nd)
 
       real bx(4),by(4)
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
       real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
@@ -799,7 +804,7 @@
       real xd(nd),yd(nd),zd(nd),wd(nd)
 
       real bx(4),by(4)
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
       real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
@@ -850,7 +855,7 @@
       real scaling(-1:mx+1-cix,-1:my+1)
 
       real bx(4),by(4)
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
       real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
@@ -904,7 +909,7 @@
       real scaling(-1:mx+1-cix,-1:my+1)
 
       real bx(4),by(4)
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
       real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
@@ -966,7 +971,7 @@
       real scaling(-1:mx+1-cix,-1:my+1)
 
       real bx(4),by(4)
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
       real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
@@ -1029,7 +1034,7 @@
       real scaling(-1:mx+1-cix,-1:my+1)
 
       real bx(4),by(4)
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
       real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
@@ -1090,7 +1095,7 @@
       real scaling(-1:mx+1-cix,-1:my+1)
 
       real bx(4),by(4)
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
       real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
@@ -1272,7 +1277,7 @@
       real step,ratio,threshold
       real resSum,oldSum
       real(imk), pointer :: K4(:,:,:,:,:,:,:)
-      real*8, pointer :: bij(:,:,:,:)
+      real(imk), pointer :: bij(:,:,:,:)
       K4=>infoMatrix
       bij=>infoVector
 
@@ -1347,7 +1352,7 @@
       integer minIteration
       parameter(minIteration=5)
 
-      real*8, pointer :: b(:,:,:,:)
+      real(imk), pointer :: b(:,:,:,:)
 #ifndef MATRIX_FREE
       real(imk), pointer :: A(:,:,:,:,:,:,:)
 #endif
