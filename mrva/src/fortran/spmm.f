@@ -186,6 +186,7 @@
       hy=(ymax-ymin)/my
 
 #ifndef MATRIX_FREE
+      call spmReportAlloc()
       allocate(infoMatrix(-1:mx+1-cix,-1:my+1,-3:3,-3:3,nv,nv,mz3))
       infoMatrix=0.
 #else
@@ -205,6 +206,61 @@
       end subroutine
 
 !!!!!!!!!!
+      subroutine spmReportAlloc
+!
+! Say what is about to be allocated, and what the machine has left, IMMEDIATELY
+! before the allocation that decides whether this job survives.
+!
+! Four jobs have now been OOM-killed at the L=10 -> L=11 transition and not one
+! left a usable number. The entrypoint samples MemAvailable every 2 s, which is
+! too coarse: the fatal event is a single `infoMatrix=0.` faulting in tens of
+! gibibytes, and it is over before the next sample. Sampling from outside also
+! cannot attribute the memory -- it says the box filled, not what filled it.
+!
+! This is printed from the one place that knows both halves at the moment they
+! meet: the size being requested, and MemAvailable read straight from /proc.
+! The grid is printed rather than the level, because L is a local of mrva.f's
+! loop and not module scope -- with no implicit none in this file, naming it
+! here would have typed it INTEGER by its first letter and printed an
+! undefined value. mx/my identify the level unambiguously.
+! If the next line in the log is "Killed", the two numbers on this line are the
+! whole post-mortem.
+!
+      integer, parameter :: iu = 91
+      character(len=160) line
+      real*8 avail, want
+      integer ios
+
+      want = dble(coeffSize)*49.d0*dble(nv)*dble(imk)
+
+      avail = -1.d0
+      open(iu,file='/proc/meminfo',status='old',action='read',iostat=ios)
+      if (ios .eq. 0) then
+        do
+          read(iu,'(A)',iostat=ios) line
+          if (ios .ne. 0) exit
+          if (line(1:13) .eq. 'MemAvailable:') then
+            read(line(14:),*,iostat=ios) avail
+            if (ios .ne. 0) avail = -1.d0
+            exit
+          endif
+        enddo
+        close(iu)
+      endif
+
+      if (avail .ge. 0.d0) then
+        print '(A,I6,A,I6,A,F8.2,A,F8.2,A)',
+     .    '  [alloc] grid ', mx, ' x', my, '  infoMatrix ',
+     .    want/1073741824.d0, ' GiB requested, ',
+     .    avail/1048576.d0, ' GiB available'
+      else
+        print '(A,I6,A,I6,A,F8.2,A)',
+     .    '  [alloc] grid ', mx, ' x', my, '  infoMatrix ',
+     .    want/1073741824.d0, ' GiB requested (meminfo unreadable)'
+      endif
+
+      end subroutine
+
       subroutine spmRefresh
 
 #ifndef MATRIX_FREE
@@ -224,6 +280,7 @@
       hy=(ymax-ymin)/my
 
 #ifndef MATRIX_FREE
+      call spmReportAlloc()
       allocate(infoMatrix(-1:mx+1-cix,-1:my+1,-3:3,-3:3,nv,nv,mz3))
       infoMatrix=0.
 #else
