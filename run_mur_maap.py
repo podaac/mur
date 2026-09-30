@@ -1105,6 +1105,60 @@ def fetch_queues(verbose: bool = False):
     return sorted(set(names)) or None
 
 
+# A queue name no deployment will ever define. Submitting with it is how the
+# listing below works, so it has to be impossible to match by accident.
+_IMPOSSIBLE_QUEUE = "mur-probe-for-queue-list-do-not-create-this-queue"
+
+
+def queues_from_rejection(verbose: bool = False):
+    """The queues this account may use, read out of a deliberate rejection.
+
+    MAAP has no non-admin endpoint that lists them. /admin/job-queues is
+    admin-only; /organizations returns every organization on the platform
+    rather than yours; and /organizations/<id>/job_queues joins against
+    JobQueue and then returns only {'org_id': ...}, no names -- its docstring
+    says "Retrieve organization members", so it looks like a copy-paste bug
+    rather than a deliberate shape.
+
+    What does work is the submit-time check, which names them in its error:
+
+        valid_queues = get_user_queues(user_id)
+        if queue not in valid_queue_names:
+            raise ValueError(f"User does not have access to {queue}. "
+                             f"Valid queues: {valid_queue_names}")
+
+    So ask for a queue that cannot exist and read the reply. This creates no
+    job: validate_or_get_queue is called before hysds.mozart_submit_job, and
+    raising there ends the request. The account's own algorithm is used as the
+    process, since a submission has to name one.
+    """
+    import re
+
+    try:
+        from maap.maap import MAAP
+        maap = MAAP()
+    except Exception as exc:                              # noqa: BLE001
+        if verbose:
+            print(f"  cannot reach MAAP: {exc}")
+        return None
+
+    try:
+        resp = maap.submit_job(process_id="mur-iquam", queue=_IMPOSSIBLE_QUEUE,
+                               inputs={})
+        text = str(getattr(resp, "text", resp))
+    except Exception as exc:                              # noqa: BLE001
+        text = str(exc)
+
+    found = re.search(r"Valid queues:\s*\[([^\]]*)\]", text)
+    if not found:
+        if verbose:
+            print("  the rejection did not list the queues; got:")
+            print(f"    {text.strip()[:300]}")
+        return None
+    names = [n.strip().strip("'\"") for n in found.group(1).split(",")]
+    return sorted({n for n in names if n}) or None
+
+
 def _choose(prompt, options, default=None):
     """Numbered pick, or free text. Returns the default with no terminal.
 
@@ -1231,7 +1285,12 @@ def init_config(dest: str) -> int:
 
     # Choosing a queue is the one value that cannot be discovered, so offer
     # the list rather than leaving a placeholder to look up separately.
-    queues = fetch_queues(verbose=True) or KNOWN_QUEUES
+    # Admin listing first; then the rejection probe, which is the only
+    # thing that works for an ordinary account; then the hard-coded
+    # names, which are a convenience and have been wrong before.
+    queues = (fetch_queues(verbose=True)
+              or queues_from_rejection(verbose=True)
+              or KNOWN_QUEUES)
     if queues:
         print("\nDPS queues available to you. A queue selects the worker size:")
         for module, need in MODULE_NEEDS.items():

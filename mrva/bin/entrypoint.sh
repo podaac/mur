@@ -295,59 +295,6 @@ report_memory_budget() {
     esac
 }
 
-# Sample how close the box came to full, for the whole process tree.
-#
-# An OOM kill leaves no message of its own: the kernel writes "Killed" and the
-# status is 137. Three runs have died that way with nobody able to say
-# afterwards whether the margin was 200 MB or 8 GB.
-#
-# This samples MemAvailable rather than any process's RSS, deliberately. The
-# solver is three levels down (this shell -> MATLAB -> mrva), a shell's own
-# VmHWM says nothing about its children, and RSS would miss page cache and a
-# tmpfs scratch entirely -- which are exactly the things that might be eating
-# the headroom. What matters is how much the machine had left, and that is
-# what this records.
-start_memory_watch() {
-    MEMWATCH_FILE="${TMP_DIR:-/tmp/mrva_tmp}/.mem-low-water"
-    [ -r /proc/meminfo ] || return 0
-    (
-        low=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
-        reported=$low
-        echo "$low" > "$MEMWATCH_FILE"
-        # Every 2 s, not 15. The allocation that kills this job is one
-        # `infoMatrix=0.` faulting in 24.72 GiB, which takes seconds -- a
-        # 15 s sampler walks straight past it and reports a low-water mark
-        # from before the event that mattered.
-        while sleep 2; do
-            now=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null) || break
-            [ -n "$now" ] || continue
-            if [ "$now" -lt "$low" ]; then
-                low=$now
-                echo "$low" > "$MEMWATCH_FILE"
-                # Emit each new low as it happens, not just once at the end.
-                # Job 890a1c7a proved the end-of-run report is unreliable: the
-                # OOM killer took this shell along with the solver, so nothing
-                # was ever printed and the run taught us nothing about its own
-                # margin. A line already in the log cannot be killed. The
-                # 256 MiB threshold keeps a long run from filling stderr while
-                # still resolving every allocation that matters here.
-                if [ $((reported - low)) -ge 262144 ]; then
-                    reported=$low
-                    awk -v k="$low" 'BEGIN{printf "  [mem] %.2f GiB available\n", k/1048576}' >&2
-                fi
-            fi
-        done
-    ) &
-    MEMWATCH_PID=$!
-}
-
-stop_memory_watch() {
-    [ -n "${MEMWATCH_PID:-}" ] && kill "$MEMWATCH_PID" 2>/dev/null
-    [ -r "${MEMWATCH_FILE:-}" ] || return 0
-    awk '{printf "Memory low-water mark: %.2f GiB available at the tightest\n", $1/1048576}' \
-        "$MEMWATCH_FILE" >&2
-}
-
 main() {
     set -e
     parse_args "$@" || exit 1
@@ -453,26 +400,15 @@ main() {
 
     echo "Starting MATLAB runtime..."
     build_command || exit 1
-
-    # No `exec` any more. It used to be the default, and was given up so that
-    # this shell outlives the run and can report the memory low-water mark --
-    # the number three OOM post-mortems have wanted and not had. The cost is a
-    # bash process of a few MB and the need to forward signals by hand, which
-    # is done below; on a machine where the question is whether 28.8 GiB fits
-    # in 32, that trade is obviously worth it.
-    start_memory_watch
-    "${CMD[@]}" &
-    local child=$!
-    trap 'kill -TERM '"$child"' 2>/dev/null' TERM INT
-    wait "$child"
-    local rc=$?
-    trap - TERM INT
-
-    stop_memory_watch
+    # Not `exec` when a copy-mode stage-out still has to run afterwards;
+    # exec would replace this shell and the copy would never happen.
     if [ "${MUR_STAGE_OUT_MODE:-none}" = "copy" ]; then
+        "${CMD[@]}"
+        local rc=$?
         finish_output_redirect
+        exit "$rc"
     fi
-    exit "$rc"
+    exec "${CMD[@]}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
