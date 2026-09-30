@@ -197,15 +197,28 @@ def test_the_cwls_do_not_pretend_to_request_resources():
 
 
 def test_the_measured_requirement_survives_where_it_picks_the_queue():
-    """Dropping ramMin from the CWL must not lose the number itself.
+    """algorithm_config.yml and MODULE_NEEDS must not contradict each other.
 
-    It is the only record of what mrva actually needs, and the thing an
-    operator reads when choosing maap.queues["mur-mrva"].
+    Both describe what mrva needs, for different readers -- the yml picks the
+    queue at registration, MODULE_NEEDS is printed beside the queue listing --
+    and nothing else records the requirement now that ramMin is out of the CWL.
+
+    The assertion is an inequality rather than an equality, because the two
+    numbers are different KINDS of number and always will be. MODULE_NEEDS
+    carries the measured floor: 28.75 GiB of Fortran at L=11 plus MATLAB, which
+    a worker reporting 31.0 GiB could not hold on 2026-09-29. ram_min is the
+    allocation to request, which has to be comfortably above that and is
+    currently 64 GiB. What must never happen is ram_min dropping below the
+    figure an operator is being told the job needs.
     """
-    import yaml, pathlib as _p
+    import re, yaml, pathlib as _p
     cfg = yaml.safe_load(_p.Path("maap/mrva/algorithm_config.yml").read_text())
-    assert cfg["ram_min"] >= 61440, "below the documented L=9 working set"
-    assert f'{cfg["ram_min"] // 1024} GiB' in cli.MODULE_NEEDS["mur-mrva"]
+    stated = cli.MODULE_NEEDS["mur-mrva"]
+    floor_gib = int(re.match(r"\s*(\d+)", stated).group(1))
+    assert floor_gib >= 29, "the measured L=11 working set is 28.75 GiB + MATLAB"
+    assert cfg["ram_min"] / 1024 >= floor_gib, (
+        f"ram_min is {cfg['ram_min'] / 1024} GiB but operators are told "
+        f"mrva needs {stated}")
     assert "maap-dps-worker-32vcpu-64gb" in cli.KNOWN_QUEUES
 
 

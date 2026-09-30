@@ -1045,7 +1045,7 @@ MODULE_NEEDS = {
     "mur-iquam":   "4 GiB / 1 core",
     "mur-landice": "6 GiB / 2 cores",
     "mur-l2p":     "8 GiB / 2 cores",
-    "mur-mrva":    "64 GiB / 16 cores",
+    "mur-mrva":    "31+ GiB / 16 cores (see the note below)",
 }
 
 
@@ -1204,10 +1204,28 @@ def list_queues() -> int:
     if resp.status_code != 200:
         print(resp.text.strip()[:300])
         if resp.status_code in (401, 403):
-            print("\nThis endpoint is admin-only. The names shown in the Jobs UI")
+            # Admin-only, which an ordinary account is not. Ask the submit
+            # endpoint instead: it refuses an unknown queue by listing the
+            # ones you may use. No job is created -- see
+            # queues_from_rejection. This is the real answer for most
+            # accounts, so it is tried before falling back to a list that
+            # has been wrong before.
+            print("\nThis endpoint is admin-only. Asking the job submitter "
+                  "which queues it would accept...\n")
+            probed = queues_from_rejection(verbose=True)
+            if probed:
+                for q in probed:
+                    print(f"  {q}")
+                print("\n(reported by MAAP for this account; no job was "
+                      "submitted)")
+                _print_sizing_note()
+                return 0
+            print("\nCould not get a listing. The names the Jobs UI has shown")
             print("(Launcher -> Submit Jobs -> Resource) are:\n")
             for q in KNOWN_QUEUES:
                 print(f"  {q}")
+            print("\nThese are remembered, not authoritative -- trust the")
+            print("dropdown over this list.")
             _print_sizing_note()
             return 0
         return 1
@@ -1236,18 +1254,27 @@ def _print_sizing_note() -> None:
     print()
     print("Put one in the config as maap.queue, and MRVA's in maap.queues.")
     print()
-    print("Note the units. A queue named ...-64gb is likely 64 GB = 59.6 GiB,")
-    print("while mrva asks for 65536 MiB = 64 GiB, which would not fit. On")
-    print("paper 32vcpu-64gb is the only queue satisfying both that and the")
-    print("16-core request.")
+    print("mrva's figure is measured, not estimated. Its cost is almost all")
+    print("in the finest level, L=11, where infoMatrix is 24.72 GiB and the")
+    print("whole working set is 28.75 GiB -- plus MATLAB, which stays")
+    print("resident while the Fortran runs. On 2026-09-29 that was killed on")
+    print("a worker reporting 31.0 GiB total and 29.3 GiB free at start.")
+    print("Levels up to L=10 need only 13.84 GiB and complete comfortably.")
     print()
-    print("In practice, as of 2026-09-22, every job sent to")
-    print("maap-dps-worker-32vcpu-64gb fails before it starts: cwltool cannot")
-    print("reach /var/run/docker.sock (permission denied on the inspect AND")
-    print("the pull). The same landice package succeeded on the small queue")
-    print("minutes earlier, so it is the worker pool, not the package. Until")
-    print("MAAP ops fixes it, mrva goes to maap-dps-worker-64gb -- watch for")
-    print("the opposite failure there, since it is nominally too small.")
+    print("Note the units before trusting a queue name. That worker was")
+    print("maap-dps-worker-32gb, and 32gb meant 32 GB = 29.8 GiB, not 32 GiB.")
+    print("The 2.2 GiB difference is roughly the whole shortfall.")
+    print()
+    print("BOTH 64 GB pools are unusable as of 2026-09-25. Every job sent to")
+    print("maap-dps-worker-32vcpu-64gb or maap-dps-worker-64gb fails before")
+    print("it starts: cwltool cannot reach /var/run/docker.sock, permission")
+    print("denied on the inspect AND the pull. The same package succeeds on")
+    print("the small queues minutes either side, so it is the worker pool.")
+    print("Access is not the problem -- MAAP refuses a queue you lack with")
+    print("HTTP 400 rather than running it. It is with MAAP ops.")
+    print()
+    print("So there is currently no pool that completes a full L=2..11 run.")
+    print("Up to L=10 works on maap-dps-worker-32gb.")
 
 
 def init_config(dest: str) -> int:
