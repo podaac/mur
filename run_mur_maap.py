@@ -1129,10 +1129,24 @@ def _choose(prompt, options, default=None):
 def list_queues() -> int:
     """Print the DPS queues this account can submit to.
 
-    A queue is a worker pool of a given size -- MAAP's own job-submission
-    tutorial describes picking "the smallest one (8 GB)" -- so choosing one is
-    choosing how much memory and how many cores a job gets. MRVA needs a large
-    one; landice, iquam and l2p do not.
+    A queue picks a pool of VMs, not a container size. The distinction matters
+    for reading a memory failure. _docker_params.json shows two containers per
+    job on one machine, both mounting /run/user/1000/docker.sock as
+    /var/run/docker.sock: MAAP's DPS wrapper, which runs cwltool, and ours,
+    which cwltool starts BESIDE it through that socket rather than inside it.
+
+    So the number in a queue name is the VM's RAM, shared with MAAP's wrapper,
+    the HySDS agents and the OS -- on maap-dps-worker-32gb that left 29.3 of
+    31.0 GiB free before our container started. And cwltool passes no --memory
+    (it says so once per run), so there is no cgroup limit to hit: an exit 137
+    is the VM's kernel OOM killer, and the VM's physical RAM is the only
+    ceiling.
+
+    It is also why a job can fail with our image never downloaded. docker pull
+    is issued by the host daemon through that socket, so a worker whose socket
+    the wrapper cannot open fails before any of our code exists on it.
+
+    MRVA needs a large VM; landice, iquam and l2p do not.
     """
     import requests
 
@@ -1285,7 +1299,7 @@ def init_config(dest: str) -> int:
     # names, which are a convenience and have been wrong before.
     queues = fetch_queues(verbose=True) or KNOWN_QUEUES
     if queues:
-        print("\nDPS queues available to you. A queue selects the worker size:")
+        print("\nDPS queues available to you. A queue picks a VM pool; the\nnumber in the name is the machine's RAM, shared with MAAP's own\nagents on it:")
         for module, need in MODULE_NEEDS.items():
             print(f"    {module:<14} needs ~{need}")
         print()
@@ -1364,7 +1378,7 @@ def parse_args(argv=None):
     parser.add_argument("--config", help="MAAP config JSON.")
     parser.add_argument("--list-queues", action="store_true",
                         help="List the DPS queues available to this account, then "
-                             "exit. A queue selects the worker size a job runs on.")
+                             "exit. A queue picks the pool of VMs a job runs on.")
     parser.add_argument("--init-config", action="store_true",
                         help="Write --config from the shipped example, filling in "
                              "the workspace root from your MAAP credentials, then "
