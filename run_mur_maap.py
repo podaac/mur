@@ -1105,60 +1105,6 @@ def fetch_queues(verbose: bool = False):
     return sorted(set(names)) or None
 
 
-# A queue name no deployment will ever define. Submitting with it is how the
-# listing below works, so it has to be impossible to match by accident.
-_IMPOSSIBLE_QUEUE = "mur-probe-for-queue-list-do-not-create-this-queue"
-
-
-def queues_from_rejection(verbose: bool = False):
-    """The queues this account may use, read out of a deliberate rejection.
-
-    MAAP has no non-admin endpoint that lists them. /admin/job-queues is
-    admin-only; /organizations returns every organization on the platform
-    rather than yours; and /organizations/<id>/job_queues joins against
-    JobQueue and then returns only {'org_id': ...}, no names -- its docstring
-    says "Retrieve organization members", so it looks like a copy-paste bug
-    rather than a deliberate shape.
-
-    What does work is the submit-time check, which names them in its error:
-
-        valid_queues = get_user_queues(user_id)
-        if queue not in valid_queue_names:
-            raise ValueError(f"User does not have access to {queue}. "
-                             f"Valid queues: {valid_queue_names}")
-
-    So ask for a queue that cannot exist and read the reply. This creates no
-    job: validate_or_get_queue is called before hysds.mozart_submit_job, and
-    raising there ends the request. The account's own algorithm is used as the
-    process, since a submission has to name one.
-    """
-    import re
-
-    try:
-        from maap.maap import MAAP
-        maap = MAAP()
-    except Exception as exc:                              # noqa: BLE001
-        if verbose:
-            print(f"  cannot reach MAAP: {exc}")
-        return None
-
-    try:
-        resp = maap.submit_job(process_id="mur-iquam", queue=_IMPOSSIBLE_QUEUE,
-                               inputs={})
-        text = str(getattr(resp, "text", resp))
-    except Exception as exc:                              # noqa: BLE001
-        text = str(exc)
-
-    found = re.search(r"Valid queues:\s*\[([^\]]*)\]", text)
-    if not found:
-        if verbose:
-            print("  the rejection did not list the queues; got:")
-            print(f"    {text.strip()[:300]}")
-        return None
-    names = [n.strip().strip("'\"") for n in found.group(1).split(",")]
-    return sorted({n for n in names if n}) or None
-
-
 def _choose(prompt, options, default=None):
     """Numbered pick, or free text. Returns the default with no terminal.
 
@@ -1204,28 +1150,36 @@ def list_queues() -> int:
     if resp.status_code != 200:
         print(resp.text.strip()[:300])
         if resp.status_code in (401, 403):
-            # Admin-only, which an ordinary account is not. Ask the submit
-            # endpoint instead: it refuses an unknown queue by listing the
-            # ones you may use. No job is created -- see
-            # queues_from_rejection. This is the real answer for most
-            # accounts, so it is tried before falling back to a list that
-            # has been wrong before.
-            print("\nThis endpoint is admin-only. Asking the job submitter "
-                  "which queues it would accept...\n")
-            probed = queues_from_rejection(verbose=True)
-            if probed:
-                for q in probed:
-                    print(f"  {q}")
-                print("\n(reported by MAAP for this account; no job was "
-                      "submitted)")
-                _print_sizing_note()
-                return 0
-            print("\nCould not get a listing. The names the Jobs UI has shown")
-            print("(Launcher -> Submit Jobs -> Resource) are:\n")
+            # Expected for a non-admin account, and there is no non-admin
+            # endpoint to fall back to. Checked against maap-api-nasa:
+            #
+            #   /admin/job-queues              admin only (this 401)
+            #   /organizations                 every org on the platform,
+            #                                  not the ones you belong to
+            #   /organizations/<id>/job_queues joins JobQueue and then
+            #                                  returns only {'org_id': ...},
+            #                                  no names; its docstring says
+            #                                  "Retrieve organization
+            #                                  members", so it looks like a
+            #                                  copy-paste bug
+            #
+            # A probe submission was tried here and removed: submit_job wants
+            # a numeric algorithm id, so getting the rejection that lists the
+            # queues means building a near-complete submission, and a bad one
+            # fails in MAAP's auth layer with a 500 that explains nothing.
+            # Too fragile to be worth more than pointing at the UI.
+            print("\nThat endpoint is admin-only, and MAAP has no non-admin")
+            print("one that lists your queues. The authoritative list is the")
+            print("Jobs UI: Launcher -> Submit Jobs -> Resource. It is already")
+            print("filtered to your organization, so what it shows is what you")
+            print("may use.")
+            print("\nNames seen there before (remembered, NOT authoritative):\n")
             for q in KNOWN_QUEUES:
                 print(f"  {q}")
-            print("\nThese are remembered, not authoritative -- trust the")
-            print("dropdown over this list.")
+            print("\nYou do not need to request a queue to find out whether")
+            print("you have it: MAAP refuses one you lack with HTTP 400 and")
+            print("names the valid ones in the message. A job that starts at")
+            print("all is a queue you already have.")
             _print_sizing_note()
             return 0
         return 1
@@ -1315,9 +1269,7 @@ def init_config(dest: str) -> int:
     # Admin listing first; then the rejection probe, which is the only
     # thing that works for an ordinary account; then the hard-coded
     # names, which are a convenience and have been wrong before.
-    queues = (fetch_queues(verbose=True)
-              or queues_from_rejection(verbose=True)
-              or KNOWN_QUEUES)
+    queues = fetch_queues(verbose=True) or KNOWN_QUEUES
     if queues:
         print("\nDPS queues available to you. A queue selects the worker size:")
         for module, need in MODULE_NEEDS.items():
