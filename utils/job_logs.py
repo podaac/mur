@@ -31,8 +31,17 @@ sys.path.insert(0, str(REPO))
 
 # Files DPS writes beside the products. Matched case-insensitively on the
 # basename, so a rename to stderr.txt or job.log is still picked up.
+#
+# The second row is HySDS's own job artifacts, which this missed for weeks.
+# MAAP runs HySDS, so a Verdi worker writes more than stdout/stderr beside the
+# products: pge_metrics.json carries resource measurements, _docker_stats.json
+# can carry memory, and _job.json / _context.json record what was actually
+# dispatched -- including the queue, which is otherwise only in our own submit
+# log. Four MRVA jobs were post-mortemed on an OOM kill while whatever those
+# files had to say was sitting unread in the same prefix.
 LOG_HINTS = ("stdout", "stderr", "traceback", ".log", "_alt_", "docker_",
-             "exit_code", "failure")
+             "exit_code", "failure",
+             "metrics", "_context", "_job.", "pge_", "_stats")
 
 TAIL_LINES = 60
 
