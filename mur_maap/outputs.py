@@ -157,6 +157,18 @@ OUTPUT_PATTERNS: Dict[str, Dict[str, str]] = {
     "mur-mrva": {
         "netcdf": r"^netcdf/.*{date}.*\.nc$",
         "csp": r"^csp/.*\.c\d\d$",
+        # Stage 10b's browse rasters, under netcdf/cog/. Separate patterns
+        # per field rather than one for *.tif, because each needs its own
+        # colour scale and rescale range in the STAC asset -- a single
+        # pattern would return a bag of files with no way to tell an SST
+        # layer from an ice fraction.
+        "cog_sst": r"^netcdf/cog/.*MUR-GLOB.*_sst\.tif$",
+        "cog_anom": r"^netcdf/cog/.*MUR-GLOB.*_anom\.tif$",
+        "cog25_sst": r"^netcdf/cog/.*MUR25.*_sst\.tif$",
+        "cog25_anom": r"^netcdf/cog/.*MUR25.*_anom\.tif$",
+        "cog25_err": r"^netcdf/cog/.*MUR25.*_err\.tif$",
+        "cog25_ice": r"^netcdf/cog/.*MUR25.*_ice\.tif$",
+        "cog25_mask": r"^netcdf/cog/.*MUR25.*_mask\.tif$",
     },
 }
 

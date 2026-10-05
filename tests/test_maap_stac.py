@@ -97,3 +97,55 @@ def test_doy_matches_the_pipeline_convention():
 def test_item_is_json_serializable():
     import json
     json.dumps(stac.build_l4_item(HREF, DAY, "nrt"))
+
+
+# --- browse rasters -----------------------------------------------------------
+
+def test_a_cog_asset_is_marked_visual_and_carries_a_tile_url():
+    """A COG asset has to be drawable from the catalogue entry alone.
+
+    MAAP's titiler tiles any COG by URL, so the item can hand a reader a
+    working TileJSON link rather than expecting them to know which tiler MAAP
+    runs. The media type and the "visual" role are what STAC clients key on
+    when choosing something to display; without them a browse raster looks
+    like just another data file.
+    """
+    item = stac.build_l4_item(
+        HREF, DAY, "nrt",
+        extra_assets={"browse_sst": "s3://b/mur/cog/2026/x_sst.tif"})
+    a = item["assets"]["browse_sst"]
+
+    assert a["roles"] == ["visual", "overview"]
+    assert a["type"] == ("image/tiff; application=geotiff; "
+                         "profile=cloud-optimized")
+    assert a["href_tilejson"].startswith(
+        "https://titiler-pgstac.maap-project.org/cog/")
+    assert "x_sst.tif" in a["href_tilejson"]
+
+
+def test_a_cog_gets_an_explicit_rescale_not_titiler_s_default():
+    """Without rescale, titiler stretches each tile to its own data range.
+
+    That produces a plausible-looking SST field whose colours mean something
+    different every day, which is worse than no picture: two granules side by
+    side would be incomparable and nothing on screen would say so. The ranges
+    are the granule's own units -- Kelvin for sst, Kelvin anomaly for anom.
+    """
+    item = stac.build_l4_item(
+        HREF, DAY, "nrt",
+        extra_assets={"browse_sst": "s3://b/x_sst.tif",
+                      "browse_anom": "s3://b/x_anom.tif"})
+    assert item["assets"]["browse_sst"]["mur:render"]["rescale"] == \
+        "271.15,310.15"
+    assert item["assets"]["browse_anom"]["mur:render"]["rescale"] == "-5,5"
+    for key in ("browse_sst", "browse_anom"):
+        assert "rescale=" in item["assets"][key]["href_tilejson"]
+
+
+def test_a_netcdf_extra_asset_is_still_plain_data():
+    """Only .tif becomes a browse layer. The MUR25 NetCDF is a product."""
+    item = stac.build_l4_item(
+        HREF, DAY, "nrt", extra_assets={"mur25": "s3://b/x-MUR25-x.nc"})
+    a = item["assets"]["mur25"]
+    assert a["roles"] == ["data"]
+    assert "href_tilejson" not in a

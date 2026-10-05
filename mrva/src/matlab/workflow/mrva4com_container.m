@@ -716,6 +716,90 @@ function mrva4com_container(year, day, realtime, config_file)
     end
 
     %% Clean up temporary files
+    %% Cloud-optimized browse rasters
+    fprintf('Stage 10b: Cloud-optimized GeoTIFFs for visualization...\n');
+
+    % Why these exist, and why here.
+    %
+    % MAAP runs titiler at titiler-pgstac.maap-project.org, and its /cog
+    % endpoint tiles any COG by URL -- verified 2026-10-05 against the
+    % workspace bucket, which answered "The specified key does not exist"
+    % rather than access denied, so the service can already read it. That is
+    % the whole dependency: a COG in the bucket is a map layer, with no STAC
+    % registration, no pull request and no data-team approval. The other two
+    % routes need one or more of those.
+    %
+    % The conversion happens in the container rather than the workspace
+    % because the data is already here. Doing it after the fact would mean
+    % pulling an ~800 MB granule down and pushing derivatives back, which is
+    % the staging design this pipeline deliberately removed for L2P granules.
+    % gdal_translate -of COG reads NETCDF: subdatasets directly, so nothing is
+    % decoded twice.
+    %
+    % Failure is non-fatal, deliberately. These are browse products; a missing
+    % COG is a missing picture, while a run discarded for a missing picture
+    % loses the granule that took an hour to compute.
+    cogdir = sprintf('%s/cog', netcdf_dir);
+    if ~exist(cogdir, 'dir'), mkdir(cogdir); end
+
+    % Which variables get a COG depends on which product, because the two
+    % differ in size by a factor of 1250. MUR25 is 1440x720, so every field
+    % is free. The 1 km L4 is 36000x17999 int16 -- 1.3 GiB per variable
+    % uncompressed, and perhaps 350 MB each as DEFLATE with overviews -- so it
+    % gets only the fields a browse layer actually uses. outdir_max is 8 GiB
+    % and the granule itself is already 725 MB; converting all six fields
+    % would spend most of that on pictures.
+    %
+    % Add to the second list if a field turns out to be wanted. The sizes are
+    % printed below precisely so that decision can be made from numbers.
+    cog_fine = { ...
+        'analysed_sst',      'sst',      'AVERAGE'; ...
+        'sst_anomaly',       'anom',     'AVERAGE'};
+    cog_coarse = { ...
+        'analysed_sst',      'sst',      'AVERAGE'; ...
+        'sst_anomaly',       'anom',     'AVERAGE'; ...
+        'analysis_error',    'err',      'AVERAGE'; ...
+        'sea_ice_fraction',  'ice',      'NEAREST'; ...
+        'mask',              'mask',     'NEAREST'};
+
+    ncfiles = dir(sprintf('%s/*.nc', netcdf_dir));
+    for nf = 1:numel(ncfiles)
+        src = sprintf('%s/%s', netcdf_dir, ncfiles(nf).name);
+        [~, stem, ~] = fileparts(ncfiles(nf).name);
+        if ~isempty(strfind(ncfiles(nf).name, 'MUR25'))
+            targets = cog_coarse;
+        else
+            targets = cog_fine;
+        end
+        for ct = 1:size(targets, 1)
+            sub = targets{ct, 1};
+            dst = sprintf('%s/%s_%s.tif', cogdir, stem, targets{ct, 2});
+            % NETCDF:"file":var addresses one variable without decoding the
+            % rest. DEFLATE because these fields are smooth and it is the one
+            % codec every reader has. Resampling is per-variable because
+            % averaging a mask or an ice fraction down an overview pyramid
+            % invents values that were never measured.
+            cmd = sprintf(['gdal_translate -q -of COG ' ...
+                           '-co COMPRESS=DEFLATE -co OVERVIEW_RESAMPLING=%s ' ...
+                           '-co BLOCKSIZE=512 NETCDF:"%s":%s "%s"'], ...
+                          targets{ct, 3}, src, sub, dst);
+            [rc, out] = system(cmd);
+            if rc == 0 && exist(dst, 'file')
+                d = dir(dst);
+                fprintf('  %-18s -> %-28s %7.1f MB\n', sub, ...
+                        sprintf('%s_%s.tif', stem, targets{ct, 2}), ...
+                        d.bytes / 1048576);
+            else
+                fprintf('  SKIP %s in %s (gdal_translate rc=%d)\n', ...
+                        sub, ncfiles(nf).name, rc);
+                if ~isempty(strtrim(out))
+                    fprintf('    %s\n', strtrim(out));
+                end
+            end
+        end
+    end
+    fprintf('\n');
+
     fprintf('Stage 11: Cleaning up temporary files...\n');
 
     % Clean up per-run scratch directories. grd/ and ice25/ are intentional

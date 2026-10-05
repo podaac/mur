@@ -47,6 +47,63 @@ def item_id(process_date: datetime.date, mode: str) -> str:
     return f"mur-l4-{process_date:%Y%m%d}-{mode.lower()}"
 
 
+# MAAP's titiler tiles any COG by URL -- no STAC registration, no pull
+# request, no data-team approval. Verified 2026-10-05: a workspace path
+# answered "The specified key does not exist" rather than access denied, so
+# the service can read the bucket already.
+TITILER = "https://titiler-pgstac.maap-project.org"
+
+
+def titiler_tilejson(cog_href: str, **render) -> str:
+    """A TileJSON URL any Leaflet or ipyleaflet map can consume directly.
+
+    Put on the asset rather than left for a notebook to assemble, so the
+    catalogue entry is enough on its own: whoever finds the item can draw it
+    without knowing which tiler MAAP runs or how to address it.
+    """
+    from urllib.parse import urlencode
+    q = {"url": cog_href, **render}
+    return f"{TITILER}/cog/WebMercatorQuad/tilejson.json?{urlencode(q)}"
+
+
+# Render hints per variable, keyed by the suffix Stage 10b gives the file.
+# rescale matters more than colormap: titiler stretches to the data range by
+# default, so an SST field drawn without it looks plausible and is not
+# comparable between days. The ranges are the GHRSST valid ranges in the
+# granule's own units (Kelvin for sst, Kelvin anomaly, fraction, flag).
+RENDER = {
+    "sst":  {"rescale": "271.15,310.15", "colormap_name": "thermal"},
+    "anom": {"rescale": "-5,5", "colormap_name": "coolwarm"},
+    "err":  {"rescale": "0,2", "colormap_name": "magma"},
+    "ice":  {"rescale": "0,1", "colormap_name": "ice"},
+    "mask": {"rescale": "1,16", "colormap_name": "tab10"},
+}
+
+
+def _asset(key: str, href: str) -> Dict:
+    """One asset entry, with COGs marked as such and given a tile URL.
+
+    A .tif here is a browse raster from Stage 10b, so it gets the Cloud
+    Optimized GeoTIFF media type, the "visual" role that STAC clients look
+    for when choosing something to draw, and the tile URL above. Anything
+    else is data and is left alone.
+    """
+    if not href.endswith(".tif"):
+        return {"href": href, "roles": ["data"]}
+
+    suffix = key.rsplit("_", 1)[-1]
+    render = RENDER.get(suffix, {})
+    asset = {
+        "href": href,
+        "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+        "roles": ["visual", "overview"],
+    }
+    if render:
+        asset["href_tilejson"] = titiler_tilejson(href, **render)
+        asset["mur:render"] = render
+    return asset
+
+
 def build_l4_item(
     netcdf_href: str,
     process_date: datetime.date,
@@ -81,7 +138,7 @@ def build_l4_item(
         }
     }
     for key, href in (extra_assets or {}).items():
-        assets[key] = {"href": href, "roles": ["data"]}
+        assets[key] = _asset(key, href)
 
     properties = {
         "datetime": dt.isoformat().replace("+00:00", "Z"),
