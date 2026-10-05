@@ -27,7 +27,7 @@ usage() {
     echo "  --landice-ice-p011-file FILE --landice-grid-p01-file FILE --landice-icefiles-p011-file FILE \\"
     echo "  --sensor-inputs-manifest FILE \\"
     echo "  [--sensors LIST] [--mur25-grid-file FILE] [--prior-csp-file FILE] \\"
-    echo "  [--l4-reference-root DIR] [--debug]"
+    echo "  [--l4-reference-root DIR] [--max-level N] [--debug]"
     echo "  YEAR:     4-digit year (e.g., 2025)"
     echo "  DOY:      Day of year (1-366)"
     echo "  MODE:     nrt (near-real-time) or rea (reanalysis)"
@@ -35,6 +35,9 @@ usage() {
     echo "  Every FILE/DIR value may be a local path or an s3:// href."
     echo "  --mur25-grid-file, --prior-csp-file and --l4-reference-root are optional"
     echo "  (absence is a valid state, not an error)."
+    echo "  --max-level N caps the analysis below its full L=11. An escape hatch"
+    echo "  for workers too small for L=11, not a tuning knob: the granule comes"
+    echo "  out on the same grid but SMOOTHER than the operational product."
 }
 
 parse_args() {
@@ -62,6 +65,7 @@ parse_args() {
             --debug)                       DEBUG_MODE=1;                     shift ;;
             --polar-cap-edge-file)         POLAR_CAP_EDGE_FILE="$2";         shift 2 ;;
             --mur25-grid-file)             MUR25_GRID_FILE="$2";             shift 2 ;;
+            --max-level)                   MAX_LEVEL="$2";                   shift 2 ;;
             --seasonal-file)               SEASONAL_FILE="$2";               shift 2 ;;
             --landice-ice-p011-file)       LANDICE_ICE_P011_FILE="$2";       shift 2 ;;
             --landice-grid-p01-file)       LANDICE_GRID_P01_FILE="$2";       shift 2 ;;
@@ -182,13 +186,19 @@ config = {
     'sensors': sensors,
     'debug': sys.argv[11] == '1',
 }
+# Appended rather than slotted in, so every existing sys.argv index above
+# keeps its meaning. Absent or empty means the full L=2..11 analysis; the
+# key is omitted entirely in that case so MATLAB's isfield check decides,
+# rather than this having to know the default too.
+if sys.argv[13]:
+    config['max_level'] = int(sys.argv[13])
 with open(sys.argv[12], 'w') as f:
     json.dump(config, f)
 " \
         "$POLAR_CAP_EDGE_FILE" "$MUR25_GRID_FILE" "$SEASONAL_FILE" \
         "$LANDICE_ICE_P011_FILE" "$LANDICE_GRID_P01_FILE" "$LANDICE_ICEFILES_P011_FILE" \
         "$SENSOR_INPUTS_ROOT" "$PRIOR_CSP_FILE" "$SENSORS" \
-        "$L4_REFERENCE_ROOT" "$DEBUG_MODE" "$config_path"
+        "$L4_REFERENCE_ROOT" "$DEBUG_MODE" "$config_path" "${MAX_LEVEL:-}"
 }
 
 build_command() {

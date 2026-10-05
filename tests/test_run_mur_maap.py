@@ -371,6 +371,43 @@ def test_run_day_submits_mrva_last_and_publishes_stac_item(orchestrator):
     assert mode == "nrt"
 
 
+def test_mrva_runs_the_full_analysis_unless_the_config_caps_it(orchestrator):
+    """No max_level in the config means none in the submission.
+
+    The default -- the full L=2..11 that production delivers -- lives in exactly
+    one place, mrva4com_container.m, which treats an absent field as 11. If this
+    sent "11" explicitly the default would exist in two places and could drift;
+    worse, a reader of the submitted args could not tell a deliberate cap from a
+    repeated default.
+    """
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    mrva_args = orchestrator.client.submitted[-1][1]
+    assert "max_level" not in mrva_args
+
+
+def test_a_configured_cap_reaches_mrva_and_is_announced(caplog):
+    """Capping is a scientific decision, so it is passed AND logged.
+
+    A capped granule is structurally identical to a full one -- same grid, same
+    dimensions, same variables -- so without the warning the only hint in the
+    run is a config field nobody re-reads. The granule itself carries
+    mrva_analysis_level for the same reason.
+    """
+    import logging
+    config = _single_sensor_config()
+    config.setdefault("mrva", {})["max_level"] = 10
+    client = FakeMAAPClient(existing_objects=set())
+    orch = MAAPOrchestrator(
+        config, client, today_fn=lambda: datetime.date(2026, 8, 9)
+    )
+    with caplog.at_level(logging.WARNING):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    mrva_args = next(a for p, a in client.submitted if p == "mur-mrva")
+    assert mrva_args["max_level"] == "10"
+    assert "L=10" in caplog.text and "SMOOTHER" in caplog.text
+
+
 def test_run_day_mrva_gets_named_static_and_landice_hrefs_not_raw_lists(orchestrator):
     orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
     mrva_args = orchestrator.client.submitted[-1][1]

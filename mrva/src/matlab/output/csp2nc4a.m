@@ -733,6 +733,24 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
         netcdf.putAtt(ncid,varid,'processing_level','L4');
         netcdf.putAtt(ncid,varid,'cdm_data_type','grid');
 
+        % The finest analysis scale actually solved for.
+        %
+        % This is on the granule because a capped run is otherwise
+        % indistinguishable from a full one: spgrid interpolates whichever
+        % level onto the grid from landmaskfile, so the dimensions, variables
+        % and coordinates come out identical and only the smoothness differs.
+        % Without this attribute, a 0.01 degree file that never saw L=11 looks
+        % exactly like one that did, and nothing downstream could tell them
+        % apart. mrva_analysis_level IS the record, so it is written for every
+        % granule rather than only the capped ones.
+        netcdf.putAtt(ncid,varid,'mrva_analysis_level',int32(L));
+        if L < 11,
+          netcdf.putAtt(ncid,varid,'mrva_analysis_level_comment', ...
+            sprintf(['Analysis solved to L=%d rather than the full L=11. ' ...
+                     'The grid is unchanged; the field is smoother than the ' ...
+                     'operational product and lacks its finest scale.'], L));
+        end;
+
 
       netcdf.endDef(ncid);
 

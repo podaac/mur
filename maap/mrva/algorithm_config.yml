@@ -126,6 +126,20 @@ inputs:
       product generation, which the entrypoint handles explicitly.
     type: string?
     default: ""
+  - name: max-level
+    label: Maximum analysis level
+    doc: >
+      Optional cap on the finest analysis scale. Empty means the full L=2..11,
+      which is what production delivers and what you want unless you know
+      otherwise. An ESCAPE HATCH, not a tuning knob: L=11 needs about 28.8 GiB
+      and no DPS pool currently provides it, while L=10 needs 13.84 and
+      completes on a 32 GB worker. A capped granule is on the same grid with
+      the same dimensions and variables, but the field is smoother and lacks
+      the operational product's finest scale -- it records which level it used
+      in the mrva_analysis_level global attribute, since nothing else about
+      the file would tell you.
+    type: string?
+    default: ""
   - name: prior-csp-file
     label: Prior-day coefficient
     doc: >

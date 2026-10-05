@@ -802,6 +802,18 @@ class MAAPOrchestrator:
             mrva_args["mur25_grid_file"] = mrva_static_hrefs["mur25_grid"]
         if active_sensors := self.config.get("mrva", {}).get("active_sensors"):
             mrva_args["sensors"] = ",".join(active_sensors)
+
+        # Passed only when the operator set it. The default lives in
+        # mrva4com_container.m, which treats an absent field as the full
+        # L=2..11, so sending nothing here is sending "do the real analysis"
+        # rather than relying on a default repeated in three places.
+        if (max_level := self.config.get("mrva", {}).get("max_level")) is not None:
+            mrva_args["max_level"] = str(max_level)
+            logger.warning(
+                "mrva capped at L=%s by mrva.max_level in the config. The "
+                "granule will be on the full grid but SMOOTHER than "
+                "production, which runs to L=11; it records the level it "
+                "used in the mrva_analysis_level attribute.", max_level)
         # Chain from yesterday's coefficient when one was promoted to the
         # canonical key. Absent is still valid -- MATLAB bootstraps -- so this
         # confirms the object exists rather than guessing a path.

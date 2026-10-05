@@ -106,6 +106,45 @@ function mrva4com_container(year, day, realtime, config_file)
     outL = 10;
     outL4 = 11;
 
+    % LF may be capped from the config. It is an ESCAPE HATCH, not a tuning
+    % knob: the full analysis is L=2..11 and that is what production delivers,
+    % so absence of the field means 11 and the override has to be deliberate.
+    %
+    % It exists because the finest level is where all the memory goes. L=11
+    % needs roughly 28.8 GiB and no DPS pool currently provides it -- both
+    % 64 GB queues fail before the container starts -- while L=10 needs 13.84
+    % and completes on a 32 GB worker. Capping buys a complete, valid product
+    % on the hardware that works.
+    %
+    % What it costs: the output grid is unchanged, because spgrid interpolates
+    % whichever level onto the grid from landmaskfile, so the NetCDF has the
+    % same dimensions, variables and coordinates. The field is simply smoother
+    % -- it is missing the last doubling of spatial detail. A granule produced
+    % this way is structurally indistinguishable from a full one, which is why
+    % max_level is also written into the NetCDF as a global attribute rather
+    % than left to be inferred.
+    %
+    % outL and outL4 follow it down. outL4 feeds csp2nc4a, which builds its
+    % coefficient filename as sprintf('%s.c%02d', cspbody, L) -- leave it at
+    % 11 with LF=10 and the run solves for an hour and then dies looking for
+    % mrva.c11.
+    if isfield(config, 'max_level') && ~isempty(config.max_level)
+        requested = double(config.max_level);
+        if requested < L0 || requested > 11
+            error('mrva4com_container:badMaxLevel', ...
+                  ['max_level must be between %d and 11; got %g. ' ...
+                   'Omit it entirely for the full analysis.'], L0, requested);
+        end
+        LF = requested;
+        outL = min(outL, LF);
+        outL4 = min(outL4, LF);
+        if LF < 11
+            fprintf(['NOTE: analysis capped at L=%d (config max_level). ' ...
+                     'The L4 granule will be on the full grid but SMOOTHER ' ...
+                     'than production, which runs to L=11.\n'], LF);
+        end
+    end
+
     % Temporal decay parameters (scale-dependent, in hours)
     decay = [48*ones(1,6), 42, 36, 30, 24, 18, 12];
 
