@@ -155,7 +155,16 @@ OUTPUT_PATTERNS: Dict[str, Dict[str, str]] = {
         "l2plist": r"^L2Plist_\w+_{sensor}_{year}_{doy}\.txt$",
     },
     "mur-mrva": {
-        "netcdf": r"^netcdf/.*{date}.*\.nc$",
+        # MUR-GLOB and MUR25-GLOB both live in netcdf/ and both end .nc, so
+        # these must distinguish them. The old pattern was ^netcdf/.*\.nc$,
+        # which was correct only while Stage 10 had never succeeded -- the
+        # first run that produced MUR25 would have matched two files, and
+        # resolve_output raises unless there is exactly one, failing a day
+        # that had already cost an hour of compute.
+        #
+        # [^/]* rather than .* so neither can reach into netcdf/cog/.
+        "netcdf": r"^netcdf/[^/]*{date}[^/]*MUR-GLOB[^/]*\.nc$",
+        "netcdf25": r"^netcdf/[^/]*{date}[^/]*MUR25-GLOB[^/]*\.nc$",
         "csp": r"^csp/.*\.c\d\d$",
         # Stage 10b's browse rasters, under netcdf/cog/. Separate patterns
         # per field rather than one for *.tif, because each needs its own

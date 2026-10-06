@@ -127,6 +127,7 @@ class FakeMAAPClient(MAAPClient):
         self.job_ids = []
         self.waited = []
         self.published = []
+        self.published_extras = []
         self.written_manifests = []
         self.copied = []
         self.tags = []
@@ -198,8 +199,12 @@ class FakeMAAPClient(MAAPClient):
         suffix = "".join(f"/{k}={v}" for k, v in sorted(fmt.items()))
         return f"s3://podaac/output/{job_id}/{output_name}{suffix}"
 
-    def publish_stac_item(self, netcdf_href, process_date, mode):
+    def publish_stac_item(self, netcdf_href, process_date, mode,
+                          *, extra_assets=None):
+        # extra_assets is recorded separately so existing assertions on
+        # `published` keep their shape; what they check has not changed.
         self.published.append((netcdf_href, process_date, mode))
+        self.published_extras.append(extra_assets)
 
 
 @pytest.fixture
@@ -1096,3 +1101,43 @@ def test_a_failed_landice_job_is_not_promoted(orchestrator):
     with pytest.raises(RuntimeError):
         orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
     assert not [d for _s, d in client.copied if "/mur/landice/" in d]
+
+
+def test_browse_rasters_and_mur25_are_catalogued_with_the_granule(orchestrator):
+    """The COGs are only useful if the STAC item points at them.
+
+    stac.py gives a .tif asset the COG media type, the "visual" role and a
+    titiler TileJSON URL -- but none of that fires unless the orchestrator
+    actually resolves the outputs and passes them, which it did not until the
+    assets existed to pass.
+    """
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    extras = orchestrator.client.published_extras[0]
+    assert extras is not None
+    assert "mur25" in extras
+    assert {"browse_sst", "browse_anom"} <= set(extras)
+    assert {"browse25_sst", "browse25_ice", "browse25_mask"} <= set(extras)
+
+
+def test_a_missing_browse_raster_does_not_fail_the_day():
+    """Stage 10b is non-fatal in the container, so it must be here too.
+
+    gdal_translate can fail per field, and MUR25 is skipped entirely when its
+    grid file is absent. A day that produced an L4 granule must not be thrown
+    away because a picture is missing: the granule costs an hour, the picture
+    seconds. This client raises for every optional output, which is the
+    all-absent case.
+    """
+    class NoExtras(FakeMAAPClient):
+        def get_job_output(self, job_id, output_name, **fmt):
+            if output_name.startswith("cog") or output_name == "netcdf25":
+                raise LookupError(f"{output_name!r}: expected 1 match, found 0")
+            return super().get_job_output(job_id, output_name, **fmt)
+
+    client = NoExtras()
+    orch = MAAPOrchestrator(
+        CONFIG, client, today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    assert len(client.published) == 1          # the day still succeeded
+    assert client.published_extras == [None]   # and carried no extras

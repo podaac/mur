@@ -202,6 +202,8 @@ class MAAPClient:
         netcdf_href: str,
         process_date: datetime.date,
         mode: str,
+        *,
+        extra_assets: Optional[Dict[str, str]] = None,
     ) -> None:
         """Publish a STAC Item for the MRVA output granule (plan section 6.2).
 
@@ -830,7 +832,36 @@ class MAAPOrchestrator:
         self._promote_csp(process_date, mrva_job)
 
         netcdf_href = self.client.get_job_output(mrva_job, "netcdf")
-        self.client.publish_stac_item(netcdf_href, process_date, mode)
+
+        # Browse rasters and the MUR25 sibling, catalogued beside the granule.
+        #
+        # Every one is optional and every one is looked up in a try: Stage 10b
+        # is explicitly non-fatal, MUR25 is skipped when its grid file is
+        # absent, and a day that produced a granule must not be failed over a
+        # missing picture. resolve_output raises LookupError when nothing
+        # matches, which here means "not produced", not "broken".
+        extras = {}
+        for asset_key, output_name in (
+            ("mur25", "netcdf25"),
+            ("browse_sst", "cog_sst"),
+            ("browse_anom", "cog_anom"),
+            ("browse25_sst", "cog25_sst"),
+            ("browse25_anom", "cog25_anom"),
+            ("browse25_err", "cog25_err"),
+            ("browse25_ice", "cog25_ice"),
+            ("browse25_mask", "cog25_mask"),
+        ):
+            try:
+                extras[asset_key] = self.client.get_job_output(
+                    mrva_job, output_name)
+            except Exception:                              # noqa: BLE001
+                continue
+        if extras:
+            logger.info("    catalogued %d extra asset(s): %s",
+                        len(extras), ", ".join(sorted(extras)))
+
+        self.client.publish_stac_item(netcdf_href, process_date, mode,
+                                      extra_assets=extras or None)
 
         return DayResult(
             process_date=process_date,

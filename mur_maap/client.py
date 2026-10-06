@@ -616,14 +616,16 @@ class MaapPyClient(MAAPClient):
 
     # -- catalogue ----------------------------------------------------------
 
-    def publish_stac_item(self, netcdf_href, process_date, mode) -> None:
+    def publish_stac_item(self, netcdf_href, process_date, mode,
+                          *, extra_assets=None) -> None:
         """Record the L4 granule as a STAC Item in the workspace bucket.
 
         Written to the bucket rather than a STAC Transaction API: it is a
         durable record that needs no endpoint, and swapping in a real
         transaction call later is a one-method change.
         """
-        item = _stac.build_l4_item(netcdf_href, process_date, mode)
+        item = _stac.build_l4_item(netcdf_href, process_date, mode,
+                                   extra_assets=extra_assets)
         from . import paths
         href = self.write_manifest(paths.stac_item_key(process_date, mode), item)
         logger.info("recorded STAC item %s -> %s", item["id"], href)
