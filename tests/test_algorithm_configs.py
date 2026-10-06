@@ -14,7 +14,7 @@ import pytest
 yaml = pytest.importorskip("yaml")
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-MODULES = ("landice", "iquam", "l2p", "mrva")
+MODULES = ("landice", "iquam", "l2p", "mrva", "cog")
 
 # Inputs delivered to the container as environment variables rather than
 # command-line flags, so they have no matching entrypoint flag by design.
@@ -39,6 +39,10 @@ UNEXPOSED = {
         # rejects it. Bootstrap-only, so omitting it is safe.
         "l4-reference-root",
         # Boolean build/diagnostic flag, not a per-job parameter.
+        "debug",
+    },
+    "cog": {
+        # Same reason as mrva's: a build/diagnostic switch, not science.
         "debug",
     },
 }

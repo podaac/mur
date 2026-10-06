@@ -51,7 +51,7 @@ case "$NEW" in
 esac
 
 cd "$(dirname "$0")/.."
-MODULES="landice iquam l2p mrva"
+MODULES="landice iquam l2p mrva cog"
 
 OLD=$(sed -n 's/^ALGORITHM_VERSION = "\(.*\)"$/\1/p' mur_maap/version.py)
 if [ -z "$OLD" ]; then

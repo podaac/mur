@@ -154,6 +154,19 @@ OUTPUT_PATTERNS: Dict[str, Dict[str, str]] = {
         "bic": r"^Global_{sensor}_{year}_{doy}\.bic(\.gz)?$",
         "l2plist": r"^L2Plist_\w+_{sensor}_{year}_{doy}\.txt$",
     },
+    # cog writes flat into the stage-out root, one file per field, named
+    # <granule stem>_<field>.tif. Separate patterns per field because each
+    # needs its own colour scale in the STAC asset -- one *.tif pattern would
+    # return a bag of files with no way to tell SST from an ice fraction.
+    "mur-cog": {
+        "cog_sst": r"^[^/]*MUR-GLOB[^/]*_sst\.tif$",
+        "cog_anom": r"^[^/]*MUR-GLOB[^/]*_anom\.tif$",
+        "cog25_sst": r"^[^/]*MUR25-GLOB[^/]*_sst\.tif$",
+        "cog25_anom": r"^[^/]*MUR25-GLOB[^/]*_anom\.tif$",
+        "cog25_err": r"^[^/]*MUR25-GLOB[^/]*_err\.tif$",
+        "cog25_ice": r"^[^/]*MUR25-GLOB[^/]*_ice\.tif$",
+        "cog25_mask": r"^[^/]*MUR25-GLOB[^/]*_mask\.tif$",
+    },
     "mur-mrva": {
         # MUR-GLOB and MUR25-GLOB both live in netcdf/ and both end .nc, so
         # these must distinguish them. The old pattern was ^netcdf/.*\.nc$,
@@ -166,18 +179,6 @@ OUTPUT_PATTERNS: Dict[str, Dict[str, str]] = {
         "netcdf": r"^netcdf/[^/]*{date}[^/]*MUR-GLOB[^/]*\.nc$",
         "netcdf25": r"^netcdf/[^/]*{date}[^/]*MUR25-GLOB[^/]*\.nc$",
         "csp": r"^csp/.*\.c\d\d$",
-        # Stage 10b's browse rasters, under netcdf/cog/. Separate patterns
-        # per field rather than one for *.tif, because each needs its own
-        # colour scale and rescale range in the STAC asset -- a single
-        # pattern would return a bag of files with no way to tell an SST
-        # layer from an ice fraction.
-        "cog_sst": r"^netcdf/cog/.*MUR-GLOB.*_sst\.tif$",
-        "cog_anom": r"^netcdf/cog/.*MUR-GLOB.*_anom\.tif$",
-        "cog25_sst": r"^netcdf/cog/.*MUR25.*_sst\.tif$",
-        "cog25_anom": r"^netcdf/cog/.*MUR25.*_anom\.tif$",
-        "cog25_err": r"^netcdf/cog/.*MUR25.*_err\.tif$",
-        "cog25_ice": r"^netcdf/cog/.*MUR25.*_ice\.tif$",
-        "cog25_mask": r"^netcdf/cog/.*MUR25.*_mask\.tif$",
     },
 }
 

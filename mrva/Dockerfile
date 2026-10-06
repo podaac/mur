@@ -165,15 +165,7 @@ ENV MRVA_DEBUG_BUILD=${DEBUG}
 # fetch s3:// input hrefs (direct-value flags and --sensor-inputs-manifest
 # entries) to local disk before MATLAB runs -- see
 # docs/input-contract.html section 4.
-#
-# gdal-bin is here for Stage 10b, which turns the NetCDF products into
-# cloud-optimized GeoTIFFs. MAAP's titiler tiles any COG by URL, so a COG in
-# the workspace bucket is a map layer with no STAC registration and no
-# approval -- verified 2026-10-05, when the service answered "specified key
-# does not exist" for a workspace path rather than access denied. The
-# conversion runs in the container because the granule is already here;
-# doing it afterwards would mean moving ~800 MB out and derivatives back.
-# It costs ~150 MB in an image that already carries the MATLAB Runtime.
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libc6 \
@@ -184,7 +176,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxt6 \
     libxmu6 \
     awscli \
-    gdal-bin \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
 

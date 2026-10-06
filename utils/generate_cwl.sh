@@ -63,7 +63,7 @@ set -euo pipefail
 GENERATOR_REPO="${GENERATOR_REPO:-https://github.com/MAAP-Project/ogc-app-pack-generator}"
 GENERATOR_DIR="${GENERATOR_DIR:-/tmp/ogc-app-pack-generator}"
 PYTHON="${PYTHON:-python3}"
-MODULES="landice iquam l2p mrva"
+MODULES="landice iquam l2p mrva cog"
 VALIDATE_ONLY=0
 PIN_DIGEST=0
 

@@ -39,7 +39,7 @@ import mur_window
 from iquam_date_flags import format_iquam_reference_date
 from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
 from mrva_static_files import MRVA_STATIC_RELATIVE_PATHS, seasonal_relative_path
-from mur_maap import paths
+from mur_maap import outputs, paths
 from mur_maap import tags
 from mur_maap.version import ALGORITHM_VERSION
 
@@ -213,7 +213,10 @@ class MAAPClient:
         raise NotImplementedError("MAAPClient.publish_stac_item: wire up STAC publish")
 
 
-ALL_STAGES = ("landice", "iquam", "l2p", "mrva")
+# cog is last and derives from mrva's granule rather than feeding anything,
+# so a run that omits it is a complete scientific run missing only its
+# pictures -- which is why nothing downstream treats its absence as an error.
+ALL_STAGES = ("landice", "iquam", "l2p", "mrva", "cog")
 
 
 def validate_stages(stages: Optional[Iterable[str]]) -> set:
@@ -834,29 +837,50 @@ class MAAPOrchestrator:
 
         netcdf_href = self.client.get_job_output(mrva_job, "netcdf")
 
-        # Browse rasters and the MUR25 sibling, catalogued beside the granule.
-        #
-        # Every one is optional and every one is looked up in a try: Stage 10b
-        # is explicitly non-fatal, MUR25 is skipped when its grid file is
-        # absent, and a day that produced a granule must not be failed over a
-        # missing picture. resolve_output raises LookupError when nothing
-        # matches, which here means "not produced", not "broken".
+        # The MUR25 sibling, if Stage 10 produced one.
         extras = {}
-        for asset_key, output_name in (
-            ("mur25", "netcdf25"),
-            ("browse_sst", "cog_sst"),
-            ("browse_anom", "cog_anom"),
-            ("browse25_sst", "cog25_sst"),
-            ("browse25_anom", "cog25_anom"),
-            ("browse25_err", "cog25_err"),
-            ("browse25_ice", "cog25_ice"),
-            ("browse25_mask", "cog25_mask"),
-        ):
-            try:
-                extras[asset_key] = self.client.get_job_output(
-                    mrva_job, output_name)
-            except Exception:                              # noqa: BLE001
-                continue
+        try:
+            extras["mur25"] = self.client.get_job_output(mrva_job, "netcdf25")
+        except Exception:                                  # noqa: BLE001
+            pass
+
+        # Browse rasters, from a separate job per granule.
+        #
+        # mur-cog is its own process because the work shares nothing with the
+        # analysis but an input file, and the mrva image carries a MATLAB
+        # Runtime and takes an hour. Keeping them apart means rasters can be
+        # regenerated for any granule in the bucket without redoing the
+        # analysis, and a colormap change does not rebuild MATLAB.
+        #
+        # Every failure here is swallowed. These are pictures: a day that
+        # produced an L4 granule must not be failed because a derived image
+        # did not appear, and "cog" is absent from self.stages whenever the
+        # operator did not ask for it.
+        if "cog" in self.stages:
+            for asset_prefix, granule_href in (
+                ("browse", netcdf_href), ("browse25", extras.get("mur25")),
+            ):
+                if not granule_href:
+                    continue
+                try:
+                    cog_job = self.client.submit_job(
+                        "mur-cog", {"granule": granule_href},
+                        tag=tags.job_tag("cog", process_date, mode,
+                                         sensor=asset_prefix))
+                    self.client.wait_all([cog_job])
+                except Exception as exc:                   # noqa: BLE001
+                    logger.warning(
+                        "    browse rasters for %s failed (%s); the granule "
+                        "is unaffected", asset_prefix, exc)
+                    continue
+                for output_name in sorted(
+                        outputs.OUTPUT_PATTERNS.get("mur-cog", {})):
+                    try:
+                        href = self.client.get_job_output(cog_job, output_name)
+                    except Exception:                      # noqa: BLE001
+                        continue
+                    extras[f"{asset_prefix}_{output_name.split('_')[-1]}"] = href
+
         if extras:
             logger.info("    catalogued %d extra asset(s): %s",
                         len(extras), ", ".join(sorted(extras)))
@@ -1437,7 +1461,7 @@ def parse_args(argv=None):
                              "needs an equals sign -- -p=-9:-1 -- because argparse "
                              "reads a bare -9:-1 as an option (default: %(default)s).")
     parser.add_argument("--execute",
-                        help="Comma-separated stages to run: landice,iquam,l2p,mrva. "
+                        help="Comma-separated stages to run: landice,iquam,l2p,mrva,cog. "
                              "Default: all. MRVA needs l2p's outputs, so excluding "
                              "l2p while including mrva will fail.")
     parser.add_argument("--sensors", help="Comma-separated sensor subset.")

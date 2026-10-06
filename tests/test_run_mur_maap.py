@@ -207,6 +207,17 @@ class FakeMAAPClient(MAAPClient):
         self.published_extras.append(extra_assets)
 
 
+def _mrva_args(client):
+    """The arguments mrva was submitted with, found by name.
+
+    Was client.submitted[-1][1] until cog became a stage that runs after mrva,
+    at which point the last submission was a different job and these tests
+    started asserting against the wrong dictionary. Position was never what
+    they meant.
+    """
+    return next(a for p, a in reversed(client.submitted) if p == "mur-mrva")
+
+
 @pytest.fixture
 def orchestrator():
     client = FakeMAAPClient()
@@ -365,8 +376,12 @@ def test_run_day_submits_l2p_when_no_cached_bic_exists():
 def test_run_day_submits_mrva_last_and_publishes_stac_item(orchestrator):
     orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
     processes = [p for p, _ in orchestrator.client.submitted]
-    assert processes[-1] == "mur-mrva"
-    mrva_args = orchestrator.client.submitted[-1][1]
+    # mrva is the last SCIENTIFIC stage. cog runs after it, deriving browse
+    # rasters from its granule, so the final submission is cog whenever that
+    # stage is enabled -- which is the default.
+    assert [p for p in processes if p != "mur-cog"][-1] == "mur-mrva"
+    assert processes[-1] in ("mur-mrva", "mur-cog")
+    mrva_args = _mrva_args(orchestrator.client)
     assert mrva_args["year"] == 2026
     assert mrva_args["doy"] == 218
     assert mrva_args["mode"] == "nrt"
@@ -386,7 +401,7 @@ def test_mrva_runs_the_full_analysis_unless_the_config_caps_it(orchestrator):
     repeated default.
     """
     orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
-    mrva_args = orchestrator.client.submitted[-1][1]
+    mrva_args = _mrva_args(orchestrator.client)
     assert "max_level" not in mrva_args
 
 
@@ -415,7 +430,7 @@ def test_a_configured_cap_reaches_mrva_and_is_announced(caplog):
 
 def test_run_day_mrva_gets_named_static_and_landice_hrefs_not_raw_lists(orchestrator):
     orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
-    mrva_args = orchestrator.client.submitted[-1][1]
+    mrva_args = _mrva_args(orchestrator.client)
 
     assert "bic_inputs" not in mrva_args
     assert "iquam_input" not in mrva_args
@@ -449,7 +464,7 @@ def test_run_day_mrva_gets_named_static_and_landice_hrefs_not_raw_lists(orchestr
 
 def test_run_day_mrva_sensor_inputs_manifest_covers_bic_and_iquam(orchestrator):
     orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
-    mrva_args = orchestrator.client.submitted[-1][1]
+    mrva_args = _mrva_args(orchestrator.client)
 
     assert mrva_args["sensor_inputs_manifest"].startswith("s3://podaac/mur/manifests/mrva/")
     prefix, manifest = orchestrator.client.written_manifests[-1]
@@ -611,7 +626,7 @@ def test_mrva_chains_from_a_promoted_prior_coefficient(orchestrator):
     orchestrator.client.existing_objects.add(prior)
 
     orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
-    mrva_args = orchestrator.client.submitted[-1][1]
+    mrva_args = _mrva_args(orchestrator.client)
     assert mrva_args["prior_csp_file"] == prior
 
 
@@ -621,7 +636,7 @@ def test_rea_mode_never_chains_from_a_prior_coefficient(orchestrator):
         f"{WORKSPACE_ROOT}/mur/csp/2026/2026080509_MRVA4_Global.c06")
 
     orchestrator.run_day(datetime.date(2026, 8, 6), mode="rea")
-    assert "prior_csp_file" not in orchestrator.client.submitted[-1][1]
+    assert "prior_csp_file" not in _mrva_args(orchestrator.client)
 
 
 def test_this_days_coefficient_is_promoted_for_tomorrow(orchestrator):
@@ -792,9 +807,18 @@ def test_landice_and_iquam_alone_submit_no_l2p():
         "mur-landice", "mur-iquam"}
 
 
-def test_the_default_still_submits_all_four():
+def test_the_default_submits_every_stage_including_the_browse_rasters():
+    """Was "all four" until cog became a stage of its own.
+
+    cog is default-on because the browse rasters exist to be looked at, and a
+    layer nobody generated is a layer nobody sees. It is last and derives from
+    mrva's granule rather than feeding anything, so dropping it with
+    --execute landice,iquam,l2p,mrva leaves a complete scientific run missing
+    only its pictures.
+    """
     """Nobody passing --execute must be affected by any of this."""
     assert set(_submitted_processes(None)) == {
+        "mur-cog",
         "mur-landice", "mur-iquam", "mur-l2p", "mur-mrva"}
 
 
@@ -1038,7 +1062,7 @@ def test_a_second_run_still_hands_mrva_the_landice_files(orchestrator):
     """Skipping the job must not mean skipping the inputs."""
     orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
     orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
-    mrva_args = orchestrator.client.submitted[-1][1]
+    mrva_args = _mrva_args(orchestrator.client)
     root = "s3://maap-ops-workspace/testuser/mur/landice"
     assert mrva_args["landice_ice_p011_file"] == \
         f"{root}/p011/2026/Global_ice_2026_218.bip"

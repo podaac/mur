@@ -1,0 +1,60 @@
+# OGC Application Package for the MUR cog module.
+#
+# Separate from mrva deliberately. Browse rasters share nothing with the
+# analysis but an input file, and the mrva image carries a MATLAB Runtime,
+# takes an hour, and is the one stage that currently cannot finish on any
+# available worker. Keeping this apart means a colormap change does not
+# rebuild a MATLAB container, and rasters can be regenerated for any granule
+# already in the bucket without redoing the analysis.
+algorithm_description: >
+  Cloud-optimized GeoTIFFs from a MUR L4 SST granule, for visualization.
+  MAAP's titiler tiles any COG by URL, so the outputs are map layers with no
+  STAC registration required. Reads one granule, writes one GeoTIFF per
+  requested field.
+algorithm_name: mur-cog
+algorithm_version: "2.0.4"
+algorithm_container_url: ghcr.io/podaac/mur/cog-dps:2.0.4
+
+keywords: MUR, SST, GHRSST, COG, visualization
+code_repository: https://github.com/podaac/mur
+citation: >
+  Chin, T.M., Vazquez-Cuervo, J., Armstrong, E.M. (2017). A multi-scale
+  high-resolution analysis of global sea surface temperature. Remote Sensing
+  of Environment, 200, 154-169.
+author: JPL PO.DAAC MUR Team
+contributor: JPL PO.DAAC MUR Team
+license: https://github.com/podaac/mur/blob/main/LICENSE
+release_notes: >
+  First release. Split out of mrva, where it was briefly Stage 10b, so that
+  the browse products do not depend on the heaviest stage in the pipeline.
+
+run_command: /opt/cog/bin/entrypoint.sh
+
+# 4 GiB / 2 cores. gdal_translate streams a 36000x17999 int16 band through a
+# DEFLATE encoder and builds overviews; it is I/O-shaped, not memory-shaped,
+# and nothing here holds a full array. The smallest pool is plenty -- which is
+# the point of not running this inside mrva.
+ram_min: 4096
+cores_min: 2
+outdir_max: 4096   # two 1 km fields at ~400 MB, with room for all five of MUR25
+
+inputs:
+  - name: granule
+    label: L4 granule
+    doc: >
+      s3:// href to one MUR L4 NetCDF granule, either the 1 km MUR-GLOB
+      product or its MUR25-GLOB sibling.
+    type: string
+  - name: fields
+    label: Fields
+    doc: >
+      Optional comma-separated subset of sst,anom,err,ice,mask. Empty picks a
+      default from the product: sst,anom for the 1 km granule, where each
+      field is ~400 MB compressed, and all five for MUR25, where they are
+      trivial.
+    type: string?
+    default: ""
+
+outputs:
+  - name: output
+    type: Directory

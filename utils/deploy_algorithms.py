@@ -44,7 +44,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "utils"))
 
-MODULES = ("iquam", "landice", "l2p", "mrva")     # cheapest first
+MODULES = ("cog", "iquam", "landice", "l2p", "mrva")   # cheapest first
 
 
 def cwl_for(module: str, version: str) -> pathlib.Path:
@@ -155,6 +155,9 @@ def main(argv=None) -> int:
     parser.add_argument("--poll-interval", type=float, default=15.0,
                         help="seconds between checks (default: %(default)s)")
     args = parser.parse_args(argv)
+    # Naming a module explicitly means you want THAT one; a missing CWL is then
+    # an error worth stopping for, not a module that happens to be newer.
+    args.explicit_modules = bool(argv and "--modules" in argv)
 
     version = args.version
 
@@ -186,6 +189,28 @@ def main(argv=None) -> int:
     # leaves some modules on the new version and some on the old, which is a
     # worse state than not having started.
     missing = [m for m in args.modules if not cwl_for(m, version).is_file()]
+
+    # A module the caller did not name is one that simply did not exist at this
+    # version -- cog was added at 2.1.0, so redeploying 2.0.3 must not fail for
+    # want of a package nobody ever built. Dropped with a note rather than
+    # treated as an error, which is the difference between "you cannot roll
+    # back" and "rolling back gives you what that version had".
+    if missing and not args.explicit_modules:
+        for m in missing:
+            print(f"note: no CWL at {version} for {m}; it did not exist then. "
+                  f"Skipping.")
+        args.modules = [m for m in args.modules if m not in missing]
+        missing = []
+        if not args.modules:
+            # Not "this module is newer" but "this version does not exist".
+            # Keep the actionable hint: a bare refusal leaves the reader
+            # guessing whether the version is wrong or the packages are
+            # missing.
+            print(f"ERROR: no CWL at {version} for any module.")
+            print(f"       Expected e.g. {cwl_for(MODULES[0], version)}")
+            print(f"       Generate them first:  ./utils/generate_cwl.sh")
+            return 1
+
     if missing:
         print(f"ERROR: no CWL at {version} for: {', '.join(missing)}")
         print(f"       Expected e.g. {cwl_for(missing[0], version)}")

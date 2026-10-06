@@ -71,10 +71,15 @@ def test_a_full_day_plans_against_this_config(config):
     assert result.netcdf_href
     processes = [p for p, _ in client.submitted]
     assert processes[0] == "mur-landice"
-    assert processes[-1] == "mur-mrva"
+    # mrva is the last SCIENTIFIC stage. cog runs after it, deriving browse
+    # rasters from its granule, so the final submission is cog whenever that
+    # stage is enabled -- which is the default.
+    assert [p for p in processes if p != "mur-cog"][-1] == "mur-mrva"
+    assert processes[-1] in ("mur-mrva", "mur-cog")
     # 5 sensors x 5-day windows, plus landice, iquam and mrva.
     assert processes.count("mur-l2p") == 25
-    assert len(processes) == 28
+    # 28 scientific submissions plus two cog jobs, one per granule.
+    assert len(processes) == 30
 
 
 def test_placeholders_are_obvious(config):

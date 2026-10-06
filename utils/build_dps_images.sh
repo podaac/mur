@@ -51,7 +51,7 @@ set -euo pipefail
 REGISTRY="${REGISTRY:-ghcr.io}"
 REPO="${REPO:-podaac/mur}"
 PLATFORM="linux/amd64"
-MODULES="iquam l2p landice mrva"
+MODULES="iquam l2p landice mrva cog"
 TAG=""
 PUSH=0
 VERIFY=0
