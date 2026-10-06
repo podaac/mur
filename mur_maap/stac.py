@@ -112,6 +112,7 @@ def build_l4_item(
     collection: str = DEFAULT_COLLECTION,
     job_id: Optional[str] = None,
     extra_assets: Optional[Dict[str, str]] = None,
+    analysis_level: Optional[int] = None,
 ) -> Dict:
     """A STAC Item describing one MUR L4 SST granule.
 
@@ -152,6 +153,18 @@ def build_l4_item(
         "processing:level": "L4",
         "mur:doy": process_date.timetuple().tm_yday,
     }
+    if analysis_level is not None:
+        # Mirrors the granule's own mrva_analysis_level attribute. On the item
+        # as well as in the file because the item is what a catalogue listing
+        # reads: a capped granule is structurally identical to a full one, so
+        # without this an index of browse layers cannot say which days are at
+        # production resolution and which are not.
+        properties["mur:analysis_level"] = int(analysis_level)
+        if int(analysis_level) < 11:
+            properties["mur:analysis_level_note"] = (
+                f"Solved to L={analysis_level}, not the full L=11. Same grid, "
+                "smoother field, lacks the operational product's finest scale.")
+
     if job_id:
         # Provenance back to the DPS job, so a granule can be traced to the
         # run that made it without keeping a separate ledger.

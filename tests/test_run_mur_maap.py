@@ -200,7 +200,7 @@ class FakeMAAPClient(MAAPClient):
         return f"s3://podaac/output/{job_id}/{output_name}{suffix}"
 
     def publish_stac_item(self, netcdf_href, process_date, mode,
-                          *, extra_assets=None):
+                          *, extra_assets=None, analysis_level=None):
         # extra_assets is recorded separately so existing assertions on
         # `published` keep their shape; what they check has not changed.
         self.published.append((netcdf_href, process_date, mode))

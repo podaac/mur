@@ -204,6 +204,7 @@ class MAAPClient:
         mode: str,
         *,
         extra_assets: Optional[Dict[str, str]] = None,
+        analysis_level: Optional[int] = None,
     ) -> None:
         """Publish a STAC Item for the MRVA output granule (plan section 6.2).
 
@@ -860,8 +861,12 @@ class MAAPOrchestrator:
             logger.info("    catalogued %d extra asset(s): %s",
                         len(extras), ", ".join(sorted(extras)))
 
-        self.client.publish_stac_item(netcdf_href, process_date, mode,
-                                      extra_assets=extras or None)
+        self.client.publish_stac_item(
+            netcdf_href, process_date, mode,
+            extra_assets=extras or None,
+            # Absent in the config means the full L=11; record the effective
+            # level either way so the item never has to be read as "unknown".
+            analysis_level=int(self.config.get("mrva", {}).get("max_level", 11)))
 
         return DayResult(
             process_date=process_date,
