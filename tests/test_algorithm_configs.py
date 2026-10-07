@@ -515,3 +515,41 @@ def test_the_image_tag_is_rewritten_whatever_it_said_before(module, tmp_path):
     assert f"ghcr.io/podaac/mur/{module}-dps:9.9.10" in got, (
         f"{module}: the image tag was not rewritten from 1.1.1")
     assert 'algorithm_version: "9.9.10"' in got
+
+
+def test_rerunning_bump_at_the_same_version_repairs_rather_than_no_ops(tmp_path):
+    """Asking for the version already set must still fix an out-of-step module.
+
+    bump used to exit at "Already at X; nothing to do", on the assumption that
+    if version.py agrees then everything does. It does not follow -- cog sat at
+    cog-dps:2.0.4 while version.py read 2.0.11 -- so re-running was the obvious
+    thing to try and the one thing that changed nothing.
+
+    There is deliberately no --force: a repair nobody knows to ask for is a
+    repair that does not happen.
+    """
+    import shutil
+    import subprocess
+
+    (tmp_path / "mur_maap").mkdir()
+    (tmp_path / "mur_maap" / "version.py").write_text(
+        'ALGORITHM_VERSION = "2.0.11"\n')
+    for m in MODULES:
+        d = tmp_path / "maap" / m
+        d.mkdir(parents=True)
+        tag = "2.0.4" if m == "cog" else "2.0.11"      # cog alone is behind
+        (d / "algorithm_config.yml").write_text(
+            f'algorithm_version: "2.0.11"\n'
+            f'algorithm_container_url: ghcr.io/podaac/mur/{m}-dps:{tag}\n')
+    (tmp_path / "utils").mkdir()
+    shutil.copy(REPO / "utils" / "bump_algorithm_version.sh",
+                tmp_path / "utils")
+
+    # The SAME version it already has.
+    r = subprocess.run(["bash", "utils/bump_algorithm_version.sh", "2.0.11"],
+                       cwd=tmp_path, capture_output=True, text=True)
+
+    got = (tmp_path / "maap" / "cog" / "algorithm_config.yml").read_text()
+    assert "cog-dps:2.0.11" in got, (
+        f"re-run did not repair the stale tag.\n{r.stdout}\n{r.stderr}")
+    assert "nothing to do" not in r.stdout

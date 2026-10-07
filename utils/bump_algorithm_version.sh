@@ -3,14 +3,15 @@
 # Roll the MUR algorithm version everywhere it is written.
 #
 # WHY THIS IS A SCRIPT AND NOT A NOTE IN A README
-#   The version appears in five places, and MAAP keeps every version ever
+#   The version appears in two places per module plus version.py, and MAAP
+#   keeps every version ever
 #   registered. So asking MAAP for a version that is merely OLD is not an
 #   error -- it resolves, it submits, the job runs, and it runs the previous
 #   image. A half-finished bump produces a pipeline that looks entirely
 #   healthy while running last week's code.
 #
 #   The five: algorithm_version and the image tag inside
-#   algorithm_container_url, in each of the four maap/<module>/
+#   algorithm_container_url, in each of the maap/<module>/
 #   algorithm_config.yml files; and ALGORITHM_VERSION in mur_maap/version.py,
 #   which is what the orchestrator asks MAAP to resolve.
 #
@@ -58,12 +59,21 @@ if [ -z "$OLD" ]; then
   echo "ERROR: could not read ALGORITHM_VERSION from mur_maap/version.py" >&2
   exit 1
 fi
+# Asking for the version already in version.py used to exit here, on the
+# assumption that if version.py agrees then everything does. It does not
+# follow: a module can be out of step on its own, which is exactly how cog sat
+# at cog-dps:2.0.4 while version.py read 2.0.11, and re-running was the
+# obvious thing to try and the one thing that did nothing.
+#
+# So this is now a re-assertion rather than a no-op. The rewrites below are
+# idempotent, so running them against an already-consistent tree costs
+# nothing and repairs one that is not. There is deliberately no --force: a
+# repair nobody knows to ask for is a repair that does not happen.
 if [ "$OLD" = "$NEW" ]; then
-  echo "Already at $NEW; nothing to do."
-  exit 0
+  echo "==> Already at $NEW; re-asserting it across every module."
+else
+  echo "==> $OLD -> $NEW"
 fi
-
-echo "==> $OLD -> $NEW"
 [ "$DRY" -eq 1 ] && echo "    (dry run: nothing will be written)"
 echo
 
@@ -108,7 +118,11 @@ fi
 # committed CWL naming the old version is precisely the stale artifact that
 # gets deployed by accident.
 echo
-echo "==> Checking the version landed in all five places"
+# Counted rather than written out: the text said "five places" and "4
+# configs" while there were five modules, which is how a stale number
+# quietly becomes a wrong one every time a module is added.
+NMOD=$(echo $MODULES | wc -w | tr -d " ")
+echo "==> Checking the version landed in all $((NMOD * 2 + 1)) places"
 bad=0
 for module in $MODULES; do
   config="maap/$module/algorithm_config.yml"
@@ -126,7 +140,7 @@ if [ "$bad" -gt 0 ]; then
   echo "       fix them by hand before building anything." >&2
   exit 1
 fi
-echo "    ok: 4 configs + mur_maap/version.py"
+echo "    ok: $NMOD configs (version + image tag) + mur_maap/version.py"
 
 cat <<NEXT
 
@@ -157,7 +171,7 @@ machine can actually do:
      downgrade this whole exercise is about. That red is the reminder, not a
      bug.
 
-  3. Redeploy all four packages, still in the workspace:
+  3. Redeploy every package, still in the workspace:
        python utils/deploy_algorithms.py --dry-run
        python utils/deploy_algorithms.py
 
