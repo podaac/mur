@@ -472,3 +472,46 @@ def test_every_image_is_linked_to_the_repository(module):
         in dockerfile, (
             f"{module}/Dockerfile has no source label; its GHCR package would "
             f"land unlinked")
+
+
+@pytest.mark.parametrize("module", MODULES)
+def test_the_image_tag_is_rewritten_whatever_it_said_before(module, tmp_path):
+    """bump must bring a config back into step, not only keep one in step.
+
+    The container URL rewrite used to be anchored on the OLD version:
+
+        s|^\\(algorithm_container_url: .*\\):$OLD$|\\1:$NEW|
+
+    so a config already out of step could never be fixed. cog was added at
+    cog-dps:2.0.4 while version.py read 2.0.10; bumping to 2.0.11 moved
+    algorithm_version and left the image tag at 2.0.4. The config then
+    described one version while pointing at another version's image, and the
+    registration resolved a container unrelated to what was being deployed.
+
+    This drives the real script against a config deliberately out of step.
+    """
+    import shutil
+    import subprocess
+
+    (tmp_path / "mur_maap").mkdir()
+    (tmp_path / "mur_maap" / "version.py").write_text(
+        'ALGORITHM_VERSION = "9.9.9"\n')
+    for m in MODULES:
+        d = tmp_path / "maap" / m
+        d.mkdir(parents=True)
+        # Every module is in step except the one under test.
+        tag = "1.1.1" if m == module else "9.9.9"
+        (d / "algorithm_config.yml").write_text(
+            f'algorithm_version: "{tag}"\n'
+            f'algorithm_container_url: ghcr.io/podaac/mur/{m}-dps:{tag}\n')
+    (tmp_path / "utils").mkdir()
+    shutil.copy(REPO / "utils" / "bump_algorithm_version.sh",
+                tmp_path / "utils")
+
+    subprocess.run(["bash", "utils/bump_algorithm_version.sh", "9.9.10"],
+                   cwd=tmp_path, capture_output=True, check=False)
+
+    got = (tmp_path / "maap" / module / "algorithm_config.yml").read_text()
+    assert f"ghcr.io/podaac/mur/{module}-dps:9.9.10" in got, (
+        f"{module}: the image tag was not rewritten from 1.1.1")
+    assert 'algorithm_version: "9.9.10"' in got

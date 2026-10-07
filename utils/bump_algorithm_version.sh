@@ -72,9 +72,23 @@ run() { if [ "$DRY" -eq 1 ]; then echo "    would: $*"; else "$@"; fi; }
 for module in $MODULES; do
   config="maap/$module/algorithm_config.yml"
   echo "  $config"
+  # Both lines are rewritten whatever they said before, anchored on the
+  # module name rather than on $OLD.
+  #
+  # The container URL used to be anchored on ":$OLD$", which meant a config
+  # already out of step could never be brought back in: cog was added at
+  # cog-dps:2.0.4 while version.py read 2.0.10, so a bump to 2.0.11 moved
+  # algorithm_version and left the image tag at 2.0.4. The config then
+  # described one version and pointed at another's image, and registration
+  # resolved a container that had nothing to do with the version being
+  # deployed.
+  #
+  # Anchoring on "/<module>-dps:" fixes any tag and cannot touch a
+  # digest-pinned URL, which has the shape -dps@sha256:... and so does not
+  # match.
   run sed -i.bak \
     -e "s|^algorithm_version: .*|algorithm_version: \"$NEW\"|" \
-    -e "s|^\(algorithm_container_url: .*\):$OLD$|\1:$NEW|" \
+    -e "s|^\(algorithm_container_url: .*/${module}-dps\):.*$|\1:$NEW|" \
     "$config"
   run rm -f "$config.bak"
 done
