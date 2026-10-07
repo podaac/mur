@@ -555,3 +555,52 @@ def test_setting_the_version_already_set_still_repairs_a_stale_module(tmp_path):
     assert "cog-dps:2.0.11" in got, (
         f"re-run did not repair the stale tag.\n{r.stdout}\n{r.stderr}")
     assert "nothing to do" not in r.stdout
+
+
+def test_generate_refuses_when_the_configs_disagree(tmp_path):
+    """Generating from an inconsistent config produces a CWL that looks fine.
+
+    These configs are tracked files. Managing the version without committing
+    is a reasonable way to work while iterating, but it means every git pull
+    silently reverts them -- and generating before re-running
+    set_algorithm_version.sh is then the natural mistake.
+
+    On 2026-10-07 it produced a 2.0.11-named CWL carrying dockerPull
+    mrva-dps:2.0.4, which registered cleanly and ran a three-week-old image
+    that died on an argument it had never heard of, forty minutes in. Checked
+    before generating rather than after, and before the generator is even
+    cloned, so the answer costs seconds.
+    """
+    import shutil
+    import subprocess
+
+    (tmp_path / "mur_maap").mkdir()
+    (tmp_path / "mur_maap" / "version.py").write_text(
+        'ALGORITHM_VERSION = "2.0.11"\n')
+    for m in MODULES:
+        d = tmp_path / "maap" / m
+        d.mkdir(parents=True)
+        # mrva's image tag alone is stale -- exactly what a pull leaves behind.
+        tag = "2.0.4" if m == "mrva" else "2.0.11"
+        (d / "algorithm_config.yml").write_text(
+            f'algorithm_version: "2.0.11"\n'
+            f'algorithm_container_url: ghcr.io/podaac/mur/{m}-dps:{tag}\n')
+    (tmp_path / "utils").mkdir()
+    shutil.copy(REPO / "utils" / "generate_cwl.sh", tmp_path / "utils")
+
+    # GENERATOR_DIR is redirected into the fixture. Left at its default it is
+    # /tmp/ogc-app-pack-generator, shared with every other test that runs this
+    # script -- so whether a clone happens depends on which tests ran first,
+    # and the assertion below was flaky for exactly that reason.
+    import os
+    gen = tmp_path / "generator"
+    env = {**os.environ, "GENERATOR_DIR": str(gen)}
+    r = subprocess.run(["bash", "utils/generate_cwl.sh"], cwd=tmp_path,
+                       capture_output=True, text=True, env=env)
+
+    assert r.returncode != 0, "an inconsistent config must not generate"
+    assert "Refusing to generate" in r.stdout
+    assert "mrva" in r.stdout and "2.0.4" in r.stdout
+    assert "set_algorithm_version.sh 2.0.11" in r.stdout
+    # And it reached that verdict without fetching a generator it cannot use.
+    assert not gen.exists(), "refused, but cloned the generator anyway"

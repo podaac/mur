@@ -93,6 +93,40 @@ OUT_DIR="$REPO_ROOT/maap/cwl_workflows"
 mkdir -p "$OUT_DIR"
 
 if [ "$VALIDATE_ONLY" -eq 0 ]; then
+  # --- pre-flight: are the configs internally consistent? ----------------
+  #
+  # Checked BEFORE generating, not after, because generating from an
+  # inconsistent config produces a CWL that looks fine and is wrong -- and
+  # once deployed, the wrongness only shows up as a container failing on an
+  # argument it has never heard of, forty minutes into a job.
+  #
+  # The case this exists for: these configs are tracked files. If the version
+  # is managed without committing -- a reasonable way to work while iterating
+  # -- then every `git pull` silently reverts them, and generating before
+  # re-running set_algorithm_version.sh is the natural mistake. On 2026-10-07
+  # that produced a 2.0.11-named CWL carrying dockerPull mrva-dps:2.0.4 and
+  # ran a three-week-old image.
+  pf_want=$(sed -n 's/^ALGORITHM_VERSION = "\(.*\)"$/\1/p' "$REPO_ROOT/mur_maap/version.py")
+  pf_bad=0
+  for module in $MODULES; do
+    config="$REPO_ROOT/maap/$module/algorithm_config.yml"
+    v=$(sed -n 's/^algorithm_version: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$config" | head -1)
+    t=$(sed -n 's/^algorithm_container_url: *.*:\([^:]*\)$/\1/p' "$config" | head -1)
+    if [ "$v" != "$pf_want" ] || { [ "$t" != "$pf_want" ] && [ -n "$t" ]; }; then
+      [ "$pf_bad" -eq 0 ] && echo "==> Refusing to generate: the configs disagree" && echo
+      echo "  $module: algorithm_version=$v  image tag=$t  (version.py says $pf_want)"
+      pf_bad=1
+    fi
+  done
+  if [ "$pf_bad" -eq 1 ]; then
+    echo
+    echo "  These are tracked files, so a git pull reverts them. Run:"
+    echo "    ./utils/set_algorithm_version.sh $pf_want"
+    echo "  then generate. Generating now would produce a CWL naming one"
+    echo "  version and pulling another's image."
+    exit 1
+  fi
+
   if [ ! -d "$GENERATOR_DIR" ]; then
     echo "==> Cloning the app-pack generator into $GENERATOR_DIR"
     git clone --depth 1 "$GENERATOR_REPO" "$GENERATOR_DIR"
