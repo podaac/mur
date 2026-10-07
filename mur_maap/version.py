@@ -15,7 +15,7 @@ a wrong answer that looks like a right one.
 
 So: Python reads the version from here, never from a config default, and
 tests/test_algorithm_configs.py asserts the four YAML files agree with it.
-Change it with utils/bump_algorithm_version.sh, which edits every place at
+Change it with utils/set_algorithm_version.sh, which edits every place at
 once rather than leaving four of five updated.
 """
 

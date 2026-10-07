@@ -3,11 +3,12 @@
 # Roll the MUR algorithm version everywhere it is written.
 #
 # WHY THIS IS A SCRIPT AND NOT A NOTE IN A README
-#   The version appears in two places per module plus version.py, and MAAP
+#   Sets the algorithm version everywhere it appears, to exactly the value
+#   given. It appears in two places per module plus version.py, and MAAP
 #   keeps every version ever
 #   registered. So asking MAAP for a version that is merely OLD is not an
 #   error -- it resolves, it submits, the job runs, and it runs the previous
-#   image. A half-finished bump produces a pipeline that looks entirely
+#   image. A half-finished version change produces a pipeline that looks entirely
 #   healthy while running last week's code.
 #
 #   The five: algorithm_version and the image tag inside
@@ -15,7 +16,7 @@
 #   algorithm_config.yml files; and ALGORITHM_VERSION in mur_maap/version.py,
 #   which is what the orchestrator asks MAAP to resolve.
 #
-# WHY BUMP AT ALL, RATHER THAN REBUILD A TAG
+# WHY A NEW VERSION AT ALL, RATHER THAN REBUILD A TAG
 #   cwltool pulls an image only when `docker inspect <dockerPull>` FAILS, so a
 #   DPS worker that has already run a tag keeps its cached copy of it. A tag
 #   rebuilt in place reaches new workers and not old ones, and the job output
@@ -27,8 +28,8 @@
 #   frozen copy of the CWL either way.
 #
 # USAGE
-#   ./utils/bump_algorithm_version.sh 2.0.1
-#   ./utils/bump_algorithm_version.sh 2.0.1 --dry-run
+#   ./utils/set_algorithm_version.sh 2.0.1
+#   ./utils/set_algorithm_version.sh 2.0.1 --dry-run
 set -euo pipefail
 
 NEW=""
@@ -43,7 +44,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$NEW" ]; then
-  echo "ERROR: give the new version, e.g. ./utils/bump_algorithm_version.sh 2.0.1" >&2
+  echo "ERROR: give the new version, e.g. ./utils/set_algorithm_version.sh 2.0.1" >&2
   exit 2
 fi
 case "$NEW" in
@@ -54,10 +55,18 @@ esac
 cd "$(dirname "$0")/.."
 MODULES="landice iquam l2p mrva cog"
 
+# Read only to describe the change and to name the previous version in the
+# instructions below. Nothing is rewritten by matching it.
+#
+# This script used to be called set_algorithm_version.sh, and the name was
+# the bug: "bump" implies moving from a known OLD to a NEW, so the image-tag
+# rewrite was anchored on ":$OLD$" and silently skipped any module that was
+# not already at OLD. A new module could therefore never come into step, and
+# re-running could not repair one. SET has no such notion -- every place
+# becomes $NEW whatever it said -- so the failure mode does not exist.
 OLD=$(sed -n 's/^ALGORITHM_VERSION = "\(.*\)"$/\1/p' mur_maap/version.py)
 if [ -z "$OLD" ]; then
-  echo "ERROR: could not read ALGORITHM_VERSION from mur_maap/version.py" >&2
-  exit 1
+  OLD="(unreadable)"
 fi
 # Asking for the version already in version.py used to exit here, on the
 # assumption that if version.py agrees then everything does. It does not
@@ -70,9 +79,9 @@ fi
 # nothing and repairs one that is not. There is deliberately no --force: a
 # repair nobody knows to ask for is a repair that does not happen.
 if [ "$OLD" = "$NEW" ]; then
-  echo "==> Already at $NEW; re-asserting it across every module."
+  echo "==> Setting every place to $NEW (already there; re-asserting)."
 else
-  echo "==> $OLD -> $NEW"
+  echo "==> Setting every place to $NEW (was $OLD)."
 fi
 [ "$DRY" -eq 1 ] && echo "    (dry run: nothing will be written)"
 echo

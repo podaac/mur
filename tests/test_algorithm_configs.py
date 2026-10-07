@@ -317,7 +317,7 @@ def test_the_four_packages_declare_the_version_the_code_asks_for():
             f"{module}: algorithm_config.yml says {declared}, but "
             f"mur_maap/version.py says {ALGORITHM_VERSION}. The orchestrator "
             f"would resolve {ALGORITHM_VERSION} and run whatever was deployed "
-            f"under it. Use utils/bump_algorithm_version.sh.")
+            f"under it. Use utils/set_algorithm_version.sh.")
 
 
 def test_the_image_tag_follows_the_version_everywhere():
@@ -475,14 +475,16 @@ def test_every_image_is_linked_to_the_repository(module):
 
 
 @pytest.mark.parametrize("module", MODULES)
-def test_the_image_tag_is_rewritten_whatever_it_said_before(module, tmp_path):
-    """bump must bring a config back into step, not only keep one in step.
+def test_set_version_rewrites_the_image_tag_whatever_it_said(module, tmp_path):
+    """SET must bring a config into step, not only keep one in step.
 
     The container URL rewrite used to be anchored on the OLD version:
 
         s|^\\(algorithm_container_url: .*\\):$OLD$|\\1:$NEW|
 
-    so a config already out of step could never be fixed. cog was added at
+    so a config already out of step could never be fixed. The name was the
+    bug: "bump" means move from OLD to NEW, which is why the rewrite keyed
+    on OLD. "Set everything to X" has no such notion. cog was added at
     cog-dps:2.0.4 while version.py read 2.0.10; bumping to 2.0.11 moved
     algorithm_version and left the image tag at 2.0.4. The config then
     described one version while pointing at another version's image, and the
@@ -505,10 +507,10 @@ def test_the_image_tag_is_rewritten_whatever_it_said_before(module, tmp_path):
             f'algorithm_version: "{tag}"\n'
             f'algorithm_container_url: ghcr.io/podaac/mur/{m}-dps:{tag}\n')
     (tmp_path / "utils").mkdir()
-    shutil.copy(REPO / "utils" / "bump_algorithm_version.sh",
+    shutil.copy(REPO / "utils" / "set_algorithm_version.sh",
                 tmp_path / "utils")
 
-    subprocess.run(["bash", "utils/bump_algorithm_version.sh", "9.9.10"],
+    subprocess.run(["bash", "utils/set_algorithm_version.sh", "9.9.10"],
                    cwd=tmp_path, capture_output=True, check=False)
 
     got = (tmp_path / "maap" / module / "algorithm_config.yml").read_text()
@@ -517,10 +519,10 @@ def test_the_image_tag_is_rewritten_whatever_it_said_before(module, tmp_path):
     assert 'algorithm_version: "9.9.10"' in got
 
 
-def test_rerunning_bump_at_the_same_version_repairs_rather_than_no_ops(tmp_path):
+def test_setting_the_version_already_set_still_repairs_a_stale_module(tmp_path):
     """Asking for the version already set must still fix an out-of-step module.
 
-    bump used to exit at "Already at X; nothing to do", on the assumption that
+    It used to exit at "Already at X; nothing to do", on the assumption that
     if version.py agrees then everything does. It does not follow -- cog sat at
     cog-dps:2.0.4 while version.py read 2.0.11 -- so re-running was the obvious
     thing to try and the one thing that changed nothing.
@@ -542,11 +544,11 @@ def test_rerunning_bump_at_the_same_version_repairs_rather_than_no_ops(tmp_path)
             f'algorithm_version: "2.0.11"\n'
             f'algorithm_container_url: ghcr.io/podaac/mur/{m}-dps:{tag}\n')
     (tmp_path / "utils").mkdir()
-    shutil.copy(REPO / "utils" / "bump_algorithm_version.sh",
+    shutil.copy(REPO / "utils" / "set_algorithm_version.sh",
                 tmp_path / "utils")
 
     # The SAME version it already has.
-    r = subprocess.run(["bash", "utils/bump_algorithm_version.sh", "2.0.11"],
+    r = subprocess.run(["bash", "utils/set_algorithm_version.sh", "2.0.11"],
                        cwd=tmp_path, capture_output=True, text=True)
 
     got = (tmp_path / "maap" / "cog" / "algorithm_config.yml").read_text()

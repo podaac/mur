@@ -407,7 +407,7 @@ mur-web-viewer                          # Streamlit on :8501</code></pre>
     step people skip fails silently.</p>
 
     <div class="warn">
-      <p><strong>Bump the version; never rebuild a tag in place.</strong>
+      <p><strong>Use a new version; never rebuild a tag in place.</strong>
       <code>cwltool</code> runs <code>docker pull</code> only when
       <code>docker inspect &lt;dockerPull&gt;</code> <em>fails</em>. A DPS
       worker that has already run <code>l2p-dps:2.0.3</code> keeps its cached
@@ -417,7 +417,7 @@ mur-web-viewer                          # Streamlit on :8501</code></pre>
 
       <p>And MAAP keeps every version ever registered, so asking for a version
       that is merely <em>old</em> is not an error: it resolves, it submits, the
-      job runs, and it runs the previous image. A half-finished bump produces a
+      job runs, and it runs the previous image. A half-finished version change produces a
       pipeline that looks entirely healthy while running last week's code.</p>
     </div>
 
@@ -468,7 +468,7 @@ git rev-parse --short HEAD              # note this; the image records it
 <pre><code>git pull
 git rev-parse --short HEAD              # MUST match the build machine
 
-./utils/bump_algorithm_version.sh 2.0.5           # --dry-run to preview
+./utils/set_algorithm_version.sh 2.0.5           # --dry-run to preview
 ./utils/generate_cwl.sh                           # optionally --pin-digest
 python -m pytest tests/test_algorithm_configs.py
 
@@ -478,7 +478,7 @@ python utils/deploy_algorithms.py
 git commit -am "chore(maap): application packages 2.0.5"
 git push                                          # the CWL, if you want it tracked</code></pre>
 
-    <p>The tag passed to the build and the version bumped to here must be the
+    <p>The tag passed to the build and the version set here must be the
     same string. Nothing checks that for you.</p>
 
     <div class="warn">
@@ -498,7 +498,7 @@ git push                                          # the CWL, if you want it trac
     <div class="note">
       <p><strong>Why the tests run after generation, not before.</strong>
       <code>tests/test_algorithm_configs.py</code> asserts all five places agree
-      <em>and</em> that a CWL exists for the current version. Between the bump
+      <em>and</em> that a CWL exists for the current version. Between setting the version
       and the regenerate, that last one fails by design &mdash; the configs say
       2.0.4 and <code>maap/cwl_workflows/</code> still holds only 2.0.3. That is
       the failure telling you the release is half-finished, so run the suite on

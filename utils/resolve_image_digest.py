@@ -18,7 +18,7 @@ WHY A DIGEST AT ALL
     after the tag is rebuilt and repushed. A digest cannot be reused, so the
     inspect fails and the pull happens.
 
-    Prefer rolling the version (utils/bump_algorithm_version.sh) for ordinary
+    Prefer rolling the version (utils/set_algorithm_version.sh) for ordinary
     changes; pin a digest when a version number must stay put.
 
     ./utils/resolve_image_digest.py ghcr.io/podaac/mur/l2p-dps:2.0.0
