@@ -53,8 +53,25 @@ if [ -z "$TAG" ]; then
 fi
 
 # --- base image: built once, reused, never pushed ------------------------
-if [ ! -f network.lic ]; then
+#
+# Only for modules that actually compile MATLAB. cog does not: it is
+# debian-slim plus gdal-bin, and demanding a MATLAB licence to build a GeoTIFF
+# converter would make the cheap module as hard to build as the expensive one
+# -- which is most of the reason it was split out of mrva.
+NEEDS_MATLAB=0
+for module in $MODULES; do
+  if grep -q 'mur-matlab-base' "${module}/Dockerfile" 2>/dev/null; then
+    NEEDS_MATLAB=1
+  fi
+done
+
+if [ "$NEEDS_MATLAB" -eq 0 ]; then
+  echo "==> No requested module needs the MATLAB base; skipping it."
+fi
+
+if [ "$NEEDS_MATLAB" -eq 1 ] && [ ! -f network.lic ]; then
   echo "ERROR: network.lic not found. It is gitignored; copy it in before building." >&2
+  echo "       (only needed for MATLAB modules -- cog builds without it)" >&2
   exit 1
 fi
 
@@ -62,7 +79,9 @@ fingerprint=$(sha256sum matlab-base/Dockerfile | cut -c1-16)
 have=$(docker image inspect "$BASE_IMAGE" \
          --format '{{index .Config.Labels "mur.base.fingerprint"}}' 2>/dev/null || echo "")
 
-if [ "$have" = "$fingerprint" ]; then
+if [ "$NEEDS_MATLAB" -eq 0 ]; then
+  :
+elif [ "$have" = "$fingerprint" ]; then
   echo "==> Base image is current (fingerprint $fingerprint); reusing."
 else
   echo "==> Building base image (this is the slow one; it is cached afterwards)."
@@ -74,8 +93,10 @@ else
     .
 fi
 
-echo "==> MATLAB update level in base image:"
-docker run --rm --entrypoint cat "$BASE_IMAGE" /opt/matlab/.update_level
+if [ "$NEEDS_MATLAB" -eq 1 ]; then
+  echo "==> MATLAB update level in base image:"
+  docker run --rm --entrypoint cat "$BASE_IMAGE" /opt/matlab/.update_level
+fi
 
 # --- module images -------------------------------------------------------
 for module in $MODULES; do
