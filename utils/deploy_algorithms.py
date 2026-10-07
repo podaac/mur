@@ -237,6 +237,54 @@ def main(argv=None) -> int:
             return 1
         print()
 
+    # A check that holds whatever the configs say, and so runs even when the
+    # cross-check above is skipped.
+    #
+    # process_mur-mrva_2.0.11.cwl must pull mrva-dps:2.0.11. That is true by
+    # construction -- the filename and the tag both come from the same
+    # algorithm_version -- and it needs no reference to algorithm_config.yml,
+    # which is the whole reason the cross-check gets skipped on a rollback.
+    #
+    # It exists because the skip had a direction nobody intended. Deploying a
+    # version OLDER than the tree is a rollback and the skip is right. But
+    # version.py sitting BEHIND the version being deployed skipped it too, and
+    # that is the dangerous direction: on 2026-10-07 a 2.0.11 CWL carrying
+    # dockerPull mrva-dps:2.0.4 registered cleanly and ran a 2026-09-24 image
+    # that had never heard of --max-level. The job failed on an unknown
+    # argument, forty minutes in, for a reason nothing in the deploy mentioned.
+    mismatched = []
+    for module in args.modules:
+        text = cwl_for(module, version).read_text()
+        for line in text.splitlines():
+            if "dockerPull:" not in line:
+                continue
+            pulled = line.split("dockerPull:", 1)[1].strip()
+            if "@sha256:" in pulled:          # digest-pinned, tag not present
+                break
+            if not pulled.endswith(f":{version}"):
+                mismatched.append((module, pulled))
+            break
+
+    if mismatched and not args.skip_check:
+        print("==> Refusing to deploy: a CWL pulls another version's image")
+        print()
+        for module, pulled in mismatched:
+            print(f"  mur-{module}: {cwl_for(module, version).name}")
+            print(f"    dockerPull  {pulled}")
+            print(f"    expected    ...:{version}")
+        print()
+        print("  The CWL was generated before the version was set. Run, in "
+              "this order:")
+        print(f"    ./utils/set_algorithm_version.sh {version}")
+        print("    ./utils/generate_cwl.sh")
+        print()
+        print("  Deploying as-is registers a process under this version's "
+              "name that runs")
+        print("  another version's image, which fails late and confusingly "
+              "rather than at")
+        print("  submit. --skip-check overrides, if you are certain.")
+        return 1
+
     print(f"==> Deploying at {version}")
     for module in args.modules:
         print(f"  mur-{module}  <- {cwl_for(module, version).name}")

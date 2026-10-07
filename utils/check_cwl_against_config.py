@@ -78,9 +78,16 @@ def check_module(repo_root: pathlib.Path, module: str):
     ok, note = image_matches(actual, expected_image)
     if not ok:
         problems += 1
-        lines.append(f"  {module}: dockerPull is {actual!r}, expected "
-                     f"{expected_image} or {expected_image.split(':')[0]}"
-                     f"@sha256:... -- fix it by hand")
+        lines.append(
+            f"  {module}: dockerPull is {actual!r}, expected "
+            f"{expected_image} or {expected_image.split(':')[0]}@sha256:...\n"
+            f"      The CWL was generated before the version was set. Do NOT\n"
+            f"      hand-edit it -- the next generation overwrites it. Run:\n"
+            f"        ./utils/set_algorithm_version.sh <version>\n"
+            f"        ./utils/generate_cwl.sh\n"
+            f"      in that order, then redeploy. Deploying as-is registers a\n"
+            f"      process that pulls {actual.split(':')[-1] if ':' in actual else 'another'}"
+            f"'s image under this version's name.")
     elif note:
         lines.append(f"  {module}: dockerPull is {note}")
 

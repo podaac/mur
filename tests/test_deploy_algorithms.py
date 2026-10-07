@@ -302,3 +302,58 @@ def test_report_and_resolve_agree_on_which_registration_wins():
                    deploy.registrations(FakeMaap(rows), "mur-landice")
                    if v == "2.0.1")
     assert resolved == reported == 91
+
+
+def test_a_cwl_pulling_another_versions_image_is_refused(tmp_path, monkeypatch,
+                                                         capsys):
+    """The one check that holds whatever the configs say.
+
+    deploy skips the config cross-check when the deployed version differs from
+    version.py, which is right for a rollback -- an old CWL legitimately
+    predates the current config. But the skip had a direction nobody intended:
+    version.py sitting BEHIND the version being deployed skipped it too.
+
+    On 2026-10-07 that let a 2.0.11 CWL carrying dockerPull mrva-dps:2.0.4
+    register cleanly. The job then pulled a 2026-09-24 image that had never
+    heard of --max-level and died on an unknown argument, forty minutes in,
+    for a reason nothing in the deploy had mentioned.
+
+    A CWL named process_mur-X_2.0.11.cwl must pull X-dps:2.0.11. Filename and
+    tag both come from the same algorithm_version, so this needs no reference
+    to algorithm_config.yml and survives the skip.
+    """
+    cwl_dir = tmp_path / "maap" / "cwl_workflows"
+    cwl_dir.mkdir(parents=True)
+    (cwl_dir / "process_mur-mrva_9.9.9.cwl").write_text(
+        "cwlVersion: v1.2\n"
+        "          dockerPull: ghcr.io/podaac/mur/mrva-dps:2.0.4\n")
+    monkeypatch.setattr(deploy, "REPO", tmp_path)
+
+    rc = deploy.main(["--version", "9.9.9", "--modules", "mrva"])
+    out = capsys.readouterr().out
+
+    assert rc == 1, "deploying another version's image must be refused"
+    assert "mrva-dps:2.0.4" in out
+    assert "set_algorithm_version.sh 9.9.9" in out
+    assert "generate_cwl.sh" in out
+
+
+def test_a_digest_pinned_cwl_is_not_mistaken_for_a_mismatch(tmp_path,
+                                                            monkeypatch):
+    """--pin-digest replaces the tag with @sha256:..., which has no version in
+    it. That is deliberate and must not be read as pulling the wrong one."""
+    cwl_dir = tmp_path / "maap" / "cwl_workflows"
+    cwl_dir.mkdir(parents=True)
+    (cwl_dir / "process_mur-mrva_9.9.9.cwl").write_text(
+        "cwlVersion: v1.2\n"
+        "          dockerPull: ghcr.io/podaac/mur/mrva-dps@sha256:" + "a" * 64
+        + "\n")
+    monkeypatch.setattr(deploy, "REPO", tmp_path)
+    monkeypatch.setattr(deploy, "registrations",
+                        lambda *a: (_ for _ in ()).throw(
+                            AssertionError("should have got past the check")))
+
+    # Reaching registrations() means the digest was accepted; --dry-run stops
+    # before it, so a non-zero here would mean the check wrongly refused.
+    assert deploy.main(["--version", "9.9.9", "--modules", "mrva",
+                        "--dry-run"]) == 0
