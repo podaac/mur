@@ -452,3 +452,23 @@ def test_the_dps_layer_refreshes_every_text_file_the_modules_copy():
             f"{module}/Dockerfile copies {sorted(missing)} from the working "
             f"tree, but Dockerfile.dps does not refresh it. A change there "
             f"would need a full MATLAB rebuild to reach an image.")
+
+
+@pytest.mark.parametrize("module", MODULES)
+def test_every_image_is_linked_to_the_repository(module):
+    """GHCR connects a package to its repo through this label and nothing else.
+
+    Images are pushed by hand -- no CI can reach the JPL licence servers -- so
+    an unlabelled package lands orphaned on GHCR and has to be linked through
+    the web UI afterwards. cog shipped without it and was caught by eye, which
+    is the check this replaces.
+
+    The -dps variants inherit it: maap/Dockerfile.dps does FROM ${BASE_IMAGE},
+    and Docker accumulates LABELs from the parent, so labelling the module
+    image covers both.
+    """
+    dockerfile = (REPO / module / "Dockerfile").read_text()
+    assert 'org.opencontainers.image.source="https://github.com/podaac/mur"' \
+        in dockerfile, (
+            f"{module}/Dockerfile has no source label; its GHCR package would "
+            f"land unlinked")

@@ -31,3 +31,13 @@ ARG MUR_IMAGE_BUILD=unknown
 ENV MUR_IMAGE_BUILD=${MUR_IMAGE_BUILD}
 
 ENTRYPOINT ["/opt/cog/bin/entrypoint.sh"]
+
+# Labels for metadata
+# org.opencontainers.image.source connects the pushed package to the
+# repository on GHCR. Images are pushed by hand (no CI can reach the JPL
+# licence servers), so without this label a package lands unlinked and has
+# to be connected through the web UI.
+LABEL org.opencontainers.image.source="https://github.com/podaac/mur"
+LABEL description="MUR COG Module - cloud-optimized browse rasters from an L4 granule"
+LABEL version="1.0"
+LABEL maintainer="MUR Team"
