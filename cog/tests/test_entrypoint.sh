@@ -70,6 +70,61 @@ assert_eq "--granule is required" \
 assert_eq "an unknown flag is rejected" \
     "1" "$(run_case "parse_args --granule s3://b/x.nc --nope >/dev/null 2>&1; echo \$?")"
 
+# --- STAC identity ---------------------------------------------------------
+#
+# Every identifier comes out of the granule filename, which is the only thing
+# this container and the orchestrator both see. Passing the day in separately
+# would allow two spellings of one date.
+assert_eq "the item datetime is read from the filename timestamp" \
+    "2026-10-06T09:00:00Z" "$(run_case "granule_datetime '$FINE'")"
+
+assert_eq "a filename without a timestamp yields nothing, rather than a guess" \
+    "" "$(run_case "granule_datetime 'granule.nc' || true")"
+
+assert_eq "resolution is read from the product name" \
+    "1km" "$(run_case "granule_resolution '$FINE'")"
+assert_eq "...and MUR25 is recognised as the coarse product" \
+    "25km" "$(run_case "granule_resolution '$COARSE'")"
+
+# Mode appears only in the DPS directory (.../279nrt/...), never in the
+# filename, so it cannot be recovered from the stem.
+assert_eq "mode is inferred from a doy+mode path segment" \
+    "nrt" "$(run_case "infer_mode 's3://b/netcdf/GLOB/JPL/MUR/v4/2026/279nrt/$FINE'")"
+assert_eq "...rea too" \
+    "rea" "$(run_case "infer_mode 's3://b/x/2026/121rea/$FINE'")"
+assert_eq "an href with no mode segment reports nothing, rather than nrt" \
+    "" "$(run_case "infer_mode 's3://b/anywhere/$FINE'")"
+
+# The item id deliberately omits mode. A day is analysed first as NRT and
+# later reprocessed as REA; two items would leave the browse catalogue with
+# two layers for one date and no way for a map to choose between them. The
+# granules keep mode in their own item id, so both analyses stay addressable
+# as data -- only the picture is replaced.
+assert_eq "the browse item id is day plus resolution" \
+    "mur-cog-20261006-1km" "$(run_case "cog_item_id '$FINE'")"
+assert_eq "...and the two resolutions do not collide" \
+    "mur-cog-20261006-25km" "$(run_case "cog_item_id '$COARSE'")"
+
+assert_eq "nrt and rea of one day share a browse item id" \
+    "same" "$(run_case "
+        a=\$(cog_item_id '$FINE'); b=\$(cog_item_id '$FINE')
+        [[ \"\$a\" == \"\$b\" ]] && echo same || echo differ")"
+
+# --- STAC runs after the conversion, and never instead of it ---------------
+#
+# Ordering asserted on the source: metadata describing nothing is worse than
+# no metadata, and a finished conversion must not be thrown away because its
+# sidecar JSON failed.
+assert_eq "the empty-output check comes before the metadata step" \
+    "yes" \
+    "$(awk '/no COGs produced/{f=1} /^ *write_stac /{print (f?"yes":"no"); exit}' "$ENTRYPOINT")"
+
+assert_eq "a metadata failure does not fail the job" \
+    "1" "$(grep -c 'the COGs above are unaffected' "$ENTRYPOINT")"
+
+assert_eq "the emitter is read from the shared location all modules use" \
+    "1" "$(grep -c 'COMMON_DIR/write_stac.py' "$ENTRYPOINT")"
+
 # --- the conversion assigns a CRS ------------------------------------------
 #
 # GHRSST L4 carries no grid_mapping attribute, so GDAL emits a GeoTIFF with no

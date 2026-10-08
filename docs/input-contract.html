@@ -126,6 +126,31 @@
     <li><strong>This process just submitted the job</strong> (its <code>job_id</code> is sitting in a local Python variable from earlier in the same <code>run()</code> call). <code>maap-py</code>'s real <code>DPSJob.outputs</code> / <code>get_job_output(job_id, output_name)</code> can query that specific job directly and get its actual href back. This works purely because we still have the handle to ask with — not because anything about storage differs. The existing <code>run_mur_maap.py</code> skeleton is already shaped this way (<code>get_job_output(mrva_job, "netcdf")</code>).</li>
     <li><strong>A different process invocation submitted the job</strong> — yesterday's cron run, or whenever a still-valid, reused BIC file was originally generated — and that process has already exited. Its <code>job_id</code> was never persisted anywhere this process can read. There is no handle left to query with, so <code>get_job_output()</code> is unusable here regardless of storage — we've simply lost the one thing that API call needs. And critically, we can't fall back to guessing a path either: confirmed by checking MAAP's actual DPS output handling, <strong>we don't get to choose the output bucket/prefix</strong> — DPS decides it (with its own date/time organization layered in even when we choose <code>IDENTIFIER</code> ourselves) — so a naming-convention guess like today's stub (<code>bic_prefix = f"mur/bic/{sensor}/{year}/{doy}.bic.gz"</code>) is not a real, reliable href.</li>
     </ol>
+    <div class="note">
+      <p><strong>Superseded in part &mdash; what was actually built.</strong>
+      This section proposed one mechanism for everything. Implementation split
+      it in two, because the two halves answer different questions on
+      different critical paths.</p>
+      <p><em>Intermediates</em> (BIC, iQUAM, landice, the <code>.c06</code>
+      coefficient) are <strong>not</strong> in STAC. They are copied to
+      deterministic keys under the workspace bucket after their job succeeds
+      &mdash; <code>mur_maap/paths.py</code>, and the <code>_promote_*</code>
+      methods in <code>run_mur_maap.py</code>. Case&nbsp;2 above is still
+      exactly right about why a promotion step has to exist; the resolution is
+      a single S3 <code>HEAD</code> rather than a catalogue search, which
+      keeps tomorrow's submit decision off the network.</p>
+      <p><em>Products</em> (the two L4 granules, the browse rasters) <strong>are
+      </strong> in STAC &mdash; but written by the containers, not by the
+      orchestrator. Each stages out a <code>catalog.json</code> that MAAP
+      ingests into <code>dps-stac.maap-project.org</code>
+      (<code>common/bin/write_stac.py</code>). The paragraph below on
+      publishing the manifest itself as an item was never built.</p>
+      <p>The confidence note further down is also resolved: MAAP published an
+      output-handling mechanism on 2026-01-06, after this document was
+      written. See <code>docs/maap.html</code> &sect; &ldquo;Where generated
+      files are catalogued&rdquo;.</p>
+    </div>
+
     <p>For case 2, we resolve this by <strong>registering each intermediate artifact as a STAC item when its producing job completes</strong>, and searching STAC instead of trying to reconstruct a <code>job_id</code> or guess a path when checking whether a reusable file exists — reusing the <code>stac_search</code>/<code>publish_stac_item</code>-shaped primitives already stubbed in <code>MAAPClient</code>, rather than inventing a bespoke index. This applies specifically to:</p>
     <ul>
     <li>L2P's BIC output, since it has a stability/skip-cache mechanism (<code>test_run_day_skips_l2p_when_bic_cached_and_not_due_for_rewrite</code>).</li>

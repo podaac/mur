@@ -22,10 +22,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
 
-COPY common/bin/localize.sh /opt/cog/bin/localize.sh
-COPY common/bin/maap_credentials.py /opt/cog/bin/maap_credentials.py
+# /opt/common/bin, matching landice, l2p and mrva -- NOT /opt/cog/bin, which
+# is where these used to land.
+#
+# maap/Dockerfile.dps refreshes the shared helpers at /opt/common/bin so a
+# change to a shell or Python file does not need a full image rebuild. cog
+# put them somewhere else, so that refresh wrote files cog never read and the
+# cog-dps image kept running whatever localize.sh was baked into its base.
+# The build succeeded and the stale helper ran -- invisible until something
+# changed in localize.sh and did not take effect.
+COPY common/bin/localize.sh /opt/common/bin/localize.sh
+COPY common/bin/maap_credentials.py /opt/common/bin/maap_credentials.py
+# Emits the catalog.json MAAP ingests into dps-stac.maap-project.org. Pure
+# stdlib on purpose: python3 is here only as an awscli dependency, there is no
+# pip in this image, and the catalog is validated against real pystac by
+# tests/test_write_stac.py before the image is ever built.
+COPY common/bin/write_stac.py /opt/common/bin/write_stac.py
 COPY cog/bin/entrypoint.sh /opt/cog/bin/entrypoint.sh
-RUN chmod +x /opt/cog/bin/entrypoint.sh /opt/cog/bin/maap_credentials.py
+RUN chmod +x /opt/cog/bin/entrypoint.sh \
+             /opt/common/bin/localize.sh \
+             /opt/common/bin/maap_credentials.py \
+             /opt/common/bin/write_stac.py
 
 ARG MUR_IMAGE_BUILD=unknown
 ENV MUR_IMAGE_BUILD=${MUR_IMAGE_BUILD}

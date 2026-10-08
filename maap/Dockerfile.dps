@@ -53,25 +53,31 @@ ENV MUR_IMAGE_BUILD=${BUILD_STAMP}
 LABEL org.opencontainers.image.revision="${BUILD_STAMP}"
 
 # Refresh every file the module images take from the working tree: the
-# entrypoint, the localization helper, and the credential helper. All three
-# are COPY'd in the FINAL layer of each module image, so replacing them here
-# costs nothing and needs no MATLAB.
+# entrypoint, the localization helper, the credential helper, and the STAC
+# emitter. All of them are COPY'd in the FINAL layer of each module image, so
+# replacing them here costs nothing and needs no MATLAB.
 #
-# All three, not some of them. maap_credentials.py was missing from this list,
+# All of them, not some. maap_credentials.py was missing from this list once,
 # which meant a change to it could only reach an image through a full base
 # rebuild -- a licence server and half an hour -- to update one Python file.
 # That is exactly the cost this layer exists to avoid, and the omission was
 # invisible: the image builds, and the stale helper runs.
 #
+# The DESTINATION has to match too, not just the source path. cog once copied
+# these to /opt/cog/bin, so every refresh below wrote files it never read.
+# tests/test_algorithm_configs.py compares destinations for that reason.
+#
 # iquam neither installs awscli nor sources localize.sh, so its copies are
-# inert -- a few KB, and it keeps this one Dockerfile serving all four
+# inert -- a few KB, and it keeps this one Dockerfile serving all five
 # modules.
 USER root
 COPY common/bin/localize.sh /opt/common/bin/localize.sh
 COPY common/bin/maap_credentials.py /opt/common/bin/maap_credentials.py
+COPY common/bin/write_stac.py /opt/common/bin/write_stac.py
 COPY ${MODULE}/bin/entrypoint.sh /opt/${MODULE}/bin/entrypoint.sh
 RUN chmod 0755 /opt/common/bin/localize.sh \
                 /opt/common/bin/maap_credentials.py \
+                /opt/common/bin/write_stac.py \
                 /opt/${MODULE}/bin/entrypoint.sh
 
 # NO `USER matlab` HERE, though an earlier version of this file had one.

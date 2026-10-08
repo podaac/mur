@@ -9,7 +9,10 @@ algorithm_description: >
   MUR multi-resolution variational analysis for one day. Fuses the per-sensor
   BIC files and iQuam in-situ observations against the seasonal climatology and
   the land/ice mask, emitting the GHRSST L4 MUR NetCDF granule, the MUR25
-  sibling product, and the coefficient file carried into the next day.
+  sibling product, and the coefficient file carried into the next day. Also
+  writes the STAC metadata that publishes the granules: the catalog.json
+  staged out alongside them is ingested into dps-stac.maap-project.org, so a
+  granule is addressable by date rather than by the job that produced it.
 algorithm_name: mur-mrva
 algorithm_version: "2.0.4"
 algorithm_container_url: ghcr.io/podaac/mur/mrva-dps:2.0.4

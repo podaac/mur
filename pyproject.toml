@@ -48,6 +48,11 @@ mur-maap = "run_mur_maap:main"
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",
+    # Validates what common/bin/write_stac.py emits. Dev-only on purpose:
+    # the containers hand-build their STAC because neither image has pip, so
+    # the real library checks the output here instead -- before an image is
+    # built rather than inside one.
+    "pystac[validation]>=1.10.0",
 ]
 viz = [
     "cartopy>=0.22.0",
@@ -71,6 +76,11 @@ include = [
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",
+    # Validates what common/bin/write_stac.py emits. Dev-only on purpose:
+    # the containers hand-build their STAC because neither image has pip, so
+    # the real library checks the output here instead -- before an image is
+    # built rather than inside one.
+    "pystac[validation]>=1.10.0",
 ]
 
 [tool.pytest.ini_options]

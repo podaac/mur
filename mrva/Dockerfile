@@ -268,7 +268,12 @@ COPY common/bin/localize.sh /opt/common/bin/localize.sh
 # Mints DAAC credentials from a MAAP token, so the container can read
 # a bucket its own role cannot. stdlib only -- no new dependencies.
 COPY common/bin/maap_credentials.py /opt/common/bin/maap_credentials.py
-RUN chmod +x /opt/common/bin/localize.sh
+# Emits the catalog.json MAAP ingests into dps-stac.maap-project.org, so a
+# granule is addressable by date instead of by the DPS job that made it.
+# stdlib only -- there is no pip in this image, and the catalog is validated
+# against real pystac by tests/test_write_stac.py before the image is built.
+COPY common/bin/write_stac.py /opt/common/bin/write_stac.py
+RUN chmod +x /opt/common/bin/localize.sh /opt/common/bin/write_stac.py
 
 # Entrypoint wrapper script (source: mrva/bin/entrypoint.sh).
 # Named-args only (--year --doy --mode plus the explicit static/dynamic

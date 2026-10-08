@@ -305,6 +305,89 @@ report_memory_budget() {
     esac
 }
 
+# --- STAC metadata for the analysis granules ---------------------------------
+#
+# MAAP ingests a catalog.json written into the stage-out directory and
+# publishes it at dps-stac.maap-project.org, served by
+# titiler-dps-stac.maap-project.org. That is what makes a granule findable by
+# date without anyone having to know which DPS job produced it, and it is why
+# the pipeline no longer copies granules to invented S3 keys: the ingest
+# service rewrites relative asset hrefs to absolute s3:// URLs, so the file
+# stays where DPS put it.
+#
+# Only the two L4 granules are described. The coefficient files and the
+# per-sensor BICs are internal plumbing -- they churn daily, nobody discovers
+# them, and cataloguing them would mean thousands of items no one queries.
+# They stay at deterministic workspace keys instead.
+
+# Relative to the stage-out root, which is what write_stac.py wants.
+_stac_relpath() {
+    local root="$1" path="$2"
+    echo "${path#"$root"/}"
+}
+
+# The newest match, so a re-run in a dirty directory describes what this run
+# produced rather than whatever sorts first.
+_stac_find_granule() {
+    local root="$1" pattern="$2"
+    find "$root/netcdf" -type f -name "$pattern" 2>/dev/null \
+        | sort | tail -n 1
+}
+
+write_stac() {
+    local root; root="$(output_root)"
+
+    local one; one="$(_stac_find_granule "$root" '*-MUR-GLOB-*.nc')"
+    local p25; p25="$(_stac_find_granule "$root" '*-MUR25-GLOB-*.nc')"
+
+    if [ -z "$one" ] && [ -z "$p25" ]; then
+        echo "STAC: no L4 granule under $root/netcdf; nothing to describe" >&2
+        return 0
+    fi
+
+    # The item datetime and id come from the granule filename, not from
+    # --year/--doy. The filename is what the product actually claims, and a
+    # disagreement between the two should surface as a wrong id rather than be
+    # papered over by recomputing the date we asked for.
+    local base; base="$(basename "${one:-$p25}")"
+    local ts="${base:0:14}"
+    if [[ ! "$ts" =~ ^[0-9]{14}$ ]]; then
+        echo "STAC: cannot read a timestamp from '$base'; skipping metadata" >&2
+        return 0
+    fi
+    local dt="${ts:0:4}-${ts:4:2}-${ts:6:2}T${ts:8:2}:${ts:10:2}:${ts:12:2}Z"
+
+    local -a args=(
+        --output-dir "$root"
+        --collection mur-l4-sst
+        --collection-title "MUR L4 SST analysis"
+        --collection-description "Multi-scale Ultra-high Resolution L4 sea surface temperature analysis granules."
+        --item-id "mur-l4-${ts:0:8}-${MODE}"
+        --datetime "$dt"
+        --property "mur:mode=$MODE"
+        --property "mur:run_type=$([ "$MODE" = rea ] && echo final || echo interim)"
+        --property "mur:doy=$DOY"
+        --property "processing:level=L4"
+    )
+    # Mirrors the granule's own mrva_analysis_level attribute. On the item as
+    # well as in the file because the item is what a catalogue listing reads:
+    # a capped granule is structurally identical to a full one, so without
+    # this nothing can say which days reached production resolution.
+    if [ -n "${MAX_LEVEL:-}" ]; then
+        args+=(--property "mur:analysis_level=$MAX_LEVEL")
+    fi
+    [ -n "$one" ] && args+=(--asset "data=$(_stac_relpath "$root" "$one")")
+    [ -n "$p25" ] && args+=(--asset "data25=$(_stac_relpath "$root" "$p25")")
+
+    # Never fatal. The granules are the product of an hour of analysis; the
+    # metadata makes them discoverable and can be regenerated. Failing a
+    # finished solve over a sidecar JSON would be the worse trade by far.
+    if ! python3 "$SCRIPT_DIR/../../common/bin/write_stac.py" "${args[@]}"; then
+        echo "STAC: metadata generation failed; the granules above are intact" >&2
+    fi
+    return 0
+}
+
 main() {
     set -e
     parse_args "$@" || exit 1
@@ -410,15 +493,31 @@ main() {
 
     echo "Starting MATLAB runtime..."
     build_command || exit 1
-    # Not `exec` when a copy-mode stage-out still has to run afterwards;
-    # exec would replace this shell and the copy would never happen.
-    if [ "${MUR_STAGE_OUT_MODE:-none}" = "copy" ]; then
-        "${CMD[@]}"
-        local rc=$?
-        finish_output_redirect
-        exit "$rc"
+
+    # Never `exec`. Two things have to happen after MATLAB exits -- the
+    # copy-mode stage-out, and the STAC metadata that makes the granules
+    # discoverable -- and exec would replace this shell before either ran.
+    # This used to exec in the common case and fall back to a non-exec branch
+    # only for copy-mode stage-out; the branch is gone because the metadata
+    # step applies to every path.
+    # `|| rc=$?` rather than a bare call followed by `$?`: main() runs under
+    # `set -e`, which would exit on a non-zero MATLAB before either of the
+    # steps below could run -- taking the copy-mode stage-out with it, so a
+    # failed run would stage out nothing at all. Inside an OR-list the
+    # failure is handled, not fatal.
+    local rc=0
+    "${CMD[@]}" || rc=$?
+    finish_output_redirect
+    if [ "$rc" -eq 0 ]; then
+        echo ""
+        write_stac
+    else
+        # A failed solve may still have left partial granules on disk.
+        # Publishing those as a finished product is worse than publishing
+        # nothing: a catalogue entry carries no hint that its run died.
+        echo "STAC: skipped -- MATLAB exited $rc" >&2
     fi
-    exec "${CMD[@]}"
+    exit "$rc"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

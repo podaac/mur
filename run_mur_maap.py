@@ -39,7 +39,7 @@ import mur_window
 from iquam_date_flags import format_iquam_reference_date
 from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
 from mrva_static_files import MRVA_STATIC_RELATIVE_PATHS, seasonal_relative_path
-from mur_maap import outputs, paths
+from mur_maap import outputs, paths, stac
 from mur_maap import tags
 from mur_maap.version import ALGORITHM_VERSION
 
@@ -414,6 +414,50 @@ class MAAPOrchestrator:
         dest = paths.iquam_href(self.workspace_root, data_day)
         return self.client.copy_object(src, dest)
 
+    @property
+    def username(self) -> str:
+        """The MAAP username, taken from the workspace root.
+
+        `s3://maap-ops-workspace/<username>` -- the last segment. Needed
+        because MAAP's STAC ingest names every collection
+        <username>__<algorithm>__<version>, so the collection id cannot be
+        known without it.
+        """
+        root = (self.workspace_root or "").rstrip("/")
+        return root.rsplit("/", 1)[-1] if "/" in root else ""
+
+    def _report_stac(self, process_date: datetime.date, mode: str) -> None:
+        """Print where this day's products will appear in MAAP's STAC.
+
+        Printed rather than verified. Ingestion happens after stage-out, on
+        MAAP's side and on its own schedule, so the item does not exist the
+        moment the job returns -- querying here would report a false absence
+        for every run. The links are deterministic (collection from username,
+        algorithm and version; item from date and mode), so emitting them
+        unconditionally is both honest and useful: they are the addresses to
+        check, not a claim that the data is already there.
+        """
+        user = self.username
+        if not user:
+            return
+        version = str(self.config.get("maap", {}).get("algorithm_version")
+                      or ALGORITHM_VERSION)
+        granules = stac.dps_collection_id(user, "mur-mrva", version)
+        browse = stac.dps_collection_id(user, "mur-cog", version)
+        day = f"{process_date:%Y%m%d}"
+
+        logger.info("    MAAP STAC (ingested from the catalog.json each "
+                    "container staged out):")
+        logger.info("      granules  %s",
+                    stac.dps_item_url(granules, f"mur-l4-{day}-{mode}"))
+        if "cog" in self.stages:
+            for res, field in (("1km", "sst"), ("25km", "sst")):
+                item = f"mur-cog-{day}-{res}"
+                logger.info("      %-5s map %s", res, stac.dps_map_url(
+                    browse, item, field, **stac.RENDER[field]))
+        logger.info("      browse all layers: %s",
+                    stac.dps_browser_url(browse, f"mur-cog-{day}-1km"))
+
     def _browse_from_promoted(self, process_date: datetime.date,
                               mode: str) -> Dict[str, str]:
         """Regenerate browse rasters for a day already in the bucket.
@@ -451,6 +495,8 @@ class MAAPOrchestrator:
         logger.info("    regenerated %d browse raster(s) from the promoted "
                     "granule(s)", len(rasters))
         if rasters:
+            self._report_stac(process_date, mode)
+        if rasters:
             self.client.publish_stac_item(
                 found.get("data") or found.get("mur25"), process_date, mode,
                 extra_assets={k: v for k, v in found.items() if k != "data"},
@@ -469,7 +515,7 @@ class MAAPOrchestrator:
         out = {}
         try:
             job = self.client.submit_job(
-                "mur-cog", {"granule": granule_href},
+                "mur-cog", {"granule": granule_href, "mode": mode},
                 tag=tags.job_tag("cog", process_date, mode,
                                  sensor=asset_prefix))
             self.client.wait_all([job])
@@ -994,7 +1040,12 @@ class MAAPOrchestrator:
                     continue
                 try:
                     cog_job = self.client.submit_job(
-                        "mur-cog", {"granule": granule_href},
+                        # --mode is passed because the granule filename
+                        # cannot carry it: mode lives in the directory
+                        # (.../279nrt/...), and cog's STAC item would
+                        # otherwise record the day with no indication of
+                        # whether it is the interim or the final analysis.
+                        "mur-cog", {"granule": granule_href, "mode": mode},
                         tag=tags.job_tag("cog", process_date, mode,
                                          sensor=asset_prefix))
                     self.client.wait_all([cog_job])
@@ -1021,6 +1072,8 @@ class MAAPOrchestrator:
             # Absent in the config means the full L=11; record the effective
             # level either way so the item never has to be read as "unknown".
             analysis_level=int(self.config.get("mrva", {}).get("max_level", 11)))
+
+        self._report_stac(process_date, mode)
 
         return DayResult(
             process_date=process_date,

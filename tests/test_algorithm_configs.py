@@ -427,31 +427,49 @@ def test_the_dps_layer_does_not_switch_to_a_nonexistent_user():
             f"start.")
 
 
+def _text_copies(dockerfile_text, module):
+    """(source, destination) for every .sh/.py COPY, build arg substituted.
+
+    Both halves, because a refresh is only a refresh if it lands on the path
+    the module actually reads. Comparing sources alone passed cog for months
+    while Dockerfile.dps wrote /opt/common/bin and cog read /opt/cog/bin.
+    """
+    import re
+    pairs = re.findall(r"^COPY\s+([^-\s]\S*)\s+(\S+)", dockerfile_text, re.M)
+    return {
+        (src.replace("${MODULE}", module), dst.replace("${MODULE}", module))
+        for src, dst in pairs
+        if src.endswith((".sh", ".py"))
+    }
+
+
 def test_the_dps_layer_refreshes_every_text_file_the_modules_copy():
     """maap/Dockerfile.dps exists so a change to a shell or Python file does
     not require rebuilding a MATLAB image. That only holds if it refreshes
-    ALL of them -- one left out can reach an image only through a full base
+    ALL of them, TO THE SAME PATH -- one left out, or one landing somewhere
+    the module does not read, reaches an image only through a full base
     rebuild, and the omission is invisible: the image builds and the stale
     file runs."""
-    import re
     dps = (REPO / "maap" / "Dockerfile.dps").read_text()
-    refreshed = set(re.findall(r"^COPY\s+(\S+)\s", dps, re.M))
-
-    # Substitute the build arg so module-specific paths compare.
-    def normalize(path, module):
-        return path.replace("${MODULE}", module)
 
     for module in MODULES:
-        stage = _runtime_stage(module)
-        copied = set(re.findall(r"^COPY\s+([^-\s]\S*)\s", stage, re.M))
-        text_files = {c for c in copied
-                      if c.endswith((".sh", ".py"))}
-        refreshed_here = {normalize(r, module) for r in refreshed}
-        missing = text_files - refreshed_here
+        refreshed = _text_copies(dps, module)
+        copied = _text_copies(_runtime_stage(module), module)
+
+        missing = {src for src, _ in copied} - {src for src, _ in refreshed}
         assert not missing, (
             f"{module}/Dockerfile copies {sorted(missing)} from the working "
             f"tree, but Dockerfile.dps does not refresh it. A change there "
             f"would need a full MATLAB rebuild to reach an image.")
+
+        # Same source, different destination: the refresh writes a file the
+        # module never reads, and the one it does read stays stale.
+        dps_dest = dict(refreshed)
+        for src, dst in sorted(copied):
+            assert dps_dest[src] == dst, (
+                f"{module}/Dockerfile puts {src} at {dst}, but "
+                f"Dockerfile.dps refreshes {dps_dest[src]}. The refresh "
+                f"would write a path {module} does not read.")
 
 
 @pytest.mark.parametrize("module", MODULES)

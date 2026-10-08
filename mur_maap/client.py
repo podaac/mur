@@ -621,9 +621,16 @@ class MaapPyClient(MAAPClient):
                           analysis_level=None) -> None:
         """Record the L4 granule as a STAC Item in the workspace bucket.
 
-        Written to the bucket rather than a STAC Transaction API: it is a
-        durable record that needs no endpoint, and swapping in a real
-        transaction call later is a one-method change.
+        NOT the published item. The granule's catalogued identity comes from
+        the catalog.json mrva stages out, which MAAP ingests into
+        dps-stac.maap-project.org; this is a local sidecar the dataviewer
+        reads, holding both products and the browse rasters in one record --
+        a shape the published items deliberately do not have, because titiler
+        cannot tile an item that mixes a netCDF with its GeoTIFFs.
+
+        Kept because it needs no endpoint and no ingest delay: it is readable
+        the moment the run finishes, whereas MAAP ingests on its own
+        schedule.
         """
         item = _stac.build_l4_item(netcdf_href, process_date, mode,
                                    extra_assets=extra_assets,

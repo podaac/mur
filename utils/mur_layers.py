@@ -7,15 +7,21 @@
     python utils/mur_layers.py --json          # machine-readable
 
 WHY THIS EXISTS
-    MAAP's titiler renders any COG by URL, which is how the pipeline's browse
-    rasters get onto a map with no STAC registration and no approval. But
-    rendering is not browsing: /cog/viewer draws a path you already know and
-    offers no way to discover one. Discovery is exactly what registering in
-    MAAP's pgstac would buy, and that is the part which is not self-service.
+    Mostly, it no longer has to. Discovery is self-service now: the cog
+    container writes a catalog.json that MAAP ingests, so the layers are
+    listed at dps-stac-browser.maap-project.org and tiled by
+    titiler-dps-stac.maap-project.org without anything running in a
+    workspace. Prefer that.
 
-    So this is the index. It runs where the credentials are -- a workspace --
-    lists what the pipeline has actually written, and prints links you open
-    anywhere. The viewing half needs no workspace; only this half does.
+    This remains useful for two cases the catalogue cannot serve. First, a
+    raster written before the STAC emitter existed, or by a job whose
+    metadata step failed -- the file is in the bucket and nothing indexes it.
+    Second, checking a raster BEFORE it is published, where the point is to
+    look at the object rather than at the catalogue. Both address the object
+    by URL, which is why the titiler_viewer path is kept.
+
+    It runs where the credentials are -- a workspace -- lists what the
+    pipeline has actually written, and prints links you open anywhere.
 
 WHAT IT PRINTS
     One block per analysis day, with a titiler viewer URL per layer. The URLs
@@ -37,9 +43,6 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 
-VIEWER = "https://titiler-pgstac.maap-project.org/cog/viewer"
-
-
 def build_client(config_path=None):
     """A client good enough to list S3. Nothing here submits anything."""
     from mur_maap.client import MaapPyClient
@@ -50,9 +53,10 @@ def build_client(config_path=None):
 def viewer_url(cog_href: str, render: dict) -> str:
     """Delegates, so there is one definition of the viewer URL.
 
-    This file had its own copy against a VIEWER constant. Two definitions of
-    the same URL is how /cog/WebMercatorQuad/viewer got invented in a third
-    place and 404'd.
+    This file had its own copy against a local VIEWER constant. Two
+    definitions of the same URL is how /cog/WebMercatorQuad/viewer got
+    invented in a third place and 404'd. The constant is gone; the only
+    remaining definition is in mur_maap.stac.
     """
     from mur_maap.stac import titiler_viewer
     return titiler_viewer(cog_href, **render)

@@ -331,13 +331,101 @@
     items nobody queries. A single S3 <code>HEAD</code> is cheaper and simpler
     than a catalogue round-trip.</p>
 
-    <h3>3. The L4 granule &mdash; STAC</h3>
-    <p>The product is where discovery is the point.
-    <code>mur_maap/stac.py</code> builds the Item as a pure function, so the
-    metadata shape is testable without an endpoint or credentials. The Item id
-    carries the mode (<code>mur-l4-20260806-nrt</code>), because a day is first
-    produced as NRT and later reprocessed as REA &mdash; collapsing both onto
-    one id would let the reanalysis silently replace the interim.</p>
+    <h3>3. The products &mdash; MAAP's own STAC, written by the containers</h3>
+
+    <p>The product is where discovery is the point, and MAAP has a documented
+    mechanism for it that this project initially missed. An algorithm writes a
+    <code>catalog.json</code> into its stage-out directory and MAAP ingests it
+    automatically &mdash; no registration request, no approval, no public
+    bucket:</p>
+
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Service</th><th>What it is for</th></tr></thead>
+      <tbody>
+        <tr><td><code>dps-stac.maap-project.org</code></td><td>the API; <code>/catalogs/&lt;username&gt;</code> is yours</td></tr>
+        <tr><td><code>dps-stac-browser.maap-project.org</code></td><td>a human-facing browser</td></tr>
+        <tr><td><code>titiler-dps-stac.maap-project.org</code></td><td>tiles any catalogued raster</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p><code>common/bin/write_stac.py</code> emits that catalog. It is shipped
+    in both the <code>mrva</code> and <code>cog</code> images, which describe
+    the granules and the browse rasters respectively. It is stdlib-only
+    because neither image has <code>pip</code> &mdash; <code>python3</code> is
+    present in both only as an <code>awscli</code> dependency &mdash; so the
+    output is validated against the real <code>pystac</code> in
+    <code>tests/test_write_stac.py</code>, before an image is built rather
+    than inside one.</p>
+
+    <div class="note">
+      <p><strong>This is why products do not need promoting.</strong> Asset
+      hrefs in the catalog are written <em>relative to the Item file</em>, and
+      the ingest service rewrites them to absolute <code>s3://</code> URLs. So
+      a granule stays exactly where DPS put it and its STAC Item becomes its
+      stable address. Copying a product to a canonical key duplicates roughly
+      730&nbsp;MB per day to solve a problem MAAP had already solved.</p>
+      <p>The intermediates in section&nbsp;2 are a different case: promotion
+      there is a lookup index for the <em>next day's submit</em>, which would
+      otherwise need a catalogue round-trip on the critical path.</p>
+    </div>
+
+    <h4>Two naming rules that are not obvious</h4>
+
+    <p><strong>The collection id is assigned, not chosen.</strong> Whatever id
+    the catalog declares is discarded and replaced with
+    <code>&lt;username&gt;__&lt;algorithm&gt;__&lt;version&gt;</code>,
+    lowercased. The version is part of it, so every algorithm version is its
+    own collection &mdash; bumping <code>mur-cog</code> from 2.0.12 to 2.0.13
+    starts a new collection rather than adding to the old one.
+    <code>mur_maap.stac.dps_collection_id()</code> reconstructs it.</p>
+
+    <p><strong>The item id decides what overwrites what.</strong> Items sharing
+    an id in a collection overwrite each other, regardless of job tag, which is
+    what makes re-running a day idempotent. The two products use that
+    differently on purpose:</p>
+
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Item</th><th>Written by</th><th>Mode in the id?</th></tr></thead>
+      <tbody>
+        <tr><td><code>mur-l4-20261006-nrt</code></td><td>mrva</td><td>yes &mdash; the interim and the final analysis are both real data, and must stay separately addressable</td></tr>
+        <tr><td><code>mur-cog-20261006-1km</code></td><td>cog</td><td>no &mdash; a map should show one best picture per day, so a REA reprocess replaces the NRT browse layer</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h4>A raster item must not hold a non-raster asset</h4>
+
+    <p>Verified against the live service on 2026-10-08. For an Item holding
+    both a GeoTIFF and a Zarr, <code>tilejson.json</code> fails with</p>
+
+    <pre><code>'/vsis3/&hellip;/output.zarr' does not exist in the file system,
+and is not recognized as a supported dataset name</code></pre>
+
+    <p>for <em>every</em> value of <code>assets=</code>, including the
+    GeoTIFF's own key: it computes zoom bounds across all of the item's assets
+    and dies on the first one it cannot open. <code>/info?assets=&lt;key&gt;</code>
+    honours the parameter correctly, so the Item is not malformed &mdash; only
+    tiling is affected.</p>
+
+    <p>So the granules and the browse rasters are separate Items in separate
+    collections rather than one Item with a netCDF <code>data</code> asset
+    beside its COGs. That split looked like a constraint imposed by MAAP's
+    one-collection-per-algorithm rule; it turns out to be the only shape that
+    tiles at all.</p>
+
+    <h4>What is not this catalogue</h4>
+
+    <p><code>stac.maap-project.org</code> and <code>titiler-pgstac</code> front
+    the <em>curated</em> catalogue: 29 conformance classes, no Transaction, no
+    self-service registration. Nothing this pipeline produces could ever appear
+    there, which is why for a while it appeared nowhere. The sidecar Item that
+    <code>MaapPyClient.publish_stac_item</code> still writes into the workspace
+    bucket is a local convenience for the dataviewer &mdash; readable the
+    instant a run finishes, where MAAP ingests on its own schedule &mdash; not
+    the published Item.</p>
 
     <p>The static resources are not catalogued either, for the same reason as
     the intermediates: containers receive explicit hrefs built by joining a
@@ -376,7 +464,7 @@
         <tr><td>Shared window / config logic (<code>mur_window</code>, <code>mur_config</code>)</td><td>implemented</td></tr>
         <tr><td>Stage-out fix across all four containers</td><td>implemented</td></tr>
         <tr><td>Promotion to canonical keys; prior-coefficient chaining</td><td>implemented</td></tr>
-        <tr><td>L4 STAC Item construction</td><td>implemented</td></tr>
+        <tr><td>STAC emitted by the containers, ingested by MAAP (<code>common/bin/write_stac.py</code>)</td><td>implemented</td></tr>
         <tr><td>Four <code>algorithm_config.yml</code> + <code>-dps</code> images</td><td>implemented</td></tr>
         <tr><td>Static-resources uploader and verifier</td><td>implemented</td></tr>
         <tr><td>Generated CWL workflows</td><td>run <code>utils/generate_cwl.sh</code></td></tr>

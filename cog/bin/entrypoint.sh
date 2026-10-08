@@ -5,12 +5,18 @@
 #   entrypoint.sh --granule s3://.../x.nc [--fields sst,anom] [--debug]
 #
 # WHY THIS IS ITS OWN CONTAINER
-#   MAAP's titiler tiles any COG by URL, so a COG in the workspace bucket is a
-#   map layer with no STAC registration and no approval. Producing one has
-#   nothing in common with the analysis that produced the granule, so it does
-#   not belong in the mrva image: that image carries a MATLAB Runtime, takes
-#   an hour, and is the one stage currently unable to finish on any available
-#   worker. Browse rasters should not be hostage to that.
+#   Producing a browse raster has nothing in common with the analysis that
+#   produced the granule, so it does not belong in the mrva image: that image
+#   carries a MATLAB Runtime, takes an hour, and is the one stage currently
+#   unable to finish on any available worker. Browse rasters should not be
+#   hostage to that.
+#
+# HOW THE RASTERS BECOME A MAP LAYER
+#   By writing STAC metadata, not by being addressed directly. The catalog.json
+#   this emits is ingested automatically into dps-stac.maap-project.org and
+#   served by titiler-dps-stac.maap-project.org, so the COGs stay where DPS
+#   put them and the STAC Item is their stable, shareable address. See
+#   common/bin/write_stac.py.
 #
 # WHICH FIELDS
 #   Defaults differ by product because they differ in size by a factor of
@@ -19,21 +25,28 @@
 #   actually uses. MUR25 is 1440x720, where every field is free.
 set -u
 
-LOCALIZE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=/dev/null
-. "$LOCALIZE_DIR/localize.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# /opt/common/bin, the same place landice, l2p and mrva read it from, so
+# maap/Dockerfile.dps can refresh one copy for every module.
+COMMON_DIR="$SCRIPT_DIR/../../common/bin"
+# shellcheck source=../../common/bin/localize.sh
+. "$COMMON_DIR/localize.sh"
 
 echo "MUR image build: ${MUR_IMAGE_BUILD:-unknown} (module: cog)" >&2
 
 GRANULE=""
 FIELDS=""
+MODE=""
 DEBUG_MODE=0
 
 usage() {
-    echo "Usage: entrypoint.sh --granule HREF [--fields LIST] [--debug]"
+    echo "Usage: entrypoint.sh --granule HREF [--fields LIST] [--mode MODE] [--debug]"
     echo "  --granule  s3:// href or local path to a MUR L4 .nc granule"
     echo "  --fields   comma-separated subset of: sst,anom,err,ice,mask"
     echo "             default: sst,anom for the 1 km product; all for MUR25"
+    echo "  --mode     nrt or rea, recorded in the STAC item. Optional: it is"
+    echo "             inferred from a .../<doy><mode>/... href when present,"
+    echo "             and omitted when it cannot be determined."
 }
 
 parse_args() {
@@ -42,6 +55,7 @@ parse_args() {
         case "$flag" in
             --granule) GRANULE="$2"; shift 2 ;;
             --fields)  FIELDS="$2";  shift 2 ;;
+            --mode)    MODE="$2";    shift 2 ;;
             --debug)   DEBUG_MODE=1; shift ;;
             -h|--help) usage; exit 0 ;;
             *) echo "ERROR: Unknown argument: $1" >&2; usage; return 1 ;;
@@ -82,6 +96,92 @@ default_fields() {
     esac
 }
 
+# --- STAC identity, all derived from the granule filename --------------------
+#
+# The filename is the only thing both this container and the orchestrator
+# agree on, so every identifier comes out of it rather than being passed in
+# and risking two spellings of the same day.
+
+# 20261006090000-JPL-L4_GHRSST-... -> 2026-10-06T09:00:00Z
+granule_datetime() {
+    local ts="${1:0:14}"
+    if [[ ! "$ts" =~ ^[0-9]{14}$ ]]; then
+        return 1
+    fi
+    echo "${ts:0:4}-${ts:4:2}-${ts:6:2}T${ts:8:2}:${ts:10:2}:${ts:12:2}Z"
+}
+
+granule_resolution() {
+    case "$1" in
+        *MUR25*) echo "25km" ;;
+        *)       echo "1km"  ;;
+    esac
+}
+
+# Mode lives in the directory (.../279nrt/...), never in the filename, so it
+# cannot be recovered from the stem. Inferred here only so a hand-run without
+# --mode still records it; absence is reported, not guessed.
+infer_mode() {
+    if [[ "$1" =~ /[0-9]{3}(nrt|rea)/ ]]; then
+        echo "${BASH_REMATCH[1]}"
+    fi
+}
+
+# Item id: day plus resolution, and deliberately NOT mode.
+#
+# A day is first analysed as NRT and later reprocessed as REA. Two items per
+# day would leave the browse catalogue with two layers for one date and no
+# way for a map to choose; one item means the reanalysis replaces the interim
+# picture, which is what a viewer should show. The granules themselves keep
+# mode in their item id (mrva's catalog), so both analyses stay addressable
+# as data -- it is only the picture that is overwritten.
+cog_item_id() {
+    echo "mur-cog-${1:0:8}-$(granule_resolution "$1")"
+}
+
+# Describe what was produced so MAAP publishes it.
+#
+# Not fatal on failure. The COGs are the product; the metadata makes them
+# discoverable. Losing a catalog.json costs a map layer that can be rebuilt by
+# re-running this module in seconds -- throwing away a finished conversion
+# because its sidecar JSON failed would be the worse trade.
+write_stac() {
+    local out="$1" base="$2" stem="$3"; shift 3
+
+    local dt; dt="$(granule_datetime "$base")" || {
+        echo "STAC: skipped -- cannot read a timestamp from '$base'" >&2
+        return 0; }
+
+    local res; res="$(granule_resolution "$base")"
+    local item; item="$(cog_item_id "$base")"
+    local mode="${MODE:-$(infer_mode "$GRANULE")}"
+
+    local -a props=(
+        --property "mur:resolution=$res"
+        --property "mur:granule=$stem"
+        --property "processing:level=L4"
+    )
+    if [[ -n "$mode" ]]; then
+        props+=(--property "mur:mode=$mode")
+        props+=(--property "mur:run_type=$([[ "$mode" == rea ]] && echo final || echo interim)")
+    else
+        echo "STAC: mode unknown (no --mode, and the href has no /<doy><mode>/)" >&2
+    fi
+
+    if ! python3 "$COMMON_DIR/write_stac.py" \
+            --output-dir "$out" \
+            --collection mur-l4-browse \
+            --collection-title "MUR L4 SST browse rasters" \
+            --collection-description \
+                "Cloud-optimized GeoTIFF browse layers derived from MUR L4 SST analysis granules." \
+            --item-id "$item" \
+            --datetime "$dt" \
+            "${props[@]}" "$@"; then
+        echo "STAC: metadata generation failed; the COGs above are unaffected" >&2
+    fi
+    return 0
+}
+
 main() {
     parse_args "$@" || exit 1
 
@@ -115,6 +215,7 @@ main() {
     echo ""
 
     local made=0 failed=0
+    local -a asset_args=()
     local IFS=','
     for f in $fields; do
         local spec; spec="$(field_spec "$f")" || {
@@ -148,6 +249,10 @@ main() {
                 "NETCDF:\"$src\":$sub" "$dst" 2>"$scratch/gdal.err"; then
             local mb; mb=$(( $(stat -c%s "$dst") / 1048576 ))
             echo "  $f -> $(basename "$dst")  ${mb} MB"
+            # Relative to the stage-out root: write_stac.py resolves asset
+            # hrefs against the item file, and MAAP's ingest then rewrites
+            # them to absolute s3:// URLs.
+            asset_args+=(--asset "$f=${stem}_${f}.tif")
             made=$((made+1))
         else
             echo "  SKIP $f ($sub): gdal_translate failed" >&2
@@ -159,6 +264,7 @@ main() {
 
     echo ""
     echo "wrote $made COG(s), $failed skipped"
+
     # A field that cannot be converted is a missing picture, not a failed job:
     # the granule it came from is untouched and the other fields are fine. Only
     # a run that produced nothing at all is worth failing.
@@ -166,6 +272,12 @@ main() {
         echo "ERROR: no COGs produced" >&2
         exit 1
     fi
+
+    # After the check above, never before it: an item describing nothing is
+    # worse than no item, because it appears in the catalogue and fails only
+    # when someone tries to draw it.
+    echo ""
+    write_stac "$out" "$base" "$stem" "${asset_args[@]}"
     exit 0
 }
 

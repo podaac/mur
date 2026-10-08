@@ -1,0 +1,424 @@
+#!/usr/bin/env python3
+"""Write a self-contained STAC catalog into a DPS job's output directory.
+
+WHY THIS EXISTS
+    MAAP ingests STAC metadata that an algorithm writes alongside its normal
+    outputs. A `catalog.json` at the root of the staged-out directory is
+    picked up automatically and published to
+
+        https://dps-stac.maap-project.org
+        https://dps-stac.maap-project.org/catalogs/<username>
+        https://dps-stac-browser.maap-project.org
+        https://titiler-dps-stac.maap-project.org
+
+    -- no registration request, no ticket, no public bucket. This is the
+    documented mechanism (docs.maap-project.org, "Generating STAC metadata for
+    DPS job outputs", 2026-01-06) and it is the reason the pipeline does not
+    need to copy its products to invented S3 keys: the ingestion service
+    resolves relative asset hrefs to absolute s3:// URLs, so the file stays
+    exactly where DPS put it and the STAC Item becomes its stable address.
+
+WHY NOT pystac
+    The documented examples use pystac and rio-stac. Neither is present in
+    the MUR images: cog is debian-slim plus gdal-bin, mrva is a MATLAB Runtime
+    image, and both get python3 only as a transitive dependency of awscli --
+    there is no pip. Adding one would mean a pip layer in a 20 GB MATLAB image
+    to emit a few kilobytes of JSON.
+
+    The catalog this writes is byte-equivalent in structure to what
+    `Catalog.normalize_and_save()` produces, and `tests/test_write_stac.py`
+    validates its output against pystac (a dev dependency, installed on the
+    developer's machine, never in the image). Validation therefore happens
+    before the image is built rather than inside it, which catches the same
+    errors earlier.
+
+LAYOUT
+    Matching normalize_and_save() exactly, because that is the shape the
+    ingestion service sees in practice:
+
+        output/
+          catalog.json
+          <collection-id>/
+            collection.json
+            <item-id>/
+              <item-id>.json
+          <the data files themselves, wherever the algorithm put them>
+
+USAGE
+    write_stac.py --output-dir output \
+        --collection mur-l4-sst \
+        --collection-title "MUR L4 SST analysis" \
+        --collection-description "..." \
+        --item-id mur-l4-20261006-nrt \
+        --datetime 2026-10-06T09:00:00Z \
+        --property mur:mode=nrt --property mur:doy=279 \
+        --asset data=netcdf/GLOB/JPL/MUR/v4/2026/279nrt/2026...fv04.1.nc \
+        --asset sst=2026...-MUR-GLOB-v02.0-fv04.1_sst.tif
+"""
+import argparse
+import datetime
+import json
+import os
+import posixpath
+import sys
+
+STAC_VERSION = "1.0.0"
+
+# MUR L4 is a global analysis; every granule has the same footprint. Written
+# as an explicit polygon rather than derived from the file because the
+# netCDF path has no raster library to ask.
+GLOBAL_BBOX = [-180.0, -90.0, 180.0, 90.0]
+GLOBAL_GEOMETRY = {
+    "type": "Polygon",
+    "coordinates": [[
+        [-180.0, -90.0], [180.0, -90.0], [180.0, 90.0],
+        [-180.0, 90.0], [-180.0, -90.0],
+    ]],
+}
+
+COG_TYPE = "image/tiff; application=geotiff; profile=cloud-optimized"
+NETCDF_TYPE = "application/x-netcdf"
+
+# Render hints per field, keyed by the asset name the COG module uses.
+#
+# rescale is the load-bearing one: titiler stretches each request to the data
+# range it happens to see, so a field drawn without an explicit range looks
+# plausible and is not comparable between days or between tiles. These are the
+# GHRSST valid ranges in the granule's own units -- Kelvin for sst, Kelvin for
+# the anomaly, fraction for ice, flag values for mask.
+#
+# This table is duplicated in mur_maap/stac.py, which builds viewer URLs on
+# the client side. tests/test_write_stac.py asserts the two agree; a parity
+# test is preferred here over an import because this file has to run inside a
+# container that cannot see the mur_maap package.
+RENDER = {
+    "sst":  {"rescale": "271.15,310.15", "colormap_name": "thermal"},
+    "anom": {"rescale": "-5,5", "colormap_name": "coolwarm"},
+    "err":  {"rescale": "0,2", "colormap_name": "magma"},
+    "ice":  {"rescale": "0,1", "colormap_name": "ice"},
+    "mask": {"rescale": "1,16", "colormap_name": "tab10"},
+}
+
+# Why the granules and the COGs are never assets of the same item:
+# titiler computes an item's zoom bounds across all its assets, so an item
+# holding a netCDF beside its GeoTIFFs fails to tile for every value of
+# `assets=`, including the GeoTIFF's own key. Verified against
+# titiler-dps-stac 2026-10-08. mur writes one item per asset family.
+ASSET_TITLES = {
+    "data": "MUR L4 SST granule (1 km)",
+    "data25": "MUR25 L4 SST granule (0.25 deg)",
+    "sst": "Analysed SST",
+    "anom": "SST anomaly",
+    "err": "Analysis error",
+    "ice": "Sea ice fraction",
+    "mask": "Land/sea/ice mask",
+}
+
+
+def _scalar(text):
+    """Cast a --property value the way a reader would expect.
+
+    `mur:doy=279` must be a number: STAC properties are queryable, and a
+    string "279" will not answer a numeric range filter. `key:=<json>` forces
+    an exact type for the cases this heuristic gets wrong.
+    """
+    for cast in (int, float):
+        try:
+            return cast(text)
+        except ValueError:
+            pass
+    if text.lower() in ("true", "false"):
+        return text.lower() == "true"
+    return text
+
+
+def _media_type(relpath):
+    ext = posixpath.splitext(relpath)[1].lower()
+    if ext == ".tif" or ext == ".tiff":
+        return COG_TYPE
+    if ext == ".nc":
+        return NETCDF_TYPE
+    return None
+
+
+def _roles(key, relpath):
+    ext = posixpath.splitext(relpath)[1].lower()
+    if ext in (".tif", ".tiff"):
+        # "data" because these are single-band quantitative rasters, not an
+        # RGB composite; "visual" because they are nonetheless the browse
+        # product, and that is the role clients look for when choosing
+        # something to draw.
+        return ["data", "visual"]
+    return ["data"]
+
+
+def build_item(item_id, collection, dt, assets, properties=None,
+               depth=2):
+    """One STAC Item.
+
+    `assets` maps asset key -> path relative to the output directory.
+    `depth` is how many directory levels separate the item file from the
+    output root, so asset hrefs can be made relative to the item itself --
+    which is what the ingestion service resolves against.
+    """
+    props = {"datetime": dt}
+    props.update(properties or {})
+
+    up = "/".join([".."] * depth)
+    out = {}
+    for key, relpath in assets.items():
+        asset = {"href": posixpath.normpath(posixpath.join(up, relpath))}
+        mtype = _media_type(relpath)
+        if mtype:
+            asset["type"] = mtype
+        asset["roles"] = _roles(key, relpath)
+        if key in ASSET_TITLES:
+            asset["title"] = ASSET_TITLES[key]
+        if key in RENDER:
+            # Carried on the asset so a reader does not have to know MUR's
+            # units to draw the layer correctly. mur_maap/stac.py reads this
+            # back rather than re-deriving it.
+            asset["mur:render"] = dict(RENDER[key])
+        out[key] = asset
+
+    return {
+        "type": "Feature",
+        "stac_version": STAC_VERSION,
+        # EPSG:4326 for both products and every field. Asserted rather than
+        # measured: the netCDF path has no raster library, and GHRSST L4
+        # carries no grid_mapping, which is the whole reason the COG step
+        # passes -a_srs EPSG:4326.
+        "stac_extensions": [
+            "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
+        ],
+        "id": item_id,
+        "collection": collection,
+        "geometry": GLOBAL_GEOMETRY,
+        "bbox": list(GLOBAL_BBOX),
+        "properties": dict(props, **{"proj:epsg": 4326}),
+        "assets": out,
+        "links": [
+            {"rel": "root", "href": "../../catalog.json",
+             "type": "application/json"},
+            {"rel": "collection", "href": "../collection.json",
+             "type": "application/json"},
+            {"rel": "parent", "href": "../collection.json",
+             "type": "application/json"},
+            {"rel": "self", "href": "%s.json" % item_id,
+             "type": "application/geo+json"},
+        ],
+    }
+
+
+def build_collection(collection_id, title, description, items):
+    """The Collection every Item in this catalog belongs to.
+
+    Exactly one, deliberately: the ingestion service requires a single
+    distinct source collection id among the items it is given, and a single
+    matching Collection in the catalog hierarchy. Its id is rewritten on
+    ingest to <username>__<algorithm_name>__<algorithm_version>, so the name
+    chosen here survives only as documentation.
+    """
+    items = sorted(items, key=lambda i: (i["properties"]["datetime"], i["id"]))
+    datetimes = sorted(i["properties"]["datetime"] for i in items)
+    return {
+        "type": "Collection",
+        "stac_version": STAC_VERSION,
+        "id": collection_id,
+        "title": title,
+        "description": description,
+        "license": "proprietary",
+        "extent": {
+            "spatial": {"bbox": [list(GLOBAL_BBOX)]},
+            "temporal": {"interval": [[datetimes[0], datetimes[-1]]]},
+        },
+        # The render extension, so titiler-dps-stac can offer a named render
+        # without a query string. Harmless if the ingest service drops it;
+        # every URL the pipeline emits also carries the parameters inline.
+        "renders": {
+            key: dict(params, assets=[key], title=ASSET_TITLES.get(key, key))
+            for key, params in RENDER.items()
+            if any(key in i["assets"] for i in items)
+        },
+        "links": [
+            {"rel": "root", "href": "../catalog.json",
+             "type": "application/json"},
+            {"rel": "parent", "href": "../catalog.json",
+             "type": "application/json"},
+            {"rel": "self", "href": "collection.json",
+             "type": "application/json"},
+        ] + [
+            {"rel": "item", "href": "%s/%s.json" % (i["id"], i["id"]),
+             "type": "application/geo+json"}
+            for i in items
+        ],
+    }
+
+
+def build_catalog(collection_id):
+    return {
+        "type": "Catalog",
+        "stac_version": STAC_VERSION,
+        "id": "DPS",
+        "description": "DPS output STAC items",
+        "links": [
+            {"rel": "root", "href": "catalog.json",
+             "type": "application/json"},
+            {"rel": "self", "href": "catalog.json",
+             "type": "application/json"},
+            {"rel": "child", "href": "%s/collection.json" % collection_id,
+             "type": "application/json"},
+        ],
+    }
+
+
+def existing_items(output_dir, collection_id, excluding=()):
+    """Items already written into this collection directory.
+
+    Rewriting collection.json from only the item in hand would silently drop
+    the `item` links of anything written earlier -- and an item the collection
+    does not link to is an item the ingestion service never walks to. In
+    normal operation each job writes one item into its own stage-out
+    directory and this finds nothing, but a caller that describes two
+    granules in one directory (both L4 resolutions, say) must not lose the
+    first one. Found by doing exactly that in a test.
+    """
+    cdir = os.path.join(output_dir, collection_id)
+    found = []
+    if not os.path.isdir(cdir):
+        return found
+    for name in sorted(os.listdir(cdir)):
+        if name in excluding:
+            continue
+        path = os.path.join(cdir, name, name + ".json")
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path) as fh:
+                item = json.load(fh)
+        except (ValueError, OSError):
+            # A damaged sibling is not worth failing this item over, but it
+            # must not be linked as though it were readable.
+            print("write_stac: ignoring unreadable item %s" % path,
+                  file=sys.stderr)
+            continue
+        if item.get("id") == name and "properties" in item:
+            found.append(item)
+    return found
+
+
+def write_catalog(output_dir, collection_id, title, description, items):
+    """Write catalog.json, the collection, and every item. Returns paths."""
+    written = []
+
+    def dump(path, obj):
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(obj, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        written.append(path)
+
+    cdir = os.path.join(output_dir, collection_id)
+    for item in items:
+        dump(os.path.join(cdir, item["id"], item["id"] + ".json"), item)
+    linked = list(items) + existing_items(
+        output_dir, collection_id, excluding={i["id"] for i in items})
+    dump(os.path.join(cdir, "collection.json"),
+         build_collection(collection_id, title, description, linked))
+    # Last, so a crash midway leaves no catalog.json for the ingest service
+    # to find and reject. Absent metadata is a missing layer; half-written
+    # metadata is a published lie.
+    dump(os.path.join(output_dir, "catalog.json"),
+         build_catalog(collection_id))
+    return written
+
+
+def _iso(text):
+    """Normalize a datetime to the Z-suffixed form STAC requires."""
+    raw = text.strip()
+    if raw.endswith("Z"):
+        probe = raw[:-1] + "+00:00"
+    else:
+        probe = raw
+    try:
+        dt = datetime.datetime.fromisoformat(probe)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "not an ISO-8601 datetime: %r" % text)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc).isoformat(
+        timespec="seconds").replace("+00:00", "Z")
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--output-dir", required=True)
+    p.add_argument("--collection", required=True)
+    p.add_argument("--collection-title", default="")
+    p.add_argument("--collection-description", default="")
+    p.add_argument("--item-id", required=True)
+    p.add_argument("--datetime", required=True, type=_iso,
+                   dest="dt", metavar="ISO8601")
+    p.add_argument("--asset", action="append", default=[], metavar="KEY=PATH",
+                   help="path is relative to --output-dir; repeatable")
+    p.add_argument("--property", action="append", default=[], dest="properties",
+                   metavar="KEY=VALUE",
+                   help="KEY=VALUE (scalars cast), or KEY:=<json> for an "
+                        "exact type; repeatable")
+    args = p.parse_args(argv)
+
+    assets = {}
+    for spec in args.asset:
+        if "=" not in spec:
+            p.error("--asset needs KEY=PATH, got %r" % spec)
+        key, relpath = spec.split("=", 1)
+        relpath = relpath.strip().lstrip("./")
+        if not relpath:
+            continue
+        # A missing file is a caller bug, and publishing an item that points
+        # at nothing is worse than publishing no item: the layer appears in
+        # the catalog and fails only when someone tries to draw it.
+        full = os.path.join(args.output_dir, relpath)
+        if not os.path.exists(full):
+            print("write_stac: no such output file: %s" % full,
+                  file=sys.stderr)
+            return 2
+        assets[key.strip()] = relpath
+
+    if not assets:
+        print("write_stac: no assets; refusing to write an empty item",
+              file=sys.stderr)
+        return 2
+
+    properties = {}
+    for spec in args.properties:
+        if ":=" in spec:
+            key, raw = spec.split(":=", 1)
+            properties[key.strip()] = json.loads(raw)
+        elif "=" in spec:
+            key, raw = spec.split("=", 1)
+            properties[key.strip()] = _scalar(raw.strip())
+        else:
+            p.error("--property needs KEY=VALUE, got %r" % spec)
+
+    item = build_item(args.item_id, args.collection, args.dt, assets,
+                      properties)
+    written = write_catalog(
+        args.output_dir, args.collection,
+        args.collection_title or args.collection,
+        args.collection_description or args.collection_title or args.collection,
+        [item])
+
+    print("STAC: %s with %d asset(s) -> catalog.json" % (
+        args.item_id, len(assets)))
+    for key, asset in sorted(item["assets"].items()):
+        print("  %-7s %s" % (key, asset["href"]))
+    print("  %d metadata file(s) written" % len(written))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

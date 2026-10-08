@@ -1,22 +1,34 @@
-"""STAC Item construction for MUR's final L4 SST granules.
+"""STAC for MUR's products, on the client side.
 
-Two catalogs are deliberately kept apart here.
+WHERE THE AUTHORITATIVE ITEMS COME FROM
+    Not from here. Each container writes a catalog.json into its stage-out
+    directory (common/bin/write_stac.py) and MAAP ingests it automatically --
+    mrva describes the L4 granules, cog describes the browse rasters. That is
+    the documented mechanism and the reason no product has to be copied to an
+    invented S3 key: the ingest service resolves the catalog's relative asset
+    hrefs to absolute s3:// URLs, so a file stays where DPS put it and its
+    STAC Item becomes its stable address.
 
-Intermediate artifacts -- BIC, iQuam .bii, landice per-day files, the .c06
-coefficient -- are NOT registered in STAC. They churn daily, they are internal
-plumbing rather than anything a person or tool discovers, and registering them
-would mean thousands of items nobody queries. They live at deterministic
-workspace keys instead (mur_maap/paths.py), so finding one is a single S3 HEAD
-rather than a catalog round-trip.
+    This module is the reader's half: reconstructing the collection id MAAP
+    assigns, and building the item, browser and tile URLs that address it.
 
-The L4 granule is different: it is the product, and discovery is the whole
-point. That is what this module describes.
+    `build_l4_item` predates that and remains for the local record written
+    into the workspace bucket, which the dataviewer reads. It is a convenience
+    copy, not the published item.
 
-Building the Item is kept pure and separate from publishing it, so the shape
-of the metadata is testable without a STAC endpoint, credentials, or a
-network.
+WHAT IS NOT CATALOGUED
+    Intermediate artifacts -- BIC, iQuam .bii, landice per-day files, the .c06
+    coefficient. They churn daily, they are internal plumbing rather than
+    anything a person or tool discovers, and registering them would mean
+    thousands of items nobody queries. They live at deterministic workspace
+    keys instead (mur_maap/paths.py), so finding one is a single S3 HEAD
+    rather than a catalog round-trip.
+
+Building URLs is kept pure and separate from any network call, so the shape
+of an address is testable without an endpoint, credentials, or a network.
 """
 import datetime
+import re
 from typing import Dict, Optional
 
 # MUR L4 is a global analysis; every granule has the same footprint.
@@ -47,27 +59,135 @@ def item_id(process_date: datetime.date, mode: str) -> str:
     return f"mur-l4-{process_date:%Y%m%d}-{mode.lower()}"
 
 
-# MAAP's titiler tiles any COG by URL -- no STAC registration, no pull
-# request, no data-team approval. Verified 2026-10-05: a workspace path
-# answered "The specified key does not exist" rather than access denied, so
-# the service can read the bucket already.
-TITILER = "https://titiler-pgstac.maap-project.org"
+# MAAP's own STAC, and the services built on it.
+#
+# These are not the catalog at stac.maap-project.org. That one is curated:
+# 29 conformance classes, no Transaction, no self-service registration --
+# verified 2026-10-08. Pointing at it is why nothing the pipeline produced
+# ever appeared in a catalogue.
+#
+# This one is fed by the containers. An algorithm writes a catalog.json into
+# its stage-out directory (common/bin/write_stac.py) and MAAP ingests it
+# automatically -- no ticket, no approval, no public bucket. Documented at
+# docs.maap-project.org, "Generating STAC metadata for DPS job outputs"
+# (2026-01-06), which is recent enough to explain why the first pass here
+# missed it.
+DPS_STAC = "https://dps-stac.maap-project.org"
+DPS_STAC_BROWSER = "https://dps-stac-browser.maap-project.org"
+TITILER = "https://titiler-dps-stac.maap-project.org"
+
+# Every tile route is parameterized by a tile-matrix set; this is the one web
+# maps use.
+TMS = "WebMercatorQuad"
+
+
+def dps_collection_id(username: str, algorithm: str, version: str) -> str:
+    """The collection id MAAP will assign, given who ran what.
+
+    The ingestion service rewrites whatever id the catalog declares to
+    `<username>__<algorithm>__<version>`, lowercased, with URL-unsafe
+    characters replaced -- so `mur-l4-sst` in write_stac.py never survives,
+    and the id needed to build a URL has to be reconstructed here.
+
+    Two consequences worth stating out loud:
+
+      - The version is part of the id, so every algorithm version is its own
+        collection. Bumping mur-cog from 2.0.12 to 2.0.13 does not add to the
+        existing collection, it starts a new one.
+      - The job tag is not part of it. Items with the same id in the same
+        collection overwrite each other regardless of tag, which is what
+        makes re-running a day idempotent.
+
+    The substitution rule is inferred from observed ids rather than
+    documented; MUR's own names contain only safe characters, so it does not
+    fire for us. `find_collection` asks the API instead of trusting this when
+    the answer has to be right.
+    """
+    raw = f"{username}__{algorithm}__{version}".lower()
+    return re.sub(r"[^a-z0-9_.-]+", "-", raw)
+
+
+def dps_item_url(collection: str, item: str) -> str:
+    """The STAC API URL for one Item -- the granule's stable address.
+
+    This is what replaces copying a product to an invented S3 key. The
+    ingestion service resolves the relative asset hrefs in the catalog to
+    absolute s3:// URLs, so the file stays in dps_output and this URL is how
+    anything finds it.
+    """
+    return f"{DPS_STAC}/collections/{collection}/items/{item}"
+
+
+def dps_browser_url(collection: str, item: str) -> str:
+    """A human-facing page for one Item."""
+    from urllib.parse import quote
+    return (f"{DPS_STAC_BROWSER}/collections/{quote(collection)}"
+            f"/items/{quote(item)}")
+
+
+def _item_route(collection: str, item: str, leaf: str, asset: str,
+                **render) -> str:
+    from urllib.parse import quote, urlencode
+    q = {"assets": asset, **render}
+    return (f"{TITILER}/collections/{quote(collection)}/items/{quote(item)}"
+            f"/{TMS}/{leaf}?{urlencode(q)}")
+
+
+def dps_tilejson(collection: str, item: str, asset: str, **render) -> str:
+    """TileJSON for one asset of one Item, for Leaflet or ipyleaflet.
+
+    Addressed through the catalog rather than by object URL. A tile request
+    that names the Item works for anyone who can see the collection and keeps
+    working if the underlying object moves; one that names the S3 key is
+    valid only while that key is.
+
+    AN ITEM MUST NOT MIX RASTER AND NON-RASTER ASSETS. Verified against the
+    live service 2026-10-08: for an item holding both a GeoTIFF and a Zarr,
+    `tilejson.json` reports
+
+        '/vsis3/.../output.zarr' does not exist in the file system, and is
+        not recognized as a supported dataset name
+
+    for *every* value of `assets=`, including the GeoTIFF's own key -- it
+    computes zoom bounds across the item's assets and dies on the first one
+    it cannot open. `/info?assets=<key>` honours the parameter correctly, so
+    the item is not malformed; only tiling is affected.
+
+    This is why the granules and the browse rasters are separate items in
+    separate collections rather than one item with a netCDF `data` asset
+    beside the COGs. That split looked like a constraint imposed by MAAP's
+    one-collection-per-algorithm rule; it turns out to be the only shape that
+    tiles at all.
+    """
+    return _item_route(collection, item, "tilejson.json", asset, **render)
+
+
+def dps_map_url(collection: str, item: str, asset: str, **render) -> str:
+    """A browser URL drawing one asset on a slippy map.
+
+    `/{TMS}/map.html`, confirmed against the live service. Note that the
+    viewer and the tile routes do not share a shape -- there is no
+    `/items/<id>/viewer` (404) -- so this is built directly rather than by
+    rewriting the TileJSON URL, a substitution that produced a 404 once
+    already.
+    """
+    return _item_route(collection, item, "map.html", asset, **render)
 
 
 def titiler_tilejson(cog_href: str, **render) -> str:
-    """A TileJSON URL any Leaflet or ipyleaflet map can consume directly.
+    """TileJSON for a COG addressed by URL, bypassing the catalog.
 
-    Put on the asset rather than left for a notebook to assemble, so the
-    catalogue entry is enough on its own: whoever finds the item can draw it
-    without knowing which tiler MAAP runs or how to address it.
+    Kept for the case the catalog cannot answer: a raster that has not been
+    ingested yet, or one being checked before it is published. Prefer
+    dps_tilejson for anything catalogued.
     """
     from urllib.parse import urlencode
     q = {"url": cog_href, **render}
-    return f"{TITILER}/cog/WebMercatorQuad/tilejson.json?{urlencode(q)}"
+    return f"{TITILER}/cog/{TMS}/tilejson.json?{urlencode(q)}"
 
 
 def titiler_viewer(cog_href: str, **render) -> str:
-    """A browser URL for one COG -- titiler's own interactive viewer.
+    """titiler's own viewer for a COG addressed by URL.
 
     Built here rather than derived from the TileJSON URL by substitution. The
     two endpoints do not share a shape: tiles live under

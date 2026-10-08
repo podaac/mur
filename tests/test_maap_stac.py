@@ -104,11 +104,11 @@ def test_item_is_json_serializable():
 def test_a_cog_asset_is_marked_visual_and_carries_a_tile_url():
     """A COG asset has to be drawable from the catalogue entry alone.
 
-    MAAP's titiler tiles any COG by URL, so the item can hand a reader a
-    working TileJSON link rather than expecting them to know which tiler MAAP
-    runs. The media type and the "visual" role are what STAC clients key on
-    when choosing something to display; without them a browse raster looks
-    like just another data file.
+    titiler tiles a COG by URL, so the item can hand a reader a working
+    TileJSON link rather than expecting them to know which tiler MAAP runs.
+    The media type and the "visual" role are what STAC clients key on when
+    choosing something to display; without them a browse raster looks like
+    just another data file.
     """
     item = stac.build_l4_item(
         HREF, DAY, "nrt",
@@ -119,8 +119,70 @@ def test_a_cog_asset_is_marked_visual_and_carries_a_tile_url():
     assert a["type"] == ("image/tiff; application=geotiff; "
                          "profile=cloud-optimized")
     assert a["href_tilejson"].startswith(
-        "https://titiler-pgstac.maap-project.org/cog/")
+        "https://titiler-dps-stac.maap-project.org/cog/")
     assert "x_sst.tif" in a["href_tilejson"]
+
+
+# --- MAAP's own STAC ----------------------------------------------------------
+
+def test_the_tiler_is_the_one_backed_by_the_catalog_we_can_write_to():
+    """titiler-pgstac fronts stac.maap-project.org, which is curated: no
+    Transaction, no self-service registration. Nothing the pipeline produced
+    could ever appear there, which is why it appeared nowhere. The DPS STAC is
+    the one fed by the catalog.json each container stages out."""
+    assert stac.DPS_STAC == "https://dps-stac.maap-project.org"
+    assert stac.TITILER == "https://titiler-dps-stac.maap-project.org"
+    assert "pgstac" not in stac.TITILER
+
+
+def test_the_collection_id_is_the_one_maap_will_actually_assign():
+    """Whatever id the catalog declares is discarded on ingest and replaced
+    with <username>__<algorithm>__<version>, lowercased. A URL built from the
+    declared id addresses a collection that does not exist."""
+    assert (stac.dps_collection_id("jeffleach", "mur-cog", "2.0.13")
+            == "jeffleach__mur-cog__2.0.13")
+    assert (stac.dps_collection_id("JeffLeach", "MUR-Cog", "2.0.13")
+            == "jeffleach__mur-cog__2.0.13")
+
+
+def test_the_version_is_part_of_the_collection_id():
+    """So every algorithm version is its own collection. Worth asserting
+    because it is the surprising half of the naming rule: bumping a version
+    does not add to the existing collection, it starts a new one."""
+    a = stac.dps_collection_id("u", "mur-cog", "2.0.12")
+    b = stac.dps_collection_id("u", "mur-cog", "2.0.13")
+    assert a != b
+
+
+def test_an_item_is_addressed_through_the_catalog_not_by_object_key():
+    """This is what replaces copying a product to an invented S3 key: the
+    ingest service rewrites the catalog's relative asset hrefs to absolute
+    s3:// URLs, so the file stays in dps_output and this URL finds it."""
+    url = stac.dps_item_url("u__mur-mrva__2.0.13", "mur-l4-20261006-nrt")
+    assert url == ("https://dps-stac.maap-project.org/collections/"
+                   "u__mur-mrva__2.0.13/items/mur-l4-20261006-nrt")
+
+
+def test_the_item_map_url_carries_the_render_parameters():
+    """A map URL without an explicit rescale draws a field stretched to
+    whatever range that request happened to see."""
+    url = stac.dps_map_url("u__mur-cog__2.0.13", "mur-cog-20261006-1km",
+                           "sst", **stac.RENDER["sst"])
+    assert "/items/mur-cog-20261006-1km/WebMercatorQuad/map.html?" in url
+    assert "assets=sst" in url
+    assert "rescale=271.15,310.15" in url.replace("%2C", ",")
+
+
+def test_the_item_tile_routes_carry_the_tile_matrix_set():
+    """Confirmed against the live service: /items/<id>/viewer is a 404, and
+    the tile routes are /items/<id>/<tms>/{tilejson.json,map.html}. Built
+    directly rather than by rewriting one into the other, a substitution that
+    has already produced a 404 once here."""
+    t = stac.dps_tilejson("c", "i", "sst")
+    m = stac.dps_map_url("c", "i", "sst")
+    assert "/items/i/WebMercatorQuad/tilejson.json?" in t
+    assert "/items/i/WebMercatorQuad/map.html?" in m
+    assert "/items/i/viewer" not in m
 
 
 def test_a_cog_gets_an_explicit_rescale_not_titiler_s_default():

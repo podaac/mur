@@ -8,9 +8,11 @@
 # already in the bucket without redoing the analysis.
 algorithm_description: >
   Cloud-optimized GeoTIFFs from a MUR L4 SST granule, for visualization.
-  MAAP's titiler tiles any COG by URL, so the outputs are map layers with no
-  STAC registration required. Reads one granule, writes one GeoTIFF per
-  requested field.
+  Reads one granule, writes one GeoTIFF per requested field, and writes the
+  STAC metadata that publishes them: the catalog.json staged out alongside
+  the rasters is ingested into dps-stac.maap-project.org and served by
+  titiler-dps-stac.maap-project.org, so the layers are discoverable by date
+  without a registration request or a public bucket.
 algorithm_name: mur-cog
 algorithm_version: "2.0.4"
 algorithm_container_url: ghcr.io/podaac/mur/cog-dps:2.0.4
@@ -25,8 +27,10 @@ author: JPL PO.DAAC MUR Team
 contributor: JPL PO.DAAC MUR Team
 license: https://github.com/podaac/mur/blob/main/LICENSE
 release_notes: >
-  First release. Split out of mrva, where it was briefly Stage 10b, so that
-  the browse products do not depend on the heaviest stage in the pipeline.
+  Split out of mrva, where it was briefly Stage 10b, so that the browse
+  products do not depend on the heaviest stage in the pipeline. Now also
+  emits a STAC catalog for MAAP to ingest, which is what makes the rasters
+  addressable by date rather than by the job that produced them.
 
 run_command: /opt/cog/bin/entrypoint.sh
 
@@ -52,6 +56,15 @@ inputs:
       default from the product: sst,anom for the 1 km granule, where each
       field is ~400 MB compressed, and all five for MUR25, where they are
       trivial.
+    type: string?
+    default: ""
+  - name: mode
+    label: Analysis mode
+    doc: >
+      Optional "nrt" or "rea", recorded in the STAC item. The granule
+      filename cannot supply it -- mode appears only in the directory
+      (.../279nrt/...) -- so it is inferred from the href when the href has
+      that shape and omitted when it cannot be determined.
     type: string?
     default: ""
 
