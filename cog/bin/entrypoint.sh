@@ -93,9 +93,22 @@ main() {
 
     local src
     src="$(localize_input granule "$GRANULE" "$scratch")" || exit 1
-    local base; base="$(basename "$src")"
+
+    # The STEM comes from the href, not from the localized file.
+    #
+    # localize_input writes to "$scratch_dir/$name", so the local copy is
+    # literally called `granule` -- the flag name. Taking basename of that
+    # produced granule_sst.tif, which identifies nothing: not the day, not
+    # the product, not even which of the two resolutions it is. Job
+    # 74b2bb11 shipped exactly that, and the orchestrator's patterns (which
+    # match on MUR-GLOB / MUR25-GLOB) found nothing, so the STAC item ended
+    # up with no browse assets at all.
+    local base; base="$(basename "${GRANULE%%\?*}")"
     local stem="${base%.nc}"
 
+    # Also from the href: default_fields keys on MUR25 vs MUR-GLOB, and
+    # `granule` matched neither, so the 1 km product silently got the
+    # 1 km default rather than being recognised as such.
     local fields="${FIELDS:-$(default_fields "$base")}"
     echo "granule: $base"
     echo "fields:  $fields"
