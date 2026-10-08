@@ -159,3 +159,41 @@ def test_an_iquam_day_keys_off_the_data_year_not_the_analysis_year():
         "mur/iquam/2025/")
     assert paths.iquam_key(datetime.date(2026, 1, 1)).startswith(
         "mur/iquam/2026/")
+
+
+def test_a_granule_has_a_canonical_key_derivable_from_a_date():
+    """A DPS result path embeds the job id and cannot be reconstructed.
+
+        dps_output/mur-mrva_1756/2.0.12/2026/10/08/18/10/20/964098/...
+
+    So an unpromoted granule is findable only by the run that made it, which
+    is why regenerating browse rasters for an existing day was impossible --
+    `--execute cog` had nothing to look up. These keys come from the date and
+    mode alone, like landice's and iquam's.
+    """
+    import datetime
+    d = datetime.date(2026, 10, 6)
+
+    assert paths.l4_key(d, "nrt", "1km") == \
+        "mur/l4/1km/2026/2026100609-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-nrt.nc"
+    assert paths.l4_key(d, "nrt", "25km") == \
+        "mur/l4/25km/2026/2026100609-JPL-L4_GHRSST-SSTfnd-MUR25-GLOB-nrt.nc"
+
+    # Mode is in the key: a day is produced as NRT and later reprocessed as
+    # REA, and collapsing them would let the reanalysis overwrite the interim.
+    assert paths.l4_key(d, "nrt", "1km") != paths.l4_key(d, "rea", "1km")
+
+    # And the two resolutions never collide, despite both containing "MUR".
+    assert paths.l4_key(d, "nrt", "1km") != paths.l4_key(d, "nrt", "25km")
+
+
+def test_the_granule_name_is_generated_not_copied():
+    """The DPS basenames carry product versions that differ between the two
+    products -- fv04.1 for 1 km, fv04.2 for MUR25, observed on the same run.
+    A probe built from a guessed version would miss, so the canonical name is
+    generated and carries no fv at all. Same reasoning as landice_filename.
+    """
+    import datetime
+    name = paths.l4_filename(datetime.date(2026, 10, 6), "nrt", "1km")
+    assert "fv04" not in name
+    assert name.endswith("-nrt.nc")

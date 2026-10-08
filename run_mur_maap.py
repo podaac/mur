@@ -414,6 +414,99 @@ class MAAPOrchestrator:
         dest = paths.iquam_href(self.workspace_root, data_day)
         return self.client.copy_object(src, dest)
 
+    def _browse_from_promoted(self, process_date: datetime.date,
+                              mode: str) -> Dict[str, str]:
+        """Regenerate browse rasters for a day already in the bucket.
+
+        Reached when cog is requested without mrva. It looks the granules up
+        at their canonical keys rather than at a DPS result path, which is why
+        the promotion in _promote_l4 had to come first: a result path embeds
+        the job id and cannot be derived from a date.
+
+        Returns the assets it managed to produce, empty if there is nothing to
+        work from -- which is a legitimate state for a day that has not been
+        analysed, not an error.
+        """
+        found = {}
+        for asset_prefix, resolution, key in (
+            ("browse", "1km", "data"), ("browse25", "25km", "mur25"),
+        ):
+            href = paths.l4_href(self.workspace_root, process_date, mode,
+                                 resolution)
+            if not self.client.object_exists(href):
+                continue
+            found[key] = href
+            found.update(self._browse_one(process_date, mode, asset_prefix,
+                                          href))
+
+        if not found:
+            logger.info(
+                "    no promoted granule for %s (%s). Nothing to make browse "
+                "rasters from -- run mrva for this day first, or check "
+                "%s", process_date, mode,
+                paths.l4_key(process_date, mode, "1km"))
+            return {}
+
+        rasters = {k: v for k, v in found.items() if v.endswith(".tif")}
+        logger.info("    regenerated %d browse raster(s) from the promoted "
+                    "granule(s)", len(rasters))
+        if rasters:
+            self.client.publish_stac_item(
+                found.get("data") or found.get("mur25"), process_date, mode,
+                extra_assets={k: v for k, v in found.items() if k != "data"},
+                analysis_level=int(
+                    self.config.get("mrva", {}).get("max_level", 11)))
+        return found
+
+    def _browse_one(self, process_date: datetime.date, mode: str,
+                    asset_prefix: str, granule_href: str) -> Dict[str, str]:
+        """Submit one cog job and collect whatever it produced.
+
+        Every failure is swallowed: these are pictures, and a day with a
+        granule must not be reported as failed because a derived image did
+        not appear.
+        """
+        out = {}
+        try:
+            job = self.client.submit_job(
+                "mur-cog", {"granule": granule_href},
+                tag=tags.job_tag("cog", process_date, mode,
+                                 sensor=asset_prefix))
+            self.client.wait_all([job])
+        except Exception as exc:                          # noqa: BLE001
+            logger.warning("    browse rasters for %s failed (%s); the "
+                           "granule is unaffected", asset_prefix, exc)
+            return out
+        for output_name in sorted(outputs.OUTPUT_PATTERNS.get("mur-cog", {})):
+            try:
+                out[f"{asset_prefix}_{output_name.split('_')[-1]}"] = \
+                    self.client.get_job_output(job, output_name)
+            except Exception:                             # noqa: BLE001
+                continue
+        return out
+
+    def _promote_l4(self, process_date: datetime.date, mode: str, job: str,
+                    output_name: str, resolution: str) -> Optional[str]:
+        """Copy a granule to its canonical key, so it can be found by date.
+
+        The DPS path embeds the job id -- .../2026/10/08/18/10/20/964098/... --
+        and cannot be derived from a date, so an unpromoted granule is findable
+        only by the run that produced it. That is why regenerating browse
+        rasters for an existing day was impossible: --execute cog had nothing
+        to look up.
+
+        Absence is not an error. MUR25 is skipped when its grid file is, and a
+        failed Stage 9 leaves no 1 km granule while the rest of the run stands.
+        """
+        try:
+            src = self.client.get_job_output(job, output_name)
+        except Exception as exc:                          # noqa: BLE001
+            logger.debug("no %s from %s: %s", output_name, process_date, exc)
+            return None
+        dest = paths.l4_href(self.workspace_root, process_date, mode,
+                             resolution)
+        return self.client.copy_object(src, dest)
+
     def _promote_csp(self, process_date: datetime.date, job: str) -> Optional[str]:
         """Copy MRVA's coefficient output to the canonical key, for tomorrow.
 
@@ -774,6 +867,18 @@ class MAAPOrchestrator:
         )
 
         if "mrva" not in self.stages:
+            # cog derives from a granule rather than from this run, so it can
+            # still go ahead against one already promoted. That is the whole
+            # point of it being a separate process -- regenerating a browse
+            # raster should not require an hour of analysis -- and it did not
+            # work before the granules had canonical keys to be found at.
+            if "cog" in self.stages:
+                made = self._browse_from_promoted(process_date, mode)
+                if made:
+                    return DayResult(process_date=process_date, mode=mode,
+                                     mrva_job_id=None,
+                                     netcdf_href=made.get("data"))
+
             logger.info("  mrva not in --execute; stopping after %d job(s)",
                         len([j for j in (landice_job, iquam_job, *l2p_jobs)
                              if j is not None]))
@@ -850,14 +955,24 @@ class MAAPOrchestrator:
         # Promote this day's coefficient so tomorrow can chain from it.
         self._promote_csp(process_date, mrva_job)
 
-        netcdf_href = self.client.get_job_output(mrva_job, "netcdf")
+        # Promoted to canonical keys, then used from there.
+        #
+        # Everything downstream addresses the granule by date rather than by
+        # job: regenerating browse rasters, re-publishing a STAC item,
+        # comparing two days. A DPS result path embeds the job id and cannot
+        # be reconstructed, so an unpromoted granule is reachable only from
+        # the run that made it -- the same reason landice, iquam and the BICs
+        # are promoted.
+        netcdf_href = (self._promote_l4(process_date, mode, mrva_job,
+                                        "netcdf", "1km")
+                       or self.client.get_job_output(mrva_job, "netcdf"))
 
         # The MUR25 sibling, if Stage 10 produced one.
         extras = {}
-        try:
-            extras["mur25"] = self.client.get_job_output(mrva_job, "netcdf25")
-        except Exception:                                  # noqa: BLE001
-            pass
+        mur25 = self._promote_l4(process_date, mode, mrva_job,
+                                 "netcdf25", "25km")
+        if mur25:
+            extras["mur25"] = mur25
 
         # Browse rasters, from a separate job per granule.
         #

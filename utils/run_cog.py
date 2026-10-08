@@ -26,6 +26,14 @@ WHAT IT PRINTS
 import argparse
 import sys
 
+# Importable when run as a script from anywhere, matching job_logs.py and
+# deploy_algorithms.py. Without it `python utils/run_cog.py` fails with
+# ModuleNotFoundError: No module named 'mur_maap' -- the repo root is not on
+# sys.path when the script lives in a subdirectory.
+import pathlib
+REPO = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(

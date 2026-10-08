@@ -196,6 +196,44 @@ def iquam_relative_path(data_day: datetime.date) -> str:
     return f"IQUAM0/{data_day.year}/{iquam_filename(data_day)}"
 
 
+# --- L4 granules (MRVA's products, and cog's input) ------------------------
+#
+# Promoted to canonical keys for the same reason landice, iquam and the BICs
+# are: a DPS result path contains the job's own id
+# (dps_output/mur-mrva_1756/2.0.12/2026/10/08/18/10/20/964098/...) and cannot
+# be reconstructed from a date. Without a canonical key the granule is
+# findable only by the run that made it, so nothing can regenerate browse
+# rasters for an existing day, re-publish a STAC item, or compare two days --
+# which is exactly what `--execute cog` could not do.
+#
+# Mode is in the key because a day is produced first as NRT and later
+# reprocessed as REA, and both are real artifacts. Collapsing them would let
+# the reanalysis silently overwrite the interim.
+
+def l4_filename(process_date: datetime.date, mode: str,
+                resolution: str = "1km") -> str:
+    """The canonical name for one promoted granule.
+
+    Generated rather than copied from the DPS basename, which carries a
+    product version (fv04.1 for 1 km, fv04.2 for MUR25 -- they differ) that
+    a probe would have to guess. Same reasoning as landice_filename.
+    """
+    tag = "MUR25" if resolution == "25km" else "MUR"
+    return (f"{process_date.strftime('%Y%m%d')}09-JPL-L4_GHRSST-SSTfnd-"
+            f"{tag}-GLOB-{mode}.nc")
+
+
+def l4_key(process_date: datetime.date, mode: str,
+           resolution: str = "1km") -> str:
+    return (f"{MUR_ROOT}/l4/{resolution}/{process_date.year}/"
+            f"{l4_filename(process_date, mode, resolution)}")
+
+
+def l4_href(workspace_root: str, process_date: datetime.date, mode: str,
+            resolution: str = "1km") -> str:
+    return href(workspace_root, l4_key(process_date, mode, resolution))
+
+
 # --- manifests -------------------------------------------------------------
 
 def l2p_manifest_key(sensor: str, data_day: datetime.date) -> str:

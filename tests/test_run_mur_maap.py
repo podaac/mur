@@ -1165,3 +1165,61 @@ def test_a_missing_browse_raster_does_not_fail_the_day():
 
     assert len(client.published) == 1          # the day still succeeded
     assert client.published_extras == [None]   # and carried no extras
+
+
+def test_the_granules_are_promoted_so_a_date_can_find_them(orchestrator):
+    """Without this, a granule is reachable only from the run that made it.
+
+    A DPS result path embeds the job id -- .../18/10/20/964098/... -- so
+    nothing can address yesterday's product by date. That is why regenerating
+    browse rasters for an existing day was impossible.
+    """
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    copied = [d for _s, d in orchestrator.client.copied]
+
+    assert any("/mur/l4/1km/2026/" in d for d in copied), \
+        f"the 1 km granule was not promoted; copies were {copied}"
+    assert any("/mur/l4/25km/2026/" in d for d in copied), \
+        f"MUR25 was not promoted; copies were {copied}"
+
+
+def test_cog_alone_works_from_a_promoted_granule():
+    """`--execute cog` used to stop at "mrva not in --execute".
+
+    cog derives from a granule rather than from this run, so it can go ahead
+    against one already promoted -- which is most of the argument for it being
+    a separate container. It could not before, because there was no canonical
+    key to look the granule up at.
+    """
+    config = _single_sensor_config()
+    client = FakeMAAPClient(existing_objects=set())
+    # Only the promoted granules exist -- which is the state after an mrva run
+    # on some earlier day, and the state this path is for.
+    client.object_exists = lambda href: "/mur/l4/" in href
+    orch = MAAPOrchestrator(
+        config, client, today_fn=lambda: datetime.date(2026, 8, 9),
+        stages=["cog"])
+
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert any(p == "mur-cog" for p, _ in client.submitted), \
+        "cog alone submitted nothing"
+
+
+def test_cog_alone_says_so_when_there_is_no_granule(caplog):
+    """A day never analysed is a legitimate state, not an error.
+
+    It must say which key it looked for, or the only thing the operator learns
+    is that nothing happened.
+    """
+    import logging
+    client = FakeMAAPClient(existing_objects=set())
+    client.object_exists = lambda href: False
+    orch = MAAPOrchestrator(
+        _single_sensor_config(), client,
+        today_fn=lambda: datetime.date(2026, 8, 9), stages=["cog"])
+
+    with caplog.at_level(logging.INFO):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    assert "no promoted granule" in caplog.text
+    assert "mur/l4/1km/2026/" in caplog.text
