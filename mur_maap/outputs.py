@@ -167,18 +167,35 @@ OUTPUT_PATTERNS: Dict[str, Dict[str, str]] = {
         "cog25_ice": r"^[^/]*MUR25-GLOB[^/]*_ice\.tif$",
         "cog25_mask": r"^[^/]*MUR25-GLOB[^/]*_mask\.tif$",
     },
+    # Confirmed against the first successful mrva job, 2026-10-06 (doy 279,
+    # nrt, capped at L=10). Everything here was inferred before that and
+    # everything was wrong:
+    #
+    #   assumed  netcdf/<file>.nc
+    #   actual   netcdf/GLOB/JPL/MUR/v4/<year>/<doy><mode>/<file>.nc
+    #            -- csp2nc4a and makeMUR25 both build GLOB/JPL/MUR + /v4
+    #
+    #   assumed  fv04.1          actual  fv04.2
+    #   assumed  one csp         actual  c07..c10 plus u07, u08
+    #   assumed  no siblings     actual  a .md5 beside each granule
+    #
+    # The .nc$ anchor matters more than it looks: without it the .md5 files
+    # match too and every lookup fails on "found 2".
     "mur-mrva": {
-        # MUR-GLOB and MUR25-GLOB both live in netcdf/ and both end .nc, so
-        # these must distinguish them. The old pattern was ^netcdf/.*\.nc$,
-        # which was correct only while Stage 10 had never succeeded -- the
-        # first run that produced MUR25 would have matched two files, and
-        # resolve_output raises unless there is exactly one, failing a day
-        # that had already cost an hour of compute.
-        #
-        # [^/]* rather than .* so neither can reach into netcdf/cog/.
-        "netcdf": r"^netcdf/[^/]*{date}[^/]*MUR-GLOB[^/]*\.nc$",
-        "netcdf25": r"^netcdf/[^/]*{date}[^/]*MUR25-GLOB[^/]*\.nc$",
-        "csp": r"^csp/.*\.c\d\d$",
+        "netcdf": r"^netcdf/.*/{date}[^/]*-MUR-GLOB-[^/]*\.nc$",
+        "netcdf25": r"^netcdf/.*/{date}[^/]*-MUR25-GLOB-[^/]*\.nc$",
+
+        # One level per key, because "the coefficient file" is not a thing:
+        # an NRT run writes one per level it solved. Which one chains to
+        # tomorrow is a separate question -- see the note in paths.py -- and
+        # naming them individually at least makes the choice explicit rather
+        # than letting a glob pick whichever sorts first.
+        "csp06": r"^csp/.*\.c06$",
+        "csp07": r"^csp/.*\.c07$",
+        "csp08": r"^csp/.*\.c08$",
+        "csp09": r"^csp/.*\.c09$",
+        "csp10": r"^csp/.*\.c10$",
+        "csp11": r"^csp/.*\.c11$",
     },
 }
 

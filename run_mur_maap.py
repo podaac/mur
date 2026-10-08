@@ -420,10 +420,25 @@ class MAAPOrchestrator:
         Returns None when the job produced no coefficient, which is not an
         error -- absence just means tomorrow bootstraps.
         """
+        # c06 specifically, because that is the level makeref reads it at:
+        # Stage 3 runs Lref0..Lref, and Lref0 is 6 in NRT.
+        #
+        # Only a REA run produces one. REA has L0=2, so Stage 6 saves c02..c11
+        # and c06 is among them; an NRT run sets L0 = Lref = 7 and saves
+        # c07..c10. That is why the first successful job (2026-10-06, nrt)
+        # staged out c07..c10 and no c06 -- not a fault, just NRT having
+        # nothing to promote.
+        #
+        # Absence is handled: the container warns and builds the reference
+        # from scratch, which is also what a fresh start or a reprocess
+        # without a prior day needs.
         try:
-            src = self.client.get_job_output(job, "csp")
+            src = self.client.get_job_output(job, "csp06")
         except Exception as exc:                          # noqa: BLE001
-            logger.warning("No coefficient output for %s: %s", process_date, exc)
+            logger.info("    no c06 from %s (%s mode writes c07 upward); "
+                        "tomorrow bootstraps its reference field",
+                        process_date, "nrt" if "found 0" in str(exc) else "this")
+            logger.debug("csp06 lookup: %s", exc)
             return None
         dest = paths.href(self.workspace_root, paths.csp_key(process_date))
         return self.client.copy_object(src, dest)
