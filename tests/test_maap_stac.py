@@ -149,3 +149,20 @@ def test_a_netcdf_extra_asset_is_still_plain_data():
     a = item["assets"]["mur25"]
     assert a["roles"] == ["data"]
     assert "href_tilejson" not in a
+
+
+def test_the_viewer_url_is_not_the_tilejson_url_with_a_word_swapped():
+    """The two titiler endpoints do not share a shape.
+
+    Tiles are /cog/WebMercatorQuad/tilejson.json; the viewer is /cog/viewer,
+    with no tile-matrix-set segment. Deriving one from the other by string
+    substitution produced /cog/WebMercatorQuad/viewer, which 404s -- verified
+    against the live service.
+    """
+    v = stac.titiler_viewer("s3://b/x_sst.tif", **stac.RENDER["sst"])
+    assert "/cog/viewer?" in v
+    assert "WebMercatorQuad" not in v
+    assert "rescale=271.15" in v.replace("%2C", ",")
+
+    t = stac.titiler_tilejson("s3://b/x_sst.tif")
+    assert "/cog/WebMercatorQuad/tilejson.json?" in t

@@ -66,6 +66,22 @@ def titiler_tilejson(cog_href: str, **render) -> str:
     return f"{TITILER}/cog/WebMercatorQuad/tilejson.json?{urlencode(q)}"
 
 
+def titiler_viewer(cog_href: str, **render) -> str:
+    """A browser URL for one COG -- titiler's own interactive viewer.
+
+    Built here rather than derived from the TileJSON URL by substitution. The
+    two endpoints do not share a shape: tiles live under
+    /cog/WebMercatorQuad/tilejson.json but the viewer is /cog/viewer, with no
+    tile-matrix-set segment. Rewriting one into the other produced
+    /cog/WebMercatorQuad/viewer, which 404s -- verified against the live
+    service, along with /cog/map.html (404) and /cog/WebMercatorQuad/map.html
+    (200, the plain Leaflet variant).
+    """
+    from urllib.parse import urlencode
+    q = {"url": cog_href, **render}
+    return f"{TITILER}/cog/viewer?{urlencode(q)}"
+
+
 # Render hints per variable, keyed by the suffix Stage 10b gives the file.
 # rescale matters more than colormap: titiler stretches to the data range by
 # default, so an SST field drawn without it looks plausible and is not

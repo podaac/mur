@@ -40,8 +40,14 @@ def build_client(config_path=None):
 
 
 def viewer_url(cog_href: str, render: dict) -> str:
-    from urllib.parse import urlencode
-    return f"{VIEWER}?{urlencode({'url': cog_href, **render})}"
+    """Delegates, so there is one definition of the viewer URL.
+
+    This file had its own copy against a VIEWER constant. Two definitions of
+    the same URL is how /cog/WebMercatorQuad/viewer got invented in a third
+    place and 404'd.
+    """
+    from mur_maap.stac import titiler_viewer
+    return titiler_viewer(cog_href, **render)
 
 
 def _read(client, s3_uri: str) -> bytes:
