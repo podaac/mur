@@ -636,6 +636,10 @@ function mrva4com_container(year, day, realtime, config_file)
             nc_config.realtime = realtime;
             nc_config.landice_grid_p01_file = config.landice_grid_p01_file;
             nc_config.landice_icefiles_p011_file = config.landice_icefiles_p011_file;
+            % Stage 9's anomaly branch needs it and nothing passed it.
+            % mur25_config has had it all along, which is why MUR25 worked
+            % and the 1 km granule did not.
+            nc_config.seasonal_file = config.seasonal_file;
 
             % Add optional high-res grid file if available
             if hiresgridFlag && ~isempty(hiresgridfile)

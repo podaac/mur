@@ -106,6 +106,21 @@ else
     landice_icefiles_p011_file = '';
 end
 
+% Resolved by the caller, like the two above. 27b005e changed readSeasonal
+% from readSeasonal(doy) to readSeasonal(seasonal_file) so the container would
+% not have to know the static-data layout, but left the call site below
+% passing `day` -- an integer where a path is expected. exist(279,'file') then
+% raised "The first input to exist must be a string scalar or character
+% vector" 400 lines after the cause, inside a try/catch that downgraded it to
+% a warning. It stayed hidden until 2026-10-06, the first mrva run ever to
+% reach Stage 9's anomaly branch. makeMUR25 was given the field at the time;
+% this caller was missed.
+if isfield(config, 'seasonal_file')
+    seasonal_file = config.seasonal_file;
+else
+    seasonal_file = '';
+end
+
 if isfield(config, 'tmp_root')
     tmp_root = config.tmp_root;
 else
@@ -411,8 +426,19 @@ fprintf(1,'***csp2nc4*** : Year %04d, Day %03d\n',year,day);
       ssta = double(msst)*sscale+offset;
       fprintf('  SST grid size: [%d, %d]\n', size(ssta,1), size(ssta,2));
 
-      % Read seasonal climatology with dimension validation
-      seasonal_sst = readSeasonal( day );
+      % Read seasonal climatology with dimension validation.
+      %
+      % Validated here rather than left to readSeasonal, because a missing
+      % path surfaces there as a type error on exist() that names neither the
+      % input nor the caller.
+      if isempty(seasonal_file)
+          error('csp2nc4a:NoSeasonalFile', ...
+                ['anomalyIncluded is set but config.seasonal_file is ' ...
+                 'absent. The caller resolves the climatology for this ' ...
+                 'day; mrva4com_container.m passes config.seasonal_file, ' ...
+                 'from the --seasonal-file flag.']);
+      end
+      seasonal_sst = readSeasonal( seasonal_file );
       fprintf('  Seasonal climatology size: [%d, %d]\n', size(seasonal_sst,1), size(seasonal_sst,2));
 
       % Validate dimensions match before subtraction
