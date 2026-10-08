@@ -126,7 +126,22 @@ main() {
 
         # NETCDF:"file":var addresses one variable without decoding the rest.
         # DEFLATE because these fields are smooth and every reader has it.
+        # -a_srs assigns the CRS; it does not reproject.
+        #
+        # GHRSST L4 carries no grid_mapping attribute and no CRS variable --
+        # verified against a production granule: analysed_sst has only
+        # `coordinates = "lon lat"`, and the root attributes stop at
+        # geospatial_lat_units. The convention is that lat/lon in degrees
+        # imply WGS84, and GDAL's NETCDF driver does not translate that into a
+        # CRS on the output. The GeoTIFF is then geometrically correct and
+        # spatially unplaced, which rio-tiler reports as
+        #
+        #   'NoneType' object has no attribute 'to_authority'
+        #
+        # -- a message that names neither the CRS nor the file. Job 74b2bb11
+        # produced exactly that and titiler refused to read it.
         if gdal_translate -q -of COG \
+                -a_srs EPSG:4326 \
                 -co COMPRESS=DEFLATE \
                 -co "OVERVIEW_RESAMPLING=$resample" \
                 -co BLOCKSIZE=512 \

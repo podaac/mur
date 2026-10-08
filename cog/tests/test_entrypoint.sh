@@ -70,6 +70,18 @@ assert_eq "--granule is required" \
 assert_eq "an unknown flag is rejected" \
     "1" "$(run_case "parse_args --granule s3://b/x.nc --nope >/dev/null 2>&1; echo \$?")"
 
+# --- the conversion assigns a CRS ------------------------------------------
+#
+# GHRSST L4 carries no grid_mapping attribute, so GDAL emits a GeoTIFF with no
+# CRS and rio-tiler fails with "'NoneType' object has no attribute
+# 'to_authority'" -- which names neither the CRS nor the file. Asserted on the
+# source because the conversion needs GDAL, which is not present here.
+assert_eq "gdal_translate assigns EPSG:4326" \
+    "1" "$(grep -c -- '-a_srs EPSG:4326' "$ENTRYPOINT")"
+
+assert_eq "it assigns rather than reprojects (-a_srs, not -t_srs)" \
+    "0" "$(grep -c -- '-t_srs' "$ENTRYPOINT")"
+
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
     echo "All tests passed."
