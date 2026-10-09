@@ -11,6 +11,8 @@ from collections import Counter
 
 import pytest
 
+from mur_maap import stac
+
 from run_mur_maap import (
     MAAPClient,
     MAAPOrchestrator,
@@ -1223,3 +1225,49 @@ def test_cog_alone_says_so_when_there_is_no_granule(caplog):
 
     assert "no promoted granule" in caplog.text
     assert "mur/l4/1km/2026/" in caplog.text
+
+
+# --- STAC reporting must not reach the network -------------------------------
+
+def test_reporting_stac_links_makes_no_network_call(orchestrator, monkeypatch):
+    """The whole suite runs offline, and a run must not depend on an API.
+
+    An earlier version of _report_stac asked dps-stac for the real collection
+    id, which is correct but put an HTTP GET on the run path -- and hung this
+    file. The registered name is read off a DPS href the run already fetched
+    instead. If anything here calls find_collection again, this fails.
+    """
+    def explode(*_a, **_k):                                # pragma: no cover
+        raise AssertionError("_report_stac must not call the STAC API")
+
+    monkeypatch.setattr(stac, "find_collection", explode)
+    orchestrator._report_stac(datetime.date(2026, 8, 6), "nrt")
+
+
+def test_the_registered_algorithm_name_is_learned_from_a_job_output(orchestrator):
+    """So the collection id can be built without guessing MAAP's suffix."""
+    orchestrator._note_registered(
+        "s3://b/u/dps_output/mur-mrva_1756/2.0.14/2026/10/09/1/2/3/4/x.nc")
+    assert orchestrator._registered["mur-mrva"] == "mur-mrva_1756"
+
+
+def test_an_unlearned_module_is_reported_as_unknown_not_guessed(orchestrator, caplog):
+    """Saying "unknown collection" beats printing a plausible dead URL."""
+    import logging
+    with caplog.at_level(logging.INFO):
+        orchestrator._report_stac(datetime.date(2026, 8, 6), "nrt")
+    assert "unknown collection" in caplog.text
+    assert "__mur-mrva__" not in caplog.text
+
+
+def test_a_learned_module_gets_a_real_collection_url(orchestrator, caplog):
+    import logging
+    orchestrator._note_registered(
+        "s3://b/u/dps_output/mur-mrva_1756/2.0.14/2026/10/09/1/2/3/4/x.nc")
+    monkey = orchestrator.config.setdefault("maap", {})
+    monkey["workspace_root"] = "s3://maap-ops-workspace/jleach_jpl"
+    monkey["algorithm_version"] = "2.0.14"
+    with caplog.at_level(logging.INFO):
+        orchestrator._report_stac(datetime.date(2026, 10, 8), "nrt")
+    assert ("jleach_jpl__mur-mrva_1756__2.0.14/items/mur-l4-20261008-nrt"
+            in caplog.text)

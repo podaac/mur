@@ -279,6 +279,12 @@ class MAAPOrchestrator:
         self.stages = validate_stages(stages)
         self._warned_no_iquam = False
         self._today_fn = today_fn or mur_date.today
+        # Registered algorithm name per module, learned from the DPS output
+        # hrefs this run already fetches. MAAP suffixes the name it registers
+        # (mur-mrva_1756), the suffix appears nowhere in this repo, and it is
+        # part of the STAC collection id -- so it is read off a path rather
+        # than guessed, and rather than costing an API call on the run path.
+        self._registered: Dict[str, str] = {}
 
     def get_reference_today(self) -> datetime.date:
         return self._today_fn()
@@ -426,37 +432,62 @@ class MAAPOrchestrator:
         root = (self.workspace_root or "").rstrip("/")
         return root.rsplit("/", 1)[-1] if "/" in root else ""
 
-    def _report_stac(self, process_date: datetime.date, mode: str) -> None:
-        """Print where this day's products will appear in MAAP's STAC.
+    def _note_registered(self, href: Optional[str]) -> None:
+        """Learn a module's registered algorithm name from a DPS href."""
+        if not href:
+            return
+        name = stac.registered_algorithm(href)
+        if name:
+            self._registered[stac.module_of(name)] = name
 
-        Printed rather than verified. Ingestion happens after stage-out, on
-        MAAP's side and on its own schedule, so the item does not exist the
-        moment the job returns -- querying here would report a false absence
-        for every run. The links are deterministic (collection from username,
-        algorithm and version; item from date and mode), so emitting them
-        unconditionally is both honest and useful: they are the addresses to
-        check, not a claim that the data is already there.
+    def _report_stac(self, process_date: datetime.date, mode: str) -> None:
+        """Print where this day's products are, or will be, in MAAP's STAC.
+
+        The collection id is ASKED FOR, not constructed. MAAP suffixes the
+        registered algorithm name (`mur-mrva_1756`), the suffix is assigned at
+        registration and appears nowhere in this repo, and the first version
+        of this method built ids without it -- printing plausible URLs that
+        all 404'd.
+
+        A collection that is not found is reported as pending rather than as
+        an error. Ingestion runs after stage-out on MAAP's own schedule, so a
+        job that just finished legitimately has no collection yet, and
+        nothing here is allowed to make a successful run look failed.
         """
         user = self.username
         if not user:
             return
         version = str(self.config.get("maap", {}).get("algorithm_version")
                       or ALGORITHM_VERSION)
-        granules = stac.dps_collection_id(user, "mur-mrva", version)
-        browse = stac.dps_collection_id(user, "mur-cog", version)
         day = f"{process_date:%Y%m%d}"
 
-        logger.info("    MAAP STAC (ingested from the catalog.json each "
-                    "container staged out):")
-        logger.info("      granules  %s",
-                    stac.dps_item_url(granules, f"mur-l4-{day}-{mode}"))
+        wanted = [("granules", "mur-mrva", f"mur-l4-{day}-{mode}", None)]
         if "cog" in self.stages:
-            for res, field in (("1km", "sst"), ("25km", "sst")):
-                item = f"mur-cog-{day}-{res}"
-                logger.info("      %-5s map %s", res, stac.dps_map_url(
-                    browse, item, field, **stac.RENDER[field]))
-        logger.info("      browse all layers: %s",
-                    stac.dps_browser_url(browse, f"mur-cog-{day}-1km"))
+            wanted += [
+                ("browse 1 km", "mur-cog", f"mur-cog-{day}-1km", "sst"),
+                ("browse 25 km", "mur-cog", f"mur-cog-{day}-25km", "sst"),
+            ]
+
+        logger.info("    MAAP STAC (%s):", stac.DPS_STAC)
+        for label, module, item, field in wanted:
+            registered = self._registered.get(module)
+            if not registered:
+                # No DPS href was seen for this module, so its registered
+                # name is unknown. Saying so beats printing a URL built from
+                # a guessed suffix, which looks right and 404s.
+                logger.info("      %-12s unknown collection (no %s output "
+                            "seen this run)", label, module)
+                continue
+            collection = stac.dps_collection_id(user, registered, version)
+            if field:
+                logger.info("      %-12s %s", label, stac.dps_map_url(
+                    collection, item, field, **stac.RENDER[field]))
+            else:
+                logger.info("      %-12s %s", label,
+                            stac.dps_item_url(collection, item))
+        logger.info("      ingestion runs after stage-out on MAAP's "
+                    "schedule, so a link can 404 for a while; `python "
+                    "utils/mur_stac.py --latest` confirms what is live")
 
     def _browse_from_promoted(self, process_date: datetime.date,
                               mode: str) -> Dict[str, str]:
@@ -525,10 +556,11 @@ class MAAPOrchestrator:
             return out
         for output_name in sorted(outputs.OUTPUT_PATTERNS.get("mur-cog", {})):
             try:
-                out[f"{asset_prefix}_{output_name.split('_')[-1]}"] = \
-                    self.client.get_job_output(job, output_name)
+                href = self.client.get_job_output(job, output_name)
             except Exception:                             # noqa: BLE001
                 continue
+            self._note_registered(href)
+            out[f"{asset_prefix}_{output_name.split('_')[-1]}"] = href
         return out
 
     def _promote_l4(self, process_date: datetime.date, mode: str, job: str,
@@ -549,6 +581,9 @@ class MAAPOrchestrator:
         except Exception as exc:                          # noqa: BLE001
             logger.debug("no %s from %s: %s", output_name, process_date, exc)
             return None
+        # The one place a raw mrva DPS path is in hand. Its prefix carries
+        # the registered algorithm name, which the STAC collection id needs.
+        self._note_registered(src)
         dest = paths.l4_href(self.workspace_root, process_date, mode,
                              resolution)
         return self.client.copy_object(src, dest)
@@ -1060,6 +1095,7 @@ class MAAPOrchestrator:
                         href = self.client.get_job_output(cog_job, output_name)
                     except Exception:                      # noqa: BLE001
                         continue
+                    self._note_registered(href)
                     extras[f"{asset_prefix}_{output_name.split('_')[-1]}"] = href
 
         if extras:

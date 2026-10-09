@@ -81,30 +81,90 @@ TITILER = "https://titiler-dps-stac.maap-project.org"
 TMS = "WebMercatorQuad"
 
 
+# MAAP suffixes the registered algorithm name with a number of its own:
+# `mur-mrva_1756`, not `mur-mrva`. It shows up in the registry CWL key
+# (s3://maap-ops-registry/ogc-app-pack/mur-mrva_1756.2.0.14.process.cwl), in
+# the DPS output prefix (dps_output/mur-mrva_1756/2.0.14/...) and, the part
+# that matters here, in the ingested collection id. It is assigned at
+# registration and is not derivable from anything in this repo.
+_REGISTERED = re.compile(r"(?:^|/)(mur-[a-z0-9]+(?:_\d+)?)(?:/|$)")
+
+
+def registered_algorithm(dps_href: str) -> Optional[str]:
+    """The registered algorithm name out of a DPS output href.
+
+    `.../dps_output/mur-mrva_1756/2.0.14/...` -> `mur-mrva_1756`. Reading it
+    off a path the job already returned beats guessing the suffix, and beats
+    an extra API call.
+    """
+    for part in dps_href.split("dps_output/")[1:]:
+        match = _REGISTERED.match(part if part.startswith("mur-") else "/" + part)
+        if match:
+            return match.group(1)
+    match = _REGISTERED.search(dps_href)
+    return match.group(1) if match else None
+
+
+def module_of(registered: str) -> str:
+    """`mur-mrva_1756` -> `mur-mrva`, the process id the pipeline submits."""
+    return re.sub(r"_\d+$", "", registered)
+
+
 def dps_collection_id(username: str, algorithm: str, version: str) -> str:
-    """The collection id MAAP will assign, given who ran what.
+    """The collection id MAAP assigns, given who ran which registered version.
 
-    The ingestion service rewrites whatever id the catalog declares to
-    `<username>__<algorithm>__<version>`, lowercased, with URL-unsafe
-    characters replaced -- so `mur-l4-sst` in write_stac.py never survives,
-    and the id needed to build a URL has to be reconstructed here.
+    `algorithm` must be the REGISTERED name, suffix included -- what
+    `registered_algorithm()` returns, or what `find_collection()` found. Pass
+    a bare `mur-cog` and this yields an id that does not exist: the first
+    version of this function did exactly that, and every URL it built 404'd
+    while looking perfectly plausible.
 
-    Two consequences worth stating out loud:
+    Two more consequences of the naming rule, both verified live:
 
       - The version is part of the id, so every algorithm version is its own
-        collection. Bumping mur-cog from 2.0.12 to 2.0.13 does not add to the
-        existing collection, it starts a new one.
-      - The job tag is not part of it. Items with the same id in the same
-        collection overwrite each other regardless of tag, which is what
-        makes re-running a day idempotent.
-
-    The substitution rule is inferred from observed ids rather than
-    documented; MUR's own names contain only safe characters, so it does not
-    fire for us. `find_collection` asks the API instead of trusting this when
-    the answer has to be right.
+        collection. Bumping mur-cog from 2.0.14 to 2.0.15 starts a new
+        collection rather than adding to the existing one.
+      - The job tag is not part of it. Items sharing an id in a collection
+        overwrite each other regardless of tag, which is what makes
+        re-running a day idempotent.
     """
     raw = f"{username}__{algorithm}__{version}".lower()
     return re.sub(r"[^a-z0-9_.-]+", "-", raw)
+
+
+def find_collection(username: str, algorithm: str, version: str,
+                    *, timeout: float = 15.0) -> Optional[str]:
+    """Ask the API for the real collection id, or None if it is not there.
+
+    Preferred over constructing one, because the registered suffix cannot be
+    guessed. `algorithm` is the bare name (`mur-cog`); any `_<digits>` suffix
+    is matched.
+
+    None is a real answer, not just a failure: ingestion happens after
+    stage-out on MAAP's own schedule, so a collection legitimately does not
+    exist for a while after a job finishes. Callers should say "not yet
+    ingested" rather than treating it as an error. A network or parse failure
+    also returns None -- this exists to decorate output with links, and must
+    never be the reason a run reports a problem.
+    """
+    import json
+    import urllib.request
+
+    pattern = re.compile(
+        r"^%s__%s(?:_\d+)?__%s$" % (
+            re.escape(username.lower()), re.escape(algorithm.lower()),
+            re.escape(version.lower())))
+    try:
+        with urllib.request.urlopen(
+                f"{DPS_STAC}/collections?limit=500", timeout=timeout) as fh:
+            body = json.load(fh)
+    except Exception:                                     # noqa: BLE001
+        return None
+    for collection in body.get("collections") or []:
+        cid = str(collection.get("id", ""))
+        if pattern.match(cid.lower()):
+            return cid
+    return None
 
 
 def dps_item_url(collection: str, item: str) -> str:

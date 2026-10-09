@@ -228,3 +228,44 @@ def test_the_viewer_url_is_not_the_tilejson_url_with_a_word_swapped():
 
     t = stac.titiler_tilejson("s3://b/x_sst.tif")
     assert "/cog/WebMercatorQuad/tilejson.json?" in t
+
+
+# --- the registered algorithm name -------------------------------------------
+
+def test_the_registered_name_carries_a_suffix_maap_assigns():
+    """MAAP registers `mur-mrva` as `mur-mrva_1756`.
+
+    The suffix shows up in the registry CWL key, in the DPS output prefix and
+    -- the part that matters -- in the ingested collection id. It is assigned
+    at registration and appears nowhere in this repo, so it has to be read
+    off a path the job already returned.
+    """
+    href = ("s3://maap-ops-workspace/jleach_jpl/dps_output/mur-mrva_1756/"
+            "2.0.14/2026/10/09/17/50/27/869901/netcdf/x.nc")
+    assert stac.registered_algorithm(href) == "mur-mrva_1756"
+    assert stac.module_of("mur-mrva_1756") == "mur-mrva"
+
+
+def test_a_module_registered_without_a_suffix_still_resolves():
+    href = "s3://b/u/dps_output/mur-cog/2.0.14/2026/10/09/1/2/3/4/x_sst.tif"
+    assert stac.registered_algorithm(href) == "mur-cog"
+    assert stac.module_of("mur-cog") == "mur-cog"
+
+
+def test_an_href_with_no_algorithm_segment_yields_none():
+    """None, so a caller reports "unknown" rather than printing a URL built
+    from a guess -- which looks right and 404s."""
+    assert stac.registered_algorithm("s3://bucket/mur/l4/1km/2026/x.nc") is None
+    assert stac.registered_algorithm("") is None
+
+
+def test_the_collection_id_uses_the_registered_name_suffix_and_all():
+    """The regression this function was written wrong for once.
+
+    Verified against the live catalogue on 2026-10-09: the real id is
+    jleach_jpl__mur-mrva_1756__2.0.14. Building it from the bare module name
+    produced jleach_jpl__mur-mrva__2.0.14, which does not exist, so every
+    link printed after a successful run was dead.
+    """
+    assert (stac.dps_collection_id("jleach_jpl", "mur-mrva_1756", "2.0.14")
+            == "jleach_jpl__mur-mrva_1756__2.0.14")

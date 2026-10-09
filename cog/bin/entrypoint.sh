@@ -171,9 +171,6 @@ write_stac() {
     if ! python3 "$COMMON_DIR/write_stac.py" \
             --output-dir "$out" \
             --collection mur-l4-browse \
-            --collection-title "MUR L4 SST browse rasters" \
-            --collection-description \
-                "Cloud-optimized GeoTIFF browse layers derived from MUR L4 SST analysis granules." \
             --item-id "$item" \
             --datetime "$dt" \
             "${props[@]}" "$@"; then

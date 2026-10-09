@@ -360,8 +360,6 @@ write_stac() {
     local -a args=(
         --output-dir "$root"
         --collection mur-l4-sst
-        --collection-title "MUR L4 SST analysis"
-        --collection-description "Multi-scale Ultra-high Resolution L4 sea surface temperature analysis granules."
         --item-id "mur-l4-${ts:0:8}-${MODE}"
         --datetime "$dt"
         --property "mur:mode=$MODE"

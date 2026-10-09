@@ -373,13 +373,46 @@
 
     <h4>Two naming rules that are not obvious</h4>
 
-    <p><strong>The collection id is assigned, not chosen.</strong> Whatever id
-    the catalog declares is discarded and replaced with
+    <p><strong>The collection id is assigned, not chosen, and cannot be
+    constructed.</strong> Whatever id the catalog declares is discarded and
+    replaced with
     <code>&lt;username&gt;__&lt;algorithm&gt;__&lt;version&gt;</code>,
-    lowercased. The version is part of it, so every algorithm version is its
-    own collection &mdash; bumping <code>mur-cog</code> from 2.0.12 to 2.0.13
-    starts a new collection rather than adding to the old one.
-    <code>mur_maap.stac.dps_collection_id()</code> reconstructs it.</p>
+    lowercased &mdash; where the algorithm name is the <em>registered</em>
+    one, which MAAP suffixes with a number of its own:</p>
+
+    <pre><code>jleach_jpl__mur-mrva_1756__2.0.14</code></pre>
+
+    <p>That <code>_1756</code> also appears in the registry CWL key and in the
+    DPS output prefix. It is assigned at registration and exists nowhere in
+    this repo, so it is read off a path a job already returned
+    (<code>stac.registered_algorithm()</code>, recorded by
+    <code>_note_registered</code> as the run goes) rather than guessed. The
+    first version of this code built ids without it and printed links that all
+    404'd while looking perfectly plausible.
+    <code>utils/mur_stac.py</code> asks the API instead, for the cases where
+    no job href is in hand.</p>
+
+    <p>The version is part of the id too, so every algorithm version is its own
+    collection &mdash; bumping <code>mur-cog</code> from 2.0.14 to 2.0.15
+    starts a new collection rather than adding to the old one.</p>
+
+    <h4>The label is the title, not the id</h4>
+
+    <p>The id is machine plumbing. What a browser listing shows is the
+    <code>title</code>, and that is ours. Verified against a real ingested
+    collection on 2026-10-09: <code>title</code>,
+    <code>description</code>, <code>extent</code> and <code>renders</code>
+    all survive ingest unchanged, and <code>keywords</code>,
+    <code>providers</code> and <code>item_assets</code> survive on other
+    users' collections. Only the id is rewritten. <code>license</code> is
+    normalised (<code>proprietary</code> became <code>other</code>).</p>
+
+    <p>So the per-collection metadata lives in one table,
+    <code>COLLECTIONS</code> in <code>common/bin/write_stac.py</code> &mdash;
+    in the file rather than in entrypoint flags, because it is prose with
+    commas, quotes and nested structure, and threading that through bash would
+    be all quoting and no clarity. The entrypoints name a collection; the
+    table says what that collection is.</p>
 
     <p><strong>The item id decides what overwrites what.</strong> Items sharing
     an id in a collection overwrite each other, regardless of job tag, which is

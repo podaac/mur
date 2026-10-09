@@ -104,6 +104,89 @@ RENDER = {
 # holding a netCDF beside its GeoTIFFs fails to tile for every value of
 # `assets=`, including the GeoTIFF's own key. Verified against
 # titiler-dps-stac 2026-10-08. mur writes one item per asset family.
+# Collection metadata, by the id the catalog declares.
+#
+# WHAT SURVIVES INGEST, AND WHAT DOES NOT
+#   Verified against a real ingested collection on 2026-10-09
+#   (jleach_jpl__mur-mrva_1756__2.0.14): title, description, extent, license
+#   and renders all came through unchanged. Only the ID is rewritten. Three
+#   more fields are preserved on other users' collections and so are included
+#   here -- keywords, providers and item_assets.
+#
+#   So the collection id is not the label. It is machine plumbing
+#   (<username>__<algorithm>__<version>), and the human-readable name is the
+#   title below. A browser listing shows the title; nothing but a URL shows
+#   the id.
+#
+# Kept here rather than passed in as flags because it is prose with commas,
+# quotes and nested structure, and threading that through bash would be all
+# quoting and no clarity. The entrypoints name a collection; this says what
+# that collection is.
+COLLECTIONS = {
+    "mur-l4-sst": {
+        "title": "MUR L4 Sea Surface Temperature Analysis",
+        "description": (
+            "Multi-scale Ultra-high Resolution (MUR) Level 4 foundation sea "
+            "surface temperature analysis. A variational analysis fuses "
+            "infrared and microwave satellite radiometry with iQuam in-situ "
+            "observations against a seasonal climatology and a daily "
+            "land/ice mask, producing a gap-free global field. Each item "
+            "carries the 1 km product and its 0.25 degree MUR25 sibling, "
+            "both as GHRSST-conventions netCDF."
+        ),
+        "keywords": ["MUR", "SST", "GHRSST", "L4", "sea surface temperature",
+                     "ocean", "analysis"],
+        "providers": [
+            {"name": "NASA JPL PO.DAAC", "roles": ["producer", "processor"],
+             "url": "https://podaac.jpl.nasa.gov/"},
+            {"name": "MUR SST", "roles": ["processor"],
+             "url": "https://github.com/podaac/mur"},
+        ],
+        "item_assets": {
+            "data": {"type": NETCDF_TYPE, "roles": ["data"],
+                     "title": "MUR L4 SST granule (1 km)",
+                     "description": "Global 1 km foundation SST analysis, "
+                                    "GHRSST L4 netCDF."},
+            "data25": {"type": NETCDF_TYPE, "roles": ["data"],
+                       "title": "MUR25 L4 SST granule (0.25 deg)",
+                       "description": "The same analysis on a 0.25 degree "
+                                      "grid, carrying all five fields."},
+        },
+    },
+    "mur-l4-browse": {
+        "title": "MUR L4 SST Browse Imagery",
+        "description": (
+            "Cloud-optimized GeoTIFF browse layers rendered from the MUR L4 "
+            "sea surface temperature analysis, one per field, for display on "
+            "a web map. Derived imagery -- for the analysis itself in netCDF, "
+            "see the MUR L4 Sea Surface Temperature Analysis collection. "
+            "Item ids carry the day and the resolution but not the analysis "
+            "mode, so a reanalysis replaces that day's picture rather than "
+            "adding a second layer for the same date."
+        ),
+        "keywords": ["MUR", "SST", "GHRSST", "COG", "browse", "visualization",
+                     "sea surface temperature"],
+        "providers": [
+            {"name": "NASA JPL PO.DAAC", "roles": ["producer", "processor"],
+             "url": "https://podaac.jpl.nasa.gov/"},
+            {"name": "MUR SST", "roles": ["processor"],
+             "url": "https://github.com/podaac/mur"},
+        ],
+        "item_assets": {
+            key: {"type": COG_TYPE, "roles": ["data", "visual"],
+                  "title": title}
+            for key, title in (
+                ("sst", "Analysed SST"),
+                ("anom", "SST anomaly"),
+                ("err", "Analysis error"),
+                ("ice", "Sea ice fraction"),
+                ("mask", "Land/sea/ice mask"),
+            )
+        },
+    },
+}
+
+
 ASSET_TITLES = {
     "data": "MUR L4 SST granule (1 km)",
     "data25": "MUR25 L4 SST granule (0.25 deg)",
@@ -215,30 +298,29 @@ def build_collection(collection_id, title, description, items):
 
     Exactly one, deliberately: the ingestion service requires a single
     distinct source collection id among the items it is given, and a single
-    matching Collection in the catalog hierarchy. Its id is rewritten on
-    ingest to <username>__<algorithm_name>__<algorithm_version>, so the name
-    chosen here survives only as documentation.
+    matching Collection in the catalog hierarchy.
+
+    Its id is rewritten on ingest to
+    <username>__<algorithm_name>__<algorithm_version> -- and the algorithm
+    name there is the REGISTERED one, which MAAP suffixes
+    (mur-mrva_1756, not mur-mrva). So the id declared here never survives and
+    cannot be predicted from this file. The title is what a reader sees, and
+    it does survive; see COLLECTIONS above for what else does.
     """
     items = sorted(items, key=lambda i: (i["properties"]["datetime"], i["id"]))
     datetimes = sorted(i["properties"]["datetime"] for i in items)
-    return {
+    meta = COLLECTIONS.get(collection_id, {})
+
+    out = {
         "type": "Collection",
         "stac_version": STAC_VERSION,
         "id": collection_id,
-        "title": title,
-        "description": description,
+        "title": meta.get("title") or title,
+        "description": meta.get("description") or description,
         "license": "proprietary",
         "extent": {
             "spatial": {"bbox": [list(GLOBAL_BBOX)]},
             "temporal": {"interval": [[datetimes[0], datetimes[-1]]]},
-        },
-        # The render extension, so titiler-dps-stac can offer a named render
-        # without a query string. Harmless if the ingest service drops it;
-        # every URL the pipeline emits also carries the parameters inline.
-        "renders": {
-            key: dict(params, assets=[key], title=ASSET_TITLES.get(key, key))
-            for key, params in RENDER.items()
-            if any(key in i["assets"] for i in items)
         },
         "links": [
             {"rel": "root", "href": "../catalog.json",
@@ -253,6 +335,34 @@ def build_collection(collection_id, title, description, items):
             for i in items
         ],
     }
+
+    for field in ("keywords", "providers"):
+        if meta.get(field):
+            out[field] = meta[field]
+
+    # item_assets documents each asset key once, at the collection level, so a
+    # browser can label a layer without opening an item. STAC 1.1 has it in
+    # core; under 1.0 it is an extension, which has to be declared or
+    # validation fails. The ingest service rewrites to 1.1 and keeps the
+    # field either way.
+    if meta.get("item_assets"):
+        out["item_assets"] = meta["item_assets"]
+        out["stac_extensions"] = [
+            "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json",
+        ]
+
+    # Only when something here is actually renderable. The first ingested
+    # collection came back with "renders": {} because the granules carry no
+    # renderable field -- correct, and pure noise in the catalogue.
+    renders = {
+        key: dict(params, assets=[key], title=ASSET_TITLES.get(key, key))
+        for key, params in RENDER.items()
+        if any(key in i["assets"] for i in items)
+    }
+    if renders:
+        out["renders"] = renders
+
+    return out
 
 
 def build_catalog(collection_id):
@@ -403,6 +513,12 @@ def main(argv=None):
             properties[key.strip()] = _scalar(raw.strip())
         else:
             p.error("--property needs KEY=VALUE, got %r" % spec)
+
+    if args.collection not in COLLECTIONS and not args.collection_title:
+        print("write_stac: %r has no entry in COLLECTIONS and no "
+              "--collection-title, so its catalogue label would be its id. "
+              "Add it to the table in this file." % args.collection,
+              file=sys.stderr)
 
     item = build_item(args.item_id, args.collection, args.dt, assets,
                       properties)
