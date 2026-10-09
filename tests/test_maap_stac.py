@@ -269,3 +269,24 @@ def test_the_collection_id_uses_the_registered_name_suffix_and_all():
     """
     assert (stac.dps_collection_id("jleach_jpl", "mur-mrva_1756", "2.0.14")
             == "jleach_jpl__mur-mrva_1756__2.0.14")
+
+
+def test_the_user_catalog_route_carries_the_user_prefix():
+    """`/catalogs/user-<name>`, not `/catalogs/<name>` as the tutorial says.
+
+    Verified against the live service 2026-10-09: the bare form 404s, the
+    prefixed form returns 200, and /catalogs lists the ids literally as
+    `user-jleach_jpl`. Asserted because the documented spelling is the one a
+    reader would reach for.
+    """
+    assert (stac.dps_user_catalog("jleach_jpl")
+            == "https://dps-stac.maap-project.org/catalogs/user-jleach_jpl")
+    assert stac.dps_user_catalog_browser("jleach_jpl").endswith(
+        "/catalogs/user-jleach_jpl")
+
+
+def test_the_user_catalog_url_needs_no_version():
+    """Which is the point of printing it: it survives the version bumps that
+    fork a new collection every time."""
+    url = stac.dps_user_catalog("jleach_jpl")
+    assert "2.0" not in url and "mur-" not in url

@@ -178,6 +178,28 @@ def dps_item_url(collection: str, item: str) -> str:
     return f"{DPS_STAC}/collections/{collection}/items/{item}"
 
 
+def dps_user_catalog(username: str) -> str:
+    """Every collection one user has ever published, as one page.
+
+    The route is `/catalogs/user-<username>`, NOT `/catalogs/<username>` as
+    the tutorial states -- verified 2026-10-09: the bare form 404s and the
+    `user-` prefix returns 200. The listing at /catalogs shows the ids
+    literally (`user-jleach_jpl`), which is how the real shape was found.
+
+    This is the most useful single link the pipeline can print: it needs no
+    knowledge of which algorithm version is current, so it keeps working
+    across the version bumps that otherwise fork a new collection each time.
+    """
+    from urllib.parse import quote
+    return f"{DPS_STAC}/catalogs/user-{quote(username)}"
+
+
+def dps_user_catalog_browser(username: str) -> str:
+    """The same page, for a human."""
+    from urllib.parse import quote
+    return f"{DPS_STAC_BROWSER}/catalogs/user-{quote(username)}"
+
+
 def dps_browser_url(collection: str, item: str) -> str:
     """A human-facing page for one Item."""
     from urllib.parse import quote

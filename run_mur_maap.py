@@ -485,9 +485,14 @@ class MAAPOrchestrator:
             else:
                 logger.info("      %-12s %s", label,
                             stac.dps_item_url(collection, item))
+        # Last, and version-independent: every collection this user has
+        # published, which keeps working across the version bumps that fork a
+        # new collection each time.
+        logger.info("      %-12s %s", "all of yours",
+                    stac.dps_user_catalog_browser(user))
         logger.info("      ingestion runs after stage-out on MAAP's "
                     "schedule, so a link can 404 for a while; `python "
-                    "utils/mur_stac.py --latest` confirms what is live")
+                    "utils/mur_stac.py` confirms what is live")
 
     def _browse_from_promoted(self, process_date: datetime.date,
                               mode: str) -> Dict[str, str]:

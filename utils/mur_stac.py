@@ -164,6 +164,12 @@ def main(argv=None) -> int:
         print(json.dumps(report, indent=2))
         return 0
 
+    users = sorted({c["id"].split("__")[0] for c in report})
+    for user in users:
+        print(f"everything {user} has published:")
+        print(f"  {stac.dps_user_catalog_browser(user)}")
+    print()
+
     for collection in report:
         print(f"{collection['title'] or collection['module']}"
               f"  ({collection['module']} v{collection['version']})")

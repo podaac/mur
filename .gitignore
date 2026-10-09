@@ -59,12 +59,30 @@ config.local.json
 iquam/testing
 iquam/archive
 
-# Streamlit secrets and SSL keys
+# Streamlit secrets and SSL material
+#
+# The CERTIFICATE as well as the key. dataviewer/ssl/cert.pem is a real JPL
+# TLS certificate; it was being kept out of commits by hand while only
+# key.pem was ignored, so a bare `git add -A` would have staged it. It
+# identifies a real host and a real organisation, which does not stop being
+# true because the private key is absent.
 .streamlit/secrets.toml
 */.streamlit/secrets.toml
-ssl/key.pem
-*/ssl/key.pem
+ssl/
+*/ssl/
 
 # MATLAB license files (keep example template)
 network.lic
 */network.lic
+
+# Bulk local data -- tens of gigabytes of inputs, outputs and captured logs
+# that belong on disk and never in the history.
+container_data/
+prod_data/
+contained/
+server-logs/
+static-resources_20260420.tar.gz
+download_log.tar.gz
+downloads_*.jsonl
+log_*.txt
+*.nc

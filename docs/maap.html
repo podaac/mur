@@ -343,7 +343,7 @@
     <table>
       <thead><tr><th>Service</th><th>What it is for</th></tr></thead>
       <tbody>
-        <tr><td><code>dps-stac.maap-project.org</code></td><td>the API; <code>/catalogs/&lt;username&gt;</code> is yours</td></tr>
+        <tr><td><code>dps-stac.maap-project.org</code></td><td>the API. <code>/catalogs/user-&lt;username&gt;</code> is yours &mdash; note the <code>user-</code> prefix, which the tutorial omits; the bare form 404s</td></tr>
         <tr><td><code>dps-stac-browser.maap-project.org</code></td><td>a human-facing browser</td></tr>
         <tr><td><code>titiler-dps-stac.maap-project.org</code></td><td>tiles any catalogued raster</td></tr>
       </tbody>
@@ -452,9 +452,17 @@ and is not recognized as a supported dataset name</code></pre>
     <h4>What is not this catalogue</h4>
 
     <p><code>stac.maap-project.org</code> and <code>titiler-pgstac</code> front
-    the <em>curated</em> catalogue: 29 conformance classes, no Transaction, no
-    self-service registration. Nothing this pipeline produces could ever appear
-    there, which is why for a while it appeared nowhere. The sidecar Item that
+    the <em>curated</em> catalogue &mdash; a managed archive of 37 collections
+    of NASA campaign data (ABoVE, AFRISAR, GEDI and the like), with 29
+    conformance classes, no Transaction and no self-service registration.
+    Nothing this pipeline produces could ever appear there, which is why for a
+    while it appeared nowhere. Getting a product in is a request to MAAP's
+    data team, not a code change.</p>
+
+    <p>The DPS STAC needs no such request, and nothing has to be marked
+    public: a collection there is readable anonymously the moment it is
+    ingested &mdash; confirmed by fetching one over plain HTTP from a machine
+    holding no MAAP, AWS or Earthdata credentials at all. The sidecar Item that
     <code>MaapPyClient.publish_stac_item</code> still writes into the workspace
     bucket is a local convenience for the dataviewer &mdash; readable the
     instant a run finishes, where MAAP ingests on its own schedule &mdash; not
