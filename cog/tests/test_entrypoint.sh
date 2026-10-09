@@ -110,6 +110,52 @@ assert_eq "nrt and rea of one day share a browse item id" \
         a=\$(cog_item_id '$FINE'); b=\$(cog_item_id '$FINE')
         [[ \"\$a\" == \"\$b\" ]] && echo same || echo differ")"
 
+# --- BOTH filename shapes, because both reach this container ---------------
+#
+# run_mur_maap.py promotes each granule to a canonical key and hands cog THAT
+# href -- in a full run as well as under --execute cog. So the ten-digit
+# promoted name is the one that actually arrives, and requiring fourteen
+# digits meant every cog job published nothing while its rasters came out
+# fine. Found in a job log, not by a test, which is why these exist.
+PROMOTED="2026100809-JPL-L4_GHRSST-SSTfnd-MUR25-GLOB-nrt.nc"
+PROMOTED1KM="2026100809-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-nrt.nc"
+
+assert_eq "the promoted name (YYYYMMDDHH) yields a datetime" \
+    "2026-10-08T09:00:00Z" "$(run_case "granule_datetime '$PROMOTED'")"
+
+assert_eq "the mrva name (YYYYMMDDHHMMSS) still does" \
+    "2026-10-06T09:00:00Z" "$(run_case "granule_datetime '$FINE'")"
+
+assert_eq "a date-only name falls back to MUR's 09:00 analysis hour" \
+    "2026-10-08T09:00:00Z" \
+    "$(run_case "granule_datetime '20261008-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-nrt.nc'")"
+
+assert_eq "a non-numeric leading field is still refused" \
+    "" "$(run_case "granule_datetime 'granule.nc' || true")"
+
+assert_eq "...and so is a wrong-length one, rather than being padded" \
+    "" "$(run_case "granule_datetime '202610-JPL-x.nc' || true")"
+
+# The promoted name is the only one that carries the mode. Reading it from
+# there beats the path heuristic, which is why the 2.0.14 items had none.
+assert_eq "mode comes from the promoted filename" \
+    "nrt" "$(run_case "infer_mode 's3://b/mur/l4/25km/2026/$PROMOTED'")"
+assert_eq "...rea too" \
+    "rea" "$(run_case "infer_mode 's3://b/mur/l4/1km/2026/2026100809-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-rea.nc'")"
+assert_eq "a query string does not defeat it" \
+    "nrt" "$(run_case "infer_mode 's3://b/x/$PROMOTED?versionId=abc'")"
+
+assert_eq "both shapes agree on the day, so the item id is stable" \
+    "same" "$(run_case "
+        a=\$(cog_item_id '$PROMOTED1KM'); b=\$(cog_item_id '20261008090000-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-v02.0-fv04.1.nc')
+        [[ \"\$a\" == \"\$b\" ]] && echo same || echo \"differ: \$a vs \$b\"")"
+
+assert_eq "the promoted MUR25 name is still recognised as the coarse product" \
+    "25km" "$(run_case "granule_resolution '$PROMOTED'")"
+
+assert_eq "the promoted 1 km name is not mistaken for MUR25" \
+    "1km" "$(run_case "granule_resolution '$PROMOTED1KM'")"
+
 # --- STAC runs after the conversion, and never instead of it ---------------
 #
 # Ordering asserted on the source: metadata describing nothing is worse than

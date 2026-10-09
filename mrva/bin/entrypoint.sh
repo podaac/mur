@@ -350,9 +350,17 @@ write_stac() {
     # disagreement between the two should surface as a wrong id rather than be
     # papered over by recomputing the date we asked for.
     local base; base="$(basename "${one:-$p25}")"
-    local ts="${base:0:14}"
+    # The leading field, up to the first hyphen -- not a fixed 14-character
+    # slice. The slice is what broke the cog module: handed the promoted
+    # canonical name (2026100809-JPL-...), it took "2026100809-JPL" as a
+    # timestamp, failed the digit check and silently published nothing. These
+    # names are mrva's own output and are always YYYYMMDDHHMMSS, but a parser
+    # that fails loudly on a length it does not know beats one that depends
+    # on the length never changing.
+    local ts="${base%%-*}"
     if [[ ! "$ts" =~ ^[0-9]{14}$ ]]; then
-        echo "STAC: cannot read a timestamp from '$base'; skipping metadata" >&2
+        echo "STAC: cannot read a 14-digit timestamp from '$base'" >&2
+        echo "STAC: skipping metadata; the granules above are intact" >&2
         return 0
     fi
     local dt="${ts:0:4}-${ts:4:2}-${ts:6:2}T${ts:8:2}:${ts:10:2}:${ts:12:2}Z"

@@ -102,9 +102,36 @@ default_fields() {
 # agree on, so every identifier comes out of it rather than being passed in
 # and risking two spellings of the same day.
 
-# 20261006090000-JPL-L4_GHRSST-... -> 2026-10-06T09:00:00Z
+# TWO FILENAME SHAPES REACH THIS CONTAINER, and only one has seconds.
+#
+#   20261006090000-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-v02.0-fv04.1.nc
+#       what mrva writes: YYYYMMDDHHMMSS, no mode, a product version
+#   2026100809-JPL-L4_GHRSST-SSTfnd-MUR25-GLOB-nrt.nc
+#       the promoted canonical name (mur_maap/paths.py l4_filename):
+#       YYYYMMDDHH, mode present, no version
+#
+# The second is the one that actually arrives. run_mur_maap.py promotes each
+# granule to its canonical key and hands cog THAT href, in a full run as well
+# as under --execute cog -- so this only ever sees the ten-digit form.
+# Requiring fourteen digits meant every cog job logged
+#
+#     STAC: skipped -- cannot read a timestamp from '2026100809-JPL-...'
+#
+# produced its rasters, and published nothing. The rasters were fine, which
+# is why it took a grep of a job log to find: no error, just a collection
+# that never appeared.
 granule_datetime() {
-    local ts="${1:0:14}"
+    # The leading field, up to the first hyphen -- not a fixed slice, which
+    # is what silently took "2026100809-JPL" and called it a timestamp.
+    local ts="${1%%-*}"
+    case "${#ts}" in
+        14) ;;
+        10) ts="${ts}0000" ;;
+        # Date only. 09:00 UTC is the hour MUR's analysis is nominally valid
+        # at, and the hour both names above carry.
+        8)  ts="${ts}090000" ;;
+        *)  return 1 ;;
+    esac
     if [[ ! "$ts" =~ ^[0-9]{14}$ ]]; then
         return 1
     fi
@@ -118,10 +145,19 @@ granule_resolution() {
     esac
 }
 
-# Mode lives in the directory (.../279nrt/...), never in the filename, so it
-# cannot be recovered from the stem. Inferred here only so a hand-run without
-# --mode still records it; absence is reported, not guessed.
+# Mode, from whichever of the two shapes this href has.
+#
+# The promoted canonical name carries it outright (...-GLOB-nrt.nc). A raw
+# mrva output does not, but its DPS directory does (.../279nrt/...). Checked
+# in that order because the name is definite and the path is a heuristic.
+# Absence is reported, not guessed.
 infer_mode() {
+    local name="${1##*/}"
+    name="${name%%\?*}"
+    if [[ "$name" =~ -GLOB-(nrt|rea)\.nc$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return 0
+    fi
     if [[ "$1" =~ /[0-9]{3}(nrt|rea)/ ]]; then
         echo "${BASH_REMATCH[1]}"
     fi
