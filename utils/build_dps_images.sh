@@ -40,8 +40,8 @@
 #   ./utils/build_dps_images.sh --tag 2.0.0 --verify     # anonymous-pull check
 #
 #   ./utils/build_dps_images.sh --tag 2.0.1 --retag-base 2.0.0 --push
-#     For a release that changes ONLY the three text files this layer
-#     refreshes -- entrypoint.sh, localize.sh, maap_credentials.py. The
+#     For a release that changes ONLY the text files this layer refreshes --
+#     entrypoint.sh, localize.sh, maap_credentials.py, write_stac.py. The
 #     compiled MATLAB and Fortran are identical, so the base image is retagged
 #     rather than rebuilt, and no MATLAB licence is needed. If anything under
 #     src/ changed, do not use this: build the base properly with
