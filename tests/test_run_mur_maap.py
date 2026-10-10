@@ -1271,3 +1271,23 @@ def test_a_learned_module_gets_a_real_collection_url(orchestrator, caplog):
         orchestrator._report_stac(datetime.date(2026, 10, 8), "nrt")
     assert ("jleach_jpl__mur-mrva_1756__2.0.14/items/mur-l4-20261008-nrt"
             in caplog.text)
+
+
+def test_an_unknown_collection_is_omitted_rather_than_sent_empty(orchestrator):
+    """MAAP rejects a submission whose inputs do not match the declared ones,
+    so every key sent has to exist in the registered CWL. A blank one buys
+    nothing and adds a way to fail."""
+    assert "stac_collection" not in orchestrator._cog_args("s3://b/g.nc", "nrt")
+
+
+def test_a_known_collection_is_passed_to_cog(orchestrator):
+    """So the item can carry map and preview links, which the container
+    cannot build for itself -- the id is assigned at ingest."""
+    orchestrator._note_registered(
+        "s3://b/u/dps_output/mur-mrva_1756/2.0.16/2026/10/09/1/2/3/4/x.nc")
+    orchestrator.config.setdefault("maap", {})["workspace_root"] = \
+        "s3://maap-ops-workspace/jleach_jpl"
+    orchestrator.config["maap"]["algorithm_version"] = "2.0.16"
+    args = orchestrator._cog_args("s3://b/g.nc", "nrt")
+    # Learned from mrva, applied to cog: one suffix per deployment.
+    assert args["stac_collection"] == "jleach_jpl__mur-cog_1756__2.0.16"

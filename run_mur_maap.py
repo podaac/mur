@@ -470,6 +470,21 @@ class MAAPOrchestrator:
                       or ALGORITHM_VERSION)
         return stac.dps_collection_id(user, registered, version)
 
+    def _cog_args(self, granule_href: str, mode: str) -> Dict[str, str]:
+        """Inputs for one mur-cog job.
+
+        stac-collection is omitted rather than sent empty when the collection
+        id is unknown. MAAP matches submissions against the declared inputs
+        and rejects the whole thing on a mismatch, so every key sent is a key
+        that has to exist in the registered CWL; sending a blank one buys
+        nothing and adds a way to fail.
+        """
+        args = {"granule": granule_href, "mode": mode}
+        collection = self._published_collection("mur-cog")
+        if collection:
+            args["stac_collection"] = collection
+        return args
+
     def _report_stac(self, process_date: datetime.date, mode: str) -> None:
         """Print where this day's products are, or will be, in MAAP's STAC.
 
@@ -580,9 +595,7 @@ class MAAPOrchestrator:
         out = {}
         try:
             job = self.client.submit_job(
-                "mur-cog", {"granule": granule_href, "mode": mode,
-                            "stac_collection":
-                                self._published_collection("mur-cog")},
+                "mur-cog", self._cog_args(granule_href, mode),
                 tag=tags.job_tag("cog", process_date, mode,
                                  sensor=asset_prefix))
             self.client.wait_all([job])
@@ -1116,9 +1129,7 @@ class MAAPOrchestrator:
                         # (.../279nrt/...), and cog's STAC item would
                         # otherwise record the day with no indication of
                         # whether it is the interim or the final analysis.
-                        "mur-cog", {"granule": granule_href, "mode": mode,
-                                    "stac_collection":
-                                        self._published_collection("mur-cog")},
+                        "mur-cog", self._cog_args(granule_href, mode),
                         tag=tags.job_tag("cog", process_date, mode,
                                          sensor=asset_prefix))
                     self.client.wait_all([cog_job])
