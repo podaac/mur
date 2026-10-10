@@ -88,19 +88,30 @@ def items(collection_id, limit=500):
 
 
 def layers(collection_id, item):
-    """Every drawable asset of an item, as a map URL.
+    """Every drawable asset of an item, as links that show it.
 
-    Render parameters come off the asset's own `mur:render` block rather than
-    being re-derived here. Without an explicit rescale titiler stretches each
-    request to whatever range it sees, so the same field is drawn on a
-    different colour scale every day with nothing on screen saying so.
+    Render parameters are the item's own `mur:render` block OVERLAID with the
+    current table in mur_maap.stac. The stored block is a snapshot of what
+    the container knew when it ran, and a wrong one draws an unreadable
+    layer: items written before the scale/offset fix carry kelvin rescale
+    values against raw integer pixels, which clamps the whole globe to two
+    bands. Preferring current knowledge means this tool draws them correctly
+    today instead of after a rebuild and a re-run.
+
+    An unrecognised field keeps whatever it stored, which is the only thing
+    available for it.
     """
     out = {}
     for key, asset in sorted(item.get("assets", {}).items()):
         render = asset.get("mur:render")
-        if not render:
+        if not render or not asset.get("href"):
             continue
-        out[key] = stac.dps_map_url(collection_id, item["id"], key, **render)
+        render = dict(render, **stac.RENDER.get(key, {}))
+        out[key] = {
+            "map": stac.dps_map_url(collection_id, item["id"], key, **render),
+            "image": stac.dps_preview_url(collection_id, item["id"], key,
+                                          **render),
+        }
     return out
 
 
@@ -185,8 +196,10 @@ def main(argv=None) -> int:
             print(f"      browse  {item['browser']}")
             if not item["layers"]:
                 print(f"      data    {item['item']}")
-            for name, url in item["layers"].items():
-                print(f"      {name:7} {url}")
+            for name, urls in item["layers"].items():
+                print(f"      {name}")
+                print(f"        image {urls['image']}")
+                print(f"        map   {urls['map']}")
         print()
     return 0
 

@@ -244,6 +244,20 @@ def dps_tilejson(collection: str, item: str, asset: str, **render) -> str:
     return _item_route(collection, item, "tilejson.json", asset, **render)
 
 
+def dps_preview_url(collection: str, item: str, asset: str,
+                    size: int = 1024, **render) -> str:
+    """A plain PNG of one asset -- a link that shows the picture itself.
+
+    No slippy map, no JavaScript: paste it anywhere an image can go. Useful
+    for a quick eyeball, for a ticket, and for checking a layer renders at
+    all before wondering why a map looks wrong.
+    """
+    from urllib.parse import quote, urlencode
+    q = {"assets": asset, "max_size": size, **render}
+    return (f"{TITILER}/collections/{quote(collection)}/items/{quote(item)}"
+            f"/preview.png?{urlencode(q)}")
+
+
 def dps_map_url(collection: str, item: str, asset: str, **render) -> str:
     """A browser URL drawing one asset on a slippy map.
 
@@ -290,11 +304,39 @@ def titiler_viewer(cog_href: str, **render) -> str:
 # comparable between days. The ranges are the GHRSST valid ranges in the
 # granule's own units (Kelvin for sst, Kelvin anomaly, fraction, flag).
 RENDER = {
-    "sst":  {"rescale": "271.15,310.15", "colormap_name": "thermal"},
-    "anom": {"rescale": "-5,5", "colormap_name": "coolwarm"},
-    "err":  {"rescale": "0,2", "colormap_name": "magma"},
-    "ice":  {"rescale": "0,1", "colormap_name": "ice"},
-    "mask": {"rescale": "1,16", "colormap_name": "tab10"},
+    # unscale is the load-bearing one, and its absence is what made every
+    # layer unreadable.
+    #
+    # GHRSST packs each field as a scaled integer -- analysed_sst is int16
+    # with scale_factor 0.001 and add_offset 298.15 -- and gdal_translate
+    # writes the RAW integers, carrying scale/offset across as band metadata
+    # rather than applying them. So the file holds -26800..9207 while these
+    # rescale values are in kelvin. Every pixel below 271.15 clamped to the
+    # bottom of the ramp and the few raw DN above 310 clamped to the top,
+    # drawing the globe as two bright bands on a dark field. `unscale=true`
+    # makes titiler apply the band's own scale/offset first, which turns
+    # -26800..9207 into 271.35..307.36 K.
+    #
+    # The alternative -- gdal_translate -unscale -ot Float32 -- bakes the
+    # conversion into the file and quadruples the 1 km product to ~4.8 GiB
+    # per field. Not worth it to avoid one query parameter.
+    #
+    # rescale itself matters nearly as much: without an explicit range titiler
+    # stretches each request to whatever it happens to see, so a field is
+    # drawn on a different colour scale every day and nothing on screen says
+    # so. The ranges below are fixed physical ones in the granule's own units.
+    "sst":  {"rescale": "271.15,310.15", "colormap_name": "thermal",
+             "unscale": "true"},
+    "anom": {"rescale": "-5,5", "colormap_name": "coolwarm",
+             "unscale": "true"},
+    # 0,1 rather than 0,2: measured against a real granule the analysis error
+    # spanned 0.800..0.810 K, so a 0..2 ramp put the entire field in one
+    # colour. Still a fixed range, so days stay comparable.
+    "err":  {"rescale": "0,1", "colormap_name": "magma", "unscale": "true"},
+    "ice":  {"rescale": "0,1", "colormap_name": "ice", "unscale": "true"},
+    # Categorical: GHRSST packs water/land/lake/ice as bit flags, and a
+    # continuous ramp over them is approximate by nature. Observed 1..9.
+    "mask": {"rescale": "1,16", "colormap_name": "tab10", "unscale": "true"},
 }
 
 

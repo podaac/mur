@@ -429,6 +429,43 @@
     </table>
     </div>
 
+    <h4>The COGs hold raw integers, so every render must unscale</h4>
+
+    <p>GHRSST packs each field as a scaled integer &mdash;
+    <code>analysed_sst</code> is <code>int16</code> with
+    <code>scale_factor&nbsp;0.001</code> and
+    <code>add_offset&nbsp;298.15</code> &mdash; and
+    <code>gdal_translate -of COG</code> writes the <em>raw</em> integers,
+    carrying scale and offset across as band metadata rather than applying
+    them. Measured on a real output:</p>
+
+    <pre><code>dtype int16   scale 0.001   offset 298.15
+raw pixels   -26800 .. 9207
+unscaled     271.35 .. 307.36 K</code></pre>
+
+    <p>The render parameters are in kelvin, so without
+    <code>unscale=true</code> every pixel below 271.15 clamps to the bottom
+    of the colour ramp and the few raw values above 310 clamp to the top. The
+    globe draws as two bright bands on a dark field &mdash; which is what the
+    STAC browser showed, while pasting the object URL into titiler's own
+    viewer looked fine, because that viewer auto-stretches to the full
+    <code>int16</code> range instead of using the catalogue's parameters.</p>
+
+    <p>The alternative is <code>gdal_translate -unscale -ot Float32</code>,
+    which bakes the conversion into the file and quadruples the 1&nbsp;km
+    product to roughly 4.8&nbsp;GiB per field. Not worth it to avoid one
+    query parameter.</p>
+
+    <div class="note">
+      <p><strong>A data observation, not a render problem.</strong>
+      <code>analysis_error</code> on the MUR25 product has exactly
+      <em>two</em> distinct values &mdash; 0.80&nbsp;K over 340,992 pixels and
+      0.81&nbsp;K over 9,253. No colour scale makes that informative, and a
+      flat layer is the field telling the truth. An L4 analysis error would
+      normally vary with observation density, so this is worth understanding
+      before anyone reads meaning into the layer.</p>
+    </div>
+
     <h4>A raster item must not hold a non-raster asset</h4>
 
     <p>Verified against the live service on 2026-10-08. For an Item holding

@@ -290,3 +290,44 @@ def test_the_user_catalog_url_needs_no_version():
     fork a new collection every time."""
     url = stac.dps_user_catalog("jleach_jpl")
     assert "2.0" not in url and "mur-" not in url
+
+
+# --- scaled integers ---------------------------------------------------------
+
+def test_every_render_unscales_because_the_cogs_hold_raw_integers():
+    """GHRSST packs each field as a scaled integer and gdal_translate keeps it.
+
+    analysed_sst is int16 with scale_factor 0.001 and add_offset 298.15, and
+    `gdal_translate -of COG` writes the RAW integers, carrying scale/offset
+    across as band metadata rather than applying them. Measured on a real
+    output: pixels run -26800..9207 while these rescale values are kelvin.
+
+    Without unscale every pixel below 271.15 clamps to the bottom of the ramp
+    and the handful of raw DN above 310 clamp to the top, drawing the globe
+    as two bright bands on a dark field. That is exactly what the STAC
+    browser showed.
+    """
+    for field, render in stac.RENDER.items():
+        assert render.get("unscale") == "true", field
+
+
+def test_sst_is_rescaled_over_a_range_the_data_actually_occupies():
+    """Measured unscaled range of a real granule: 271.35..307.36 K."""
+    low, high = (float(x) for x in stac.RENDER["sst"]["rescale"].split(","))
+    assert low <= 271.35 and high >= 307.36
+
+
+def test_the_error_range_is_not_so_wide_the_field_vanishes():
+    """analysis_error measured 0.800..0.810 K on a real granule -- only two
+    distinct values. A 0..2 ramp put the entire field in one colour. 0..1 is
+    still fixed, so days stay comparable, and shows what little there is."""
+    assert stac.RENDER["err"]["rescale"] == "0,1"
+
+
+def test_a_preview_url_is_a_plain_image_not_a_map():
+    """A link that shows the picture itself, for a ticket or a quick look."""
+    url = stac.dps_preview_url("c", "i", "sst", **stac.RENDER["sst"])
+    assert "/items/i/preview.png?" in url
+    assert "assets=sst" in url
+    assert "unscale=true" in url
+    assert "map.html" not in url
