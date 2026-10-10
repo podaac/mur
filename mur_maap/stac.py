@@ -105,6 +105,19 @@ def registered_algorithm(dps_href: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def registration_suffix(registered: str) -> str:
+    """`mur-mrva_1756` -> `_1756`; `mur-cog` -> `""`.
+
+    MAAP allocates one suffix per deployment and uses it for every module --
+    mur-landice_1756, mur-mrva_1756, mur-cog_1756 all share it, as their DPS
+    output prefixes show. So learning it from any one job's href is enough to
+    name every other module's collection, which is what lets the orchestrator
+    hand cog its published collection id without an API call.
+    """
+    match = re.search(r"(_\d+)$", registered)
+    return match.group(1) if match else ""
+
+
 def module_of(registered: str) -> str:
     """`mur-mrva_1756` -> `mur-mrva`, the process id the pipeline submits."""
     return re.sub(r"_\d+$", "", registered)
@@ -303,40 +316,47 @@ def titiler_viewer(cog_href: str, **render) -> str:
 # default, so an SST field drawn without it looks plausible and is not
 # comparable between days. The ranges are the GHRSST valid ranges in the
 # granule's own units (Kelvin for sst, Kelvin anomaly, fraction, flag).
+# Render hints per field, keyed by the asset name the COG module uses.
+#
+# NO unscale HERE. The browse rasters hold real units -- celsius for SST,
+# kelvin-equivalent differences for the anomaly and the error, a fraction for
+# ice -- because the COG step converts them rather than passing GHRSST's
+# packed integers through. An earlier generation of these files held raw
+# int16 and needed unscale=true; items written by those builds carry it in
+# their own stored render block, which is how a reader tells them apart.
+#
+# rescale still matters: without an explicit range titiler stretches each
+# request to whatever it happens to see, so a field is drawn on a different
+# colour scale every day and nothing on screen says so.
 RENDER = {
-    # unscale is the load-bearing one, and its absence is what made every
-    # layer unreadable.
+    # Measured on a real granule: -1.8 .. 34.2 C.
     #
-    # GHRSST packs each field as a scaled integer -- analysed_sst is int16
-    # with scale_factor 0.001 and add_offset 298.15 -- and gdal_translate
-    # writes the RAW integers, carrying scale/offset across as band metadata
-    # rather than applying them. So the file holds -26800..9207 while these
-    # rescale values are in kelvin. Every pixel below 271.15 clamped to the
-    # bottom of the ramp and the few raw DN above 310 clamped to the top,
-    # drawing the globe as two bright bands on a dark field. `unscale=true`
-    # makes titiler apply the band's own scale/offset first, which turns
-    # -26800..9207 into 271.35..307.36 K.
-    #
-    # The alternative -- gdal_translate -unscale -ot Float32 -- bakes the
-    # conversion into the file and quadruples the 1 km product to ~4.8 GiB
-    # per field. Not worth it to avoid one query parameter.
-    #
-    # rescale itself matters nearly as much: without an explicit range titiler
-    # stretches each request to whatever it happens to see, so a field is
-    # drawn on a different colour scale every day and nothing on screen says
-    # so. The ranges below are fixed physical ones in the granule's own units.
-    "sst":  {"rescale": "271.15,310.15", "colormap_name": "thermal",
-             "unscale": "true"},
-    "anom": {"rescale": "-5,5", "colormap_name": "coolwarm",
-             "unscale": "true"},
-    # 0,1 rather than 0,2: measured against a real granule the analysis error
-    # spanned 0.800..0.810 K, so a 0..2 ramp put the entire field in one
-    # colour. Still a fixed range, so days stay comparable.
-    "err":  {"rescale": "0,1", "colormap_name": "magma", "unscale": "true"},
-    "ice":  {"rescale": "0,1", "colormap_name": "ice", "unscale": "true"},
-    # Categorical: GHRSST packs water/land/lake/ice as bit flags, and a
-    # continuous ramp over them is approximate by nature. Observed 1..9.
-    "mask": {"rescale": "1,16", "colormap_name": "tab10", "unscale": "true"},
+    # -2 rather than 0 as the floor, because seawater freezes near -1.8 and
+    # the polar ocean really does sit there; a 0 C floor would clamp a
+    # genuine part of the field flat. 35 rather than 34 at the top for the
+    # same reason in reverse -- 34 was the first choice and a test caught
+    # that it cut off the warmest water by two tenths of a degree.
+    "sst":  {"rescale": "-2,35", "colormap_name": "thermal"},
+    "anom": {"rescale": "-5,5", "colormap_name": "coolwarm"},
+    # Measured 0.800..0.810 K on a real granule -- only two distinct values,
+    # so a 0..2 ramp put the whole field in one colour. 0..1 is still fixed,
+    # so days stay comparable.
+    "err":  {"rescale": "0,1", "colormap_name": "magma"},
+    "ice":  {"rescale": "0,1", "colormap_name": "ice"},
+    # Categorical: GHRSST packs water/land/lake/ice as bit flags, this one is
+    # left in its native integer type, and a continuous ramp over flags is
+    # approximate by nature. Observed 1..9.
+    "mask": {"rescale": "1,16", "colormap_name": "tab10"},
+}
+
+# What a pixel means, for the asset metadata. Browse rasters are useless if a
+# reader has to guess whether a number is kelvin, celsius or a packed count.
+UNITS = {
+    "sst":  "degree_Celsius",
+    "anom": "degree_Celsius",
+    "err":  "degree_Celsius",
+    "ice":  "1",
+    "mask": "flag",
 }
 
 

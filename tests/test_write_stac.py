@@ -245,7 +245,7 @@ def test_a_cog_asset_carries_an_explicit_rescale(tmp_path):
          "--datetime", "2026-10-06T09:00:00Z", "--asset", f"sst={asset}")
     item = json.loads((tmp_path / "mur-l4-browse" / "mur-cog-20261006-1km"
                        / "mur-cog-20261006-1km.json").read_text())
-    assert item["assets"]["sst"]["mur:render"]["rescale"] == "271.15,310.15"
+    assert item["assets"]["sst"]["mur:render"]["rescale"] == "-2,35"
 
 
 def test_the_render_table_matches_the_client_side_copy():

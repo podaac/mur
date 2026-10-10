@@ -81,50 +81,45 @@ NETCDF_TYPE = "application/x-netcdf"
 
 # Render hints per field, keyed by the asset name the COG module uses.
 #
-# rescale is the load-bearing one: titiler stretches each request to the data
-# range it happens to see, so a field drawn without an explicit range looks
-# plausible and is not comparable between days or between tiles. These are the
-# GHRSST valid ranges in the granule's own units -- Kelvin for sst, Kelvin for
-# the anomaly, fraction for ice, flag values for mask.
+# NO unscale HERE. The browse rasters hold real units -- celsius for SST,
+# kelvin-equivalent differences for the anomaly and the error, a fraction for
+# ice -- because the COG step converts them rather than passing GHRSST's
+# packed integers through. An earlier generation of these files held raw
+# int16 and needed unscale=true; items written by those builds carry it in
+# their own stored render block, which is how a reader tells them apart.
 #
-# This table is duplicated in mur_maap/stac.py, which builds viewer URLs on
-# the client side. tests/test_write_stac.py asserts the two agree; a parity
-# test is preferred here over an import because this file has to run inside a
-# container that cannot see the mur_maap package.
+# rescale still matters: without an explicit range titiler stretches each
+# request to whatever it happens to see, so a field is drawn on a different
+# colour scale every day and nothing on screen says so.
 RENDER = {
-    # unscale is the load-bearing one, and its absence is what made every
-    # layer unreadable.
+    # Measured on a real granule: -1.8 .. 34.2 C.
     #
-    # GHRSST packs each field as a scaled integer -- analysed_sst is int16
-    # with scale_factor 0.001 and add_offset 298.15 -- and gdal_translate
-    # writes the RAW integers, carrying scale/offset across as band metadata
-    # rather than applying them. So the file holds -26800..9207 while these
-    # rescale values are in kelvin. Every pixel below 271.15 clamped to the
-    # bottom of the ramp and the few raw DN above 310 clamped to the top,
-    # drawing the globe as two bright bands on a dark field. `unscale=true`
-    # makes titiler apply the band's own scale/offset first, which turns
-    # -26800..9207 into 271.35..307.36 K.
-    #
-    # The alternative -- gdal_translate -unscale -ot Float32 -- bakes the
-    # conversion into the file and quadruples the 1 km product to ~4.8 GiB
-    # per field. Not worth it to avoid one query parameter.
-    #
-    # rescale itself matters nearly as much: without an explicit range titiler
-    # stretches each request to whatever it happens to see, so a field is
-    # drawn on a different colour scale every day and nothing on screen says
-    # so. The ranges below are fixed physical ones in the granule's own units.
-    "sst":  {"rescale": "271.15,310.15", "colormap_name": "thermal",
-             "unscale": "true"},
-    "anom": {"rescale": "-5,5", "colormap_name": "coolwarm",
-             "unscale": "true"},
-    # 0,1 rather than 0,2: measured against a real granule the analysis error
-    # spanned 0.800..0.810 K, so a 0..2 ramp put the entire field in one
-    # colour. Still a fixed range, so days stay comparable.
-    "err":  {"rescale": "0,1", "colormap_name": "magma", "unscale": "true"},
-    "ice":  {"rescale": "0,1", "colormap_name": "ice", "unscale": "true"},
-    # Categorical: GHRSST packs water/land/lake/ice as bit flags, and a
-    # continuous ramp over them is approximate by nature. Observed 1..9.
-    "mask": {"rescale": "1,16", "colormap_name": "tab10", "unscale": "true"},
+    # -2 rather than 0 as the floor, because seawater freezes near -1.8 and
+    # the polar ocean really does sit there; a 0 C floor would clamp a
+    # genuine part of the field flat. 35 rather than 34 at the top for the
+    # same reason in reverse -- 34 was the first choice and a test caught
+    # that it cut off the warmest water by two tenths of a degree.
+    "sst":  {"rescale": "-2,35", "colormap_name": "thermal"},
+    "anom": {"rescale": "-5,5", "colormap_name": "coolwarm"},
+    # Measured 0.800..0.810 K on a real granule -- only two distinct values,
+    # so a 0..2 ramp put the whole field in one colour. 0..1 is still fixed,
+    # so days stay comparable.
+    "err":  {"rescale": "0,1", "colormap_name": "magma"},
+    "ice":  {"rescale": "0,1", "colormap_name": "ice"},
+    # Categorical: GHRSST packs water/land/lake/ice as bit flags, this one is
+    # left in its native integer type, and a continuous ramp over flags is
+    # approximate by nature. Observed 1..9.
+    "mask": {"rescale": "1,16", "colormap_name": "tab10"},
+}
+
+# What a pixel means, for the asset metadata. Browse rasters are useless if a
+# reader has to guess whether a number is kelvin, celsius or a packed count.
+UNITS = {
+    "sst":  "degree_Celsius",
+    "anom": "degree_Celsius",
+    "err":  "degree_Celsius",
+    "ice":  "1",
+    "mask": "flag",
 }
 
 # Why the granules and the COGs are never assets of the same item:
@@ -218,11 +213,14 @@ COLLECTIONS = {
 ASSET_TITLES = {
     "data": "MUR L4 SST granule (1 km)",
     "data25": "MUR25 L4 SST granule (0.25 deg)",
-    "sst": "Analysed SST",
-    "anom": "SST anomaly",
-    "err": "Analysis error",
+    # The units are in the titles because a browse layer is read at a glance,
+    # and "Analysed SST" alone leaves a viewer guessing whether 15 means
+    # celsius, kelvin or a packed count. These files hold celsius.
+    "sst": "Analysed SST (degC)",
+    "anom": "SST anomaly (degC)",
+    "err": "Analysis error (degC)",
     "ice": "Sea ice fraction",
-    "mask": "Land/sea/ice mask",
+    "mask": "Land/sea/ice mask (flags)",
 }
 
 
@@ -263,8 +261,64 @@ def _roles(key, relpath):
     return ["data"]
 
 
+# MAAP's tiler, which serves anything in the DPS STAC.
+TITILER = "https://titiler-dps-stac.maap-project.org"
+TMS = "WebMercatorQuad"
+
+
+def viewer_links(collection, item_id, asset_key, render):
+    """Map and image URLs for one asset of one published item.
+
+    `collection` is the id MAAP assigns at ingest, which this container has no
+    way to know: it is <username>__<registered algorithm>__<version>, the
+    registered name carries a suffix MAAP allocates, and none of that is
+    visible from inside a job. The orchestrator knows it and passes it in; if
+    it did not, these are left out rather than guessed, because a link that
+    looks right and 404s is worse than no link.
+    """
+    from urllib.parse import quote, urlencode
+    stem = f"{TITILER}/collections/{quote(collection)}/items/{quote(item_id)}"
+    query = urlencode({"assets": asset_key, **render})
+    return {
+        "map": f"{stem}/{TMS}/map.html?{query}",
+        "image": f"{stem}/preview.png?{urlencode({'assets': asset_key, 'max_size': 1024, **render})}",
+    }
+
+
+def preview_links(published_collection, item_id, asset_keys):
+    """Viewer entries for the item's `links` array.
+
+    LINKS, NOT ASSETS, and the distinction is load-bearing. titiler computes
+    an item's zoom bounds across all of its ASSETS and fails on the first one
+    it cannot open -- verified against the live service, where an item
+    holding a GeoTIFF beside a Zarr would not tile for any value of
+    `assets=`, including the GeoTIFF's own key. Adding a PNG and an HTML page
+    as assets would reintroduce exactly that, breaking the tiling this is
+    meant to make easier. Nothing reads `links` when tiling, so they are
+    safe there, and a STAC browser renders them as the clickable links they
+    are.
+
+    One pair for the field a reader wants first, rather than a pair per
+    field: MUR25 carries five, and ten more entries would bury the data.
+    Every field's own URLs are on its asset as mur:map_url / mur:image_url.
+    """
+    primary = next((k for k in ("sst", "anom", "ice", "err", "mask")
+                    if k in asset_keys and k in RENDER), None)
+    if not (published_collection and primary):
+        return []
+    urls = viewer_links(published_collection, item_id, primary,
+                        RENDER[primary])
+    label = ASSET_TITLES.get(primary, primary)
+    return [
+        {"rel": "preview", "href": urls["image"], "type": "image/png",
+         "title": f"Preview image ({label})"},
+        {"rel": "alternate", "href": urls["map"], "type": "text/html",
+         "title": f"Interactive map ({label})"},
+    ]
+
+
 def build_item(item_id, collection, dt, assets, properties=None,
-               depth=2):
+               depth=2, published_collection=""):
     """One STAC Item.
 
     `assets` maps asset key -> path relative to the output directory.
@@ -290,6 +344,13 @@ def build_item(item_id, collection, dt, assets, properties=None,
             # units to draw the layer correctly. mur_maap/stac.py reads this
             # back rather than re-deriving it.
             asset["mur:render"] = dict(RENDER[key])
+        if key in UNITS:
+            asset["mur:units"] = UNITS[key]
+        if published_collection and key in RENDER:
+            links = viewer_links(published_collection, item_id, key,
+                                 RENDER[key])
+            asset["mur:map_url"] = links["map"]
+            asset["mur:image_url"] = links["image"]
         out[key] = asset
 
     return {
@@ -317,7 +378,7 @@ def build_item(item_id, collection, dt, assets, properties=None,
              "type": "application/json"},
             {"rel": "self", "href": "%s.json" % item_id,
              "type": "application/geo+json"},
-        ],
+        ] + preview_links(published_collection, item_id, out),
     }
 
 
@@ -502,6 +563,13 @@ def main(argv=None):
                    dest="dt", metavar="ISO8601")
     p.add_argument("--asset", action="append", default=[], metavar="KEY=PATH",
                    help="path is relative to --output-dir; repeatable")
+    p.add_argument("--stac-collection", default="", metavar="ID",
+                   help="The collection id MAAP will assign "
+                        "(<user>__<algorithm>__<version>). When given, each "
+                        "renderable asset gains map and image links. The "
+                        "container cannot work this out for itself -- the id "
+                        "is assigned at ingest -- so the caller supplies it "
+                        "or the links are omitted.")
     p.add_argument("--property", action="append", default=[], dest="properties",
                    metavar="KEY=VALUE",
                    help="KEY=VALUE (scalars cast), or KEY:=<json> for an "
@@ -549,7 +617,8 @@ def main(argv=None):
               file=sys.stderr)
 
     item = build_item(args.item_id, args.collection, args.dt, assets,
-                      properties)
+                      properties,
+                      published_collection=args.stac_collection)
     written = write_catalog(
         args.output_dir, args.collection,
         args.collection_title or args.collection,

@@ -106,7 +106,17 @@ def layers(collection_id, item):
         render = asset.get("mur:render")
         if not render or not asset.get("href"):
             continue
-        render = dict(render, **stac.RENDER.get(key, {}))
+        if asset.get("mur:units"):
+            # The raster holds real units, so the current table applies: it
+            # has the right ranges and, importantly, no unscale.
+            render = dict(render, **stac.RENDER.get(key, {}))
+        else:
+            # Written before the COG step converted units, so the file holds
+            # GHRSST's packed integers and titiler has to be told to apply
+            # the band's scale and offset. Its own stored block is otherwise
+            # right for it -- the ranges are in kelvin, matching the data --
+            # and overlaying today's celsius ranges would break it.
+            render = dict(render, unscale="true")
         out[key] = {
             "map": stac.dps_map_url(collection_id, item["id"], key, **render),
             "image": stac.dps_preview_url(collection_id, item["id"], key,

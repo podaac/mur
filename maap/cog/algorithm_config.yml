@@ -40,7 +40,13 @@ run_command: /opt/cog/bin/entrypoint.sh
 # the point of not running this inside mrva.
 ram_min: 4096
 cores_min: 2
-outdir_max: 4096   # two 1 km fields at ~400 MB, with room for all five of MUR25
+# Raised from 4096 when the rasters became Float32 celsius rather than
+# GHRSST's packed int16. Real units mean no consumer has to know about
+# scale_factor and add_offset to read a temperature, at approximately twice
+# the bytes -- DEFLATE with PREDICTOR=3 recovers most of what the wider type
+# costs, but not all of it. Two 1 km fields plus overviews is the sizing
+# case; MUR25 is 1250x smaller and never the constraint.
+outdir_max: 8192
 
 inputs:
   - name: granule
@@ -56,6 +62,17 @@ inputs:
       default from the product: sst,anom for the 1 km granule, where each
       field is ~400 MB compressed, and all five for MUR25, where they are
       trivial.
+    type: string?
+    default: ""
+  - name: stac-collection
+    label: Published STAC collection
+    doc: >
+      Optional. The collection id MAAP assigns at ingest,
+      <username>__<algorithm>__<version>. Given it, each item gains map and
+      preview links pointing at titiler. A container cannot work this out for
+      itself -- the id is assigned after the job ends, and the registered
+      algorithm name carries a suffix MAAP allocates -- so the orchestrator
+      passes it or the links are left out.
     type: string?
     default: ""
   - name: mode

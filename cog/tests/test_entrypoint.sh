@@ -52,13 +52,13 @@ assert_eq "granule (the localized name) must NOT look like MUR25" \
 
 # --- subdataset and resampling per field -----------------------------------
 assert_eq "sst maps to analysed_sst, averaged" \
-    "analysed_sst AVERAGE" "$(run_case "field_spec sst")"
+    "analysed_sst AVERAGE celsius" "$(run_case "field_spec sst")"
 
 assert_eq "ice uses NEAREST -- averaging a fraction invents values" \
-    "sea_ice_fraction NEAREST" "$(run_case "field_spec ice")"
+    "sea_ice_fraction NEAREST physical" "$(run_case "field_spec ice")"
 
 assert_eq "mask uses NEAREST for the same reason" \
-    "mask NEAREST" "$(run_case "field_spec mask")"
+    "mask NEAREST raw" "$(run_case "field_spec mask")"
 
 assert_eq "an unknown field is rejected, not guessed" \
     "1" "$(run_case "field_spec bogus >/dev/null 2>&1; echo \$?")"
@@ -155,6 +155,67 @@ assert_eq "the promoted MUR25 name is still recognised as the coarse product" \
 
 assert_eq "the promoted 1 km name is not mistaken for MUR25" \
     "1km" "$(run_case "granule_resolution '$PROMOTED1KM'")"
+
+# --- unit conversion: the COGs carry celsius, not packed integers ----------
+#
+# A stub gdalinfo stands in for the real one, which is not installed here.
+# It returns exactly what a production granule reports for each field, so the
+# arithmetic under test is the arithmetic that will run.
+STUB_DIR="$(mktemp -d)"
+cat > "$STUB_DIR/gdalinfo" <<'STUB'
+#!/bin/bash
+# Last argument is NETCDF:"file":var -- key off the variable name.
+case "${!#}" in
+  *analysed_sst)     echo '{"bands":[{"type":"Int16","scale":0.001,"offset":298.15,"noDataValue":-32768}]}' ;;
+  *sst_anomaly)      echo '{"bands":[{"type":"Int16","scale":0.001,"offset":0.0,"noDataValue":-32768}]}' ;;
+  *sea_ice_fraction) echo '{"bands":[{"type":"Int8","scale":0.01,"offset":0.0,"noDataValue":-128}]}' ;;
+  *no_scale)         echo '{"bands":[{"type":"Float64"}]}' ;;
+  *) echo '{"bands":[{"type":"Int16","scale":1.0,"offset":0.0}]}' ;;
+esac
+STUB
+chmod +x "$STUB_DIR/gdalinfo"
+
+stub_case() { PATH="$STUB_DIR:$PATH" bash -c "source '$ENTRYPOINT' 2>/dev/null; $1"; }
+
+# 298.15 K offset - 273.15 = 25.0 C at raw 0; 0.001 C per count.
+assert_eq "sst maps the whole int16 domain onto celsius" \
+    "-ot Float32 -scale -32768 32767 -7.768 57.767 -a_nodata -7.768" \
+    "$(stub_case "scale_args g.nc analysed_sst celsius")"
+
+# An anomaly is a DIFFERENCE, so kelvin and celsius are the same number and
+# subtracting 273.15 would be wrong.
+assert_eq "an anomaly is scaled but not shifted" \
+    "-ot Float32 -scale -32768 32767 -32.768 32.767 -a_nodata -32.768" \
+    "$(stub_case "scale_args g.nc sst_anomaly physical")"
+
+assert_eq "ice uses the int8 domain, not int16" \
+    "-ot Float32 -scale -128 127 -1.28 1.27 -a_nodata -1.28" \
+    "$(stub_case "scale_args g.nc sea_ice_fraction physical")"
+
+# mask is a bit field. Converting flags to float would be nonsense, so it is
+# the one field left exactly as stored.
+assert_eq "mask is not converted at all" \
+    "" "$(stub_case "scale_args g.nc mask raw")"
+
+assert_eq "an unrecognised pixel type converts nothing rather than guessing" \
+    "" "$(stub_case "scale_args g.nc no_scale physical")"
+
+assert_eq "sst is declared celsius in the field table" \
+    "celsius" "$(run_case "field_spec sst | cut -d' ' -f3")"
+assert_eq "...and mask raw" \
+    "raw" "$(run_case "field_spec mask | cut -d' ' -f3")"
+
+# The nodata value is the fill mapped through the same function, so fill
+# pixels land on it whether or not GDAL treats them specially.
+assert_eq "nodata is the fill value put through the same linear map" \
+    "match" \
+    "$(stub_case "
+        a=\$(scale_args g.nc analysed_sst celsius)
+        dstmin=\$(echo \"\$a\" | awk '{print \$6}')
+        nod=\$(echo \"\$a\" | awk '{print \$9}')
+        [[ \"\$dstmin\" == \"\$nod\" ]] && echo match || echo \"differ: \$dstmin vs \$nod\"")"
+
+rm -rf "$STUB_DIR"
 
 # --- STAC runs after the conversion, and never instead of it ---------------
 #

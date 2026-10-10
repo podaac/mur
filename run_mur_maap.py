@@ -285,6 +285,8 @@ class MAAPOrchestrator:
         # part of the STAC collection id -- so it is read off a path rather
         # than guessed, and rather than costing an API call on the run path.
         self._registered: Dict[str, str] = {}
+        # The registration suffix, shared by every module in a deployment.
+        self._suffix = ""
 
     def get_reference_today(self) -> datetime.date:
         return self._today_fn()
@@ -433,12 +435,40 @@ class MAAPOrchestrator:
         return root.rsplit("/", 1)[-1] if "/" in root else ""
 
     def _note_registered(self, href: Optional[str]) -> None:
-        """Learn a module's registered algorithm name from a DPS href."""
+        """Learn a module's registered algorithm name from a DPS href.
+
+        One module teaches all of them: MAAP allocates one registration
+        suffix per deployment and applies it to every algorithm, so seeing
+        mur-mrva_1756 is enough to name mur-cog_1756 too.
+        """
         if not href:
             return
         name = stac.registered_algorithm(href)
-        if name:
-            self._registered[stac.module_of(name)] = name
+        if not name:
+            return
+        self._registered[stac.module_of(name)] = name
+        suffix = stac.registration_suffix(name)
+        if suffix:
+            self._suffix = suffix
+
+    def _published_collection(self, module: str) -> str:
+        """The collection id MAAP will assign to `module`, or "" if unknown.
+
+        Empty is a real answer and the caller must treat it as one: a link
+        built from a guessed suffix looks right and 404s, which is worse than
+        no link at all.
+        """
+        user = self.username
+        if not user:
+            return ""
+        registered = self._registered.get(module)
+        if not registered:
+            if not self._suffix:
+                return ""
+            registered = f"{module}{self._suffix}"
+        version = str(self.config.get("maap", {}).get("algorithm_version")
+                      or ALGORITHM_VERSION)
+        return stac.dps_collection_id(user, registered, version)
 
     def _report_stac(self, process_date: datetime.date, mode: str) -> None:
         """Print where this day's products are, or will be, in MAAP's STAC.
@@ -470,15 +500,14 @@ class MAAPOrchestrator:
 
         logger.info("    MAAP STAC (%s):", stac.DPS_STAC)
         for label, module, item, field in wanted:
-            registered = self._registered.get(module)
-            if not registered:
-                # No DPS href was seen for this module, so its registered
-                # name is unknown. Saying so beats printing a URL built from
-                # a guessed suffix, which looks right and 404s.
-                logger.info("      %-12s unknown collection (no %s output "
-                            "seen this run)", label, module)
+            collection = self._published_collection(module)
+            if not collection:
+                # Nothing this run has seen names the registration suffix, so
+                # the id is unknown. Saying so beats printing a URL built
+                # from a guess, which looks right and 404s.
+                logger.info("      %-12s unknown collection (no DPS output "
+                            "seen this run)", label)
                 continue
-            collection = stac.dps_collection_id(user, registered, version)
             if field:
                 logger.info("      %-12s %s", label, stac.dps_map_url(
                     collection, item, field, **stac.RENDER[field]))
@@ -551,7 +580,9 @@ class MAAPOrchestrator:
         out = {}
         try:
             job = self.client.submit_job(
-                "mur-cog", {"granule": granule_href, "mode": mode},
+                "mur-cog", {"granule": granule_href, "mode": mode,
+                            "stac_collection":
+                                self._published_collection("mur-cog")},
                 tag=tags.job_tag("cog", process_date, mode,
                                  sensor=asset_prefix))
             self.client.wait_all([job])
@@ -1085,7 +1116,9 @@ class MAAPOrchestrator:
                         # (.../279nrt/...), and cog's STAC item would
                         # otherwise record the day with no indication of
                         # whether it is the interim or the final analysis.
-                        "mur-cog", {"granule": granule_href, "mode": mode},
+                        "mur-cog", {"granule": granule_href, "mode": mode,
+                                    "stac_collection":
+                                        self._published_collection("mur-cog")},
                         tag=tags.job_tag("cog", process_date, mode,
                                          sensor=asset_prefix))
                     self.client.wait_all([cog_job])

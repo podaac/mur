@@ -429,32 +429,60 @@
     </table>
     </div>
 
-    <h4>The COGs hold raw integers, so every render must unscale</h4>
+    <h4>The browse rasters hold celsius, not GHRSST's packed integers</h4>
 
-    <p>GHRSST packs each field as a scaled integer &mdash;
+    <p>GHRSST packs every field as a scaled integer &mdash;
     <code>analysed_sst</code> is <code>int16</code> with
     <code>scale_factor&nbsp;0.001</code> and
     <code>add_offset&nbsp;298.15</code> &mdash; and
-    <code>gdal_translate -of COG</code> writes the <em>raw</em> integers,
-    carrying scale and offset across as band metadata rather than applying
-    them. Measured on a real output:</p>
+    <code>gdal_translate</code> writes those raw integers through, carrying
+    scale and offset across as metadata rather than applying them. The first
+    generation of these COGs did exactly that, and the result was a file
+    whose pixels, histogram, statistics and pixel-inspect tools all reported
+    numbers like <code>-26800</code>. Every consumer then had to know to ask
+    for unscaling, and the catalogue's render parameters &mdash; which were
+    in kelvin &mdash; clamped the whole globe into two bright bands.</p>
 
-    <pre><code>dtype int16   scale 0.001   offset 298.15
-raw pixels   -26800 .. 9207
-unscaled     271.35 .. 307.36 K</code></pre>
+    <p>So the COG step now converts. The browse rasters hold
+    <code>Float32</code> degrees celsius, and the netCDF granule remains the
+    archival product in its original packing for anyone who wants the source
+    values. No <code>unscale</code> anywhere, and a number read out of one of
+    these files is a temperature.</p>
 
-    <p>The render parameters are in kelvin, so without
-    <code>unscale=true</code> every pixel below 271.15 clamps to the bottom
-    of the colour ramp and the few raw values above 310 clamp to the top. The
-    globe draws as two bright bands on a dark field &mdash; which is what the
-    STAC browser showed, while pasting the object URL into titiler's own
-    viewer looked fine, because that viewer auto-stretches to the full
-    <code>int16</code> range instead of using the catalogue's parameters.</p>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Conversion</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><code>sst</code></td><td>celsius</td><td>scale/offset, then &minus;273.15</td></tr>
+        <tr><td><code>anom</code>, <code>err</code></td><td>physical</td><td>scale/offset only &mdash; a temperature <em>difference</em> is the same number in kelvin and celsius, and shifting it would turn a +2&nbsp;K warm event into &minus;271&nbsp;C</td></tr>
+        <tr><td><code>ice</code></td><td>physical</td><td>already a fraction</td></tr>
+        <tr><td><code>mask</code></td><td>raw</td><td>a bit field; converting flags to float is nonsense</td></tr>
+      </tbody>
+    </table>
+    </div>
 
-    <p>The alternative is <code>gdal_translate -unscale -ot Float32</code>,
-    which bakes the conversion into the file and quadruples the 1&nbsp;km
-    product to roughly 4.8&nbsp;GiB per field. Not worth it to avoid one
-    query parameter.</p>
+    <p>The conversion maps the <em>entire</em> integer domain linearly with
+    <code>-scale</code>, computed from the band's own scale and offset, rather
+    than using <code>gdal_translate -unscale</code>. Two reasons:
+    <code>-unscale</code> yields kelvin with no way to shift to celsius in the
+    same pass, and its interaction with the fill value could not be verified
+    in the development environment. Mapping the whole domain leaves nothing
+    to interpret &mdash; the fill maps to a known output value and that value
+    is declared as the nodata, so fill pixels land on it whether or not GDAL
+    treats them specially.</p>
+
+    <p>Because that reasoning was not testable locally,
+    <code>verify_conversion</code> checks the result instead: after each
+    raster is written it reads the statistics back and warns if the values
+    fall outside a physically sensible range for that field. A browse raster
+    holding kelvin, or raw counts, or an unmasked fill value looks identical
+    to a correct one at a glance &mdash; it simply draws wrong somewhere
+    else, days later. This turns that into one message in one job log.</p>
+
+    <p>Float32 costs roughly twice the bytes of the packed integers;
+    <code>PREDICTOR=3</code> recovers most but not all of it, and
+    <code>outdir_max</code> for the module moved from 4096 to 8192&nbsp;MiB to
+    suit. That is the price of a file anyone can read without a manual.</p>
 
     <div class="note">
       <p><strong>A data observation, not a render problem.</strong>
@@ -465,6 +493,24 @@ unscaled     271.35 .. 307.36 K</code></pre>
       normally vary with observation density, so this is worth understanding
       before anyone reads meaning into the layer.</p>
     </div>
+
+    <h4>Viewer links live in <code>links</code>, never in <code>assets</code></h4>
+
+    <p>An item carries a <code>preview</code> link to a rendered PNG and an
+    <code>alternate</code> link to an interactive map, both served on demand
+    by MAAP's tiler. They are <em>links</em> and not assets on purpose: see
+    the next section &mdash; titiler computes an item's zoom bounds across all
+    of its assets, so adding a PNG and an HTML page as assets would break the
+    very tiling they exist to make reachable.</p>
+
+    <p>The container cannot work the URLs out for itself. They need the
+    published collection id, which is assigned at ingest and carries a suffix
+    MAAP allocates. The orchestrator passes it in through
+    <code>--stac-collection</code>, having learned the suffix from any DPS
+    output path it has already seen &mdash; one suffix is allocated per
+    deployment and shared by every module, so <code>mur-mrva_1756</code>
+    names <code>mur-cog_1756</code> too. Without it the links are omitted
+    rather than guessed.</p>
 
     <h4>A raster item must not hold a non-raster asset</h4>
 

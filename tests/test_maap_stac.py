@@ -170,7 +170,7 @@ def test_the_item_map_url_carries_the_render_parameters():
                            "sst", **stac.RENDER["sst"])
     assert "/items/mur-cog-20261006-1km/WebMercatorQuad/map.html?" in url
     assert "assets=sst" in url
-    assert "rescale=271.15,310.15" in url.replace("%2C", ",")
+    assert "rescale=-2,35" in url.replace("%2C", ",")
 
 
 def test_the_item_tile_routes_carry_the_tile_matrix_set():
@@ -197,8 +197,7 @@ def test_a_cog_gets_an_explicit_rescale_not_titiler_s_default():
         HREF, DAY, "nrt",
         extra_assets={"browse_sst": "s3://b/x_sst.tif",
                       "browse_anom": "s3://b/x_anom.tif"})
-    assert item["assets"]["browse_sst"]["mur:render"]["rescale"] == \
-        "271.15,310.15"
+    assert item["assets"]["browse_sst"]["mur:render"]["rescale"] == "-2,35"
     assert item["assets"]["browse_anom"]["mur:render"]["rescale"] == "-5,5"
     for key in ("browse_sst", "browse_anom"):
         assert "rescale=" in item["assets"][key]["href_tilejson"]
@@ -224,7 +223,7 @@ def test_the_viewer_url_is_not_the_tilejson_url_with_a_word_swapped():
     v = stac.titiler_viewer("s3://b/x_sst.tif", **stac.RENDER["sst"])
     assert "/cog/viewer?" in v
     assert "WebMercatorQuad" not in v
-    assert "rescale=271.15" in v.replace("%2C", ",")
+    assert "rescale=-2,35" in v.replace("%2C", ",")
 
     t = stac.titiler_tilejson("s3://b/x_sst.tif")
     assert "/cog/WebMercatorQuad/tilejson.json?" in t
@@ -294,34 +293,62 @@ def test_the_user_catalog_url_needs_no_version():
 
 # --- scaled integers ---------------------------------------------------------
 
-def test_every_render_unscales_because_the_cogs_hold_raw_integers():
-    """GHRSST packs each field as a scaled integer and gdal_translate keeps it.
+def test_no_render_unscales_because_the_cogs_now_hold_real_units():
+    """The COG step converts; it no longer passes GHRSST's packing through.
 
-    analysed_sst is int16 with scale_factor 0.001 and add_offset 298.15, and
-    `gdal_translate -of COG` writes the RAW integers, carrying scale/offset
-    across as band metadata rather than applying them. Measured on a real
-    output: pixels run -26800..9207 while these rescale values are kelvin.
-
-    Without unscale every pixel below 271.15 clamps to the bottom of the ramp
-    and the handful of raw DN above 310 clamp to the top, drawing the globe
-    as two bright bands on a dark field. That is exactly what the STAC
-    browser showed.
+    These files hold celsius, so a reader -- titiler, QGIS, a notebook --
+    gets a temperature without knowing about scale_factor and add_offset.
+    Leaving unscale on would apply the band's scale a second time and draw
+    nonsense. Items written by the earlier builds still carry unscale in
+    their own stored render block, which is how utils/mur_stac.py tells the
+    two generations apart.
     """
     for field, render in stac.RENDER.items():
-        assert render.get("unscale") == "true", field
+        assert "unscale" not in render, field
 
 
-def test_sst_is_rescaled_over_a_range_the_data_actually_occupies():
-    """Measured unscaled range of a real granule: 271.35..307.36 K."""
+def test_sst_is_rescaled_over_a_celsius_range_that_covers_real_seawater():
+    """Measured on a real granule: -1.8 .. 34.2 C.
+
+    The floor is -2 rather than 0 because seawater freezes near -1.8 and the
+    polar ocean genuinely sits there; a 0 C floor would clamp a real part of
+    the field flat.
+    """
     low, high = (float(x) for x in stac.RENDER["sst"]["rescale"].split(","))
-    assert low <= 271.35 and high >= 307.36
+    assert low <= -1.8, "polar water would clamp"
+    assert high >= 34.2, "the warmest water would clamp"
+    assert low > -50 and high < 60, "not a kelvin range"
 
 
-def test_the_error_range_is_not_so_wide_the_field_vanishes():
-    """analysis_error measured 0.800..0.810 K on a real granule -- only two
-    distinct values. A 0..2 ramp put the entire field in one colour. 0..1 is
-    still fixed, so days stay comparable, and shows what little there is."""
-    assert stac.RENDER["err"]["rescale"] == "0,1"
+def test_an_anomaly_is_not_shifted_into_celsius():
+    """It is a DIFFERENCE, so kelvin and celsius are the same number.
+
+    Subtracting 273.15 from an anomaly would turn a +2 K warm event into
+    -271 C. The conversion table in the entrypoint marks it `physical` for
+    exactly this reason, and the render range stays symmetric about zero.
+    """
+    low, high = (float(x) for x in stac.RENDER["anom"]["rescale"].split(","))
+    assert low == -high
+
+
+def test_every_renderable_field_declares_its_units():
+    """A browse layer is read at a glance, and a number with no unit is a
+    number a viewer has to guess at."""
+    assert set(stac.UNITS) == set(stac.RENDER)
+    assert stac.UNITS["sst"] == "degree_Celsius"
+    assert stac.UNITS["mask"] == "flag"
+
+
+def test_the_registration_suffix_is_shared_across_modules():
+    """MAAP allocates one per deployment and applies it to every algorithm,
+    so learning it from any job names every other module's collection --
+    which is what lets the orchestrator hand cog its collection id without
+    an API call."""
+    assert stac.registration_suffix("mur-mrva_1756") == "_1756"
+    assert stac.registration_suffix("mur-cog") == ""
+    suffix = stac.registration_suffix("mur-mrva_1756")
+    assert (stac.dps_collection_id("u", f"mur-cog{suffix}", "2.0.16")
+            == "u__mur-cog_1756__2.0.16")
 
 
 def test_a_preview_url_is_a_plain_image_not_a_map():
@@ -329,5 +356,4 @@ def test_a_preview_url_is_a_plain_image_not_a_map():
     url = stac.dps_preview_url("c", "i", "sst", **stac.RENDER["sst"])
     assert "/items/i/preview.png?" in url
     assert "assets=sst" in url
-    assert "unscale=true" in url
     assert "map.html" not in url

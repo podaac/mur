@@ -37,6 +37,7 @@ echo "MUR image build: ${MUR_IMAGE_BUILD:-unknown} (module: cog)" >&2
 GRANULE=""
 FIELDS=""
 MODE=""
+STAC_COLLECTION=""
 DEBUG_MODE=0
 
 usage() {
@@ -47,6 +48,12 @@ usage() {
     echo "  --mode     nrt or rea, recorded in the STAC item. Optional: it is"
     echo "             inferred from a .../<doy><mode>/... href when present,"
     echo "             and omitted when it cannot be determined."
+    echo "  --stac-collection"
+    echo "             The collection id MAAP assigns at ingest,"
+    echo "             <user>__<algorithm>__<version>. Optional. Given it,"
+    echo "             the item gains map and preview links; without it they"
+    echo "             are omitted, because a container cannot work the id"
+    echo "             out for itself and a guessed link 404s."
 }
 
 parse_args() {
@@ -56,6 +63,7 @@ parse_args() {
             --granule) GRANULE="$2"; shift 2 ;;
             --fields)  FIELDS="$2";  shift 2 ;;
             --mode)    MODE="$2";    shift 2 ;;
+            --stac-collection) STAC_COLLECTION="$2"; shift 2 ;;
             --debug)   DEBUG_MODE=1; shift ;;
             -h|--help) usage; exit 0 ;;
             *) echo "ERROR: Unknown argument: $1" >&2; usage; return 1 ;;
@@ -72,20 +80,134 @@ output_root() {
     echo "${MUR_OUTPUT_ROOT:-$(pwd)/output}"
 }
 
-# subdataset : suffix : overview resampling : rescale hint for the log
+# subdataset : overview resampling : how to convert the values
 #
 # Resampling is per-field because averaging a mask or an ice fraction down an
 # overview pyramid invents values nobody measured; SST and its anomaly are
 # continuous and average correctly.
+#
+# The third column is the unit conversion:
+#
+#   celsius   apply the band's scale/offset, then subtract 273.15
+#   physical  apply scale/offset only -- an anomaly, an error and an ice
+#             fraction are already in the units anyone wants, and a
+#             temperature DIFFERENCE in kelvin is the same number in celsius
+#   raw       leave alone. mask is a bit field (water/land/lake/ice); it has
+#             no units and converting flags to float would be nonsense
 field_spec() {
     case "$1" in
-        sst)  echo "analysed_sst AVERAGE" ;;
-        anom) echo "sst_anomaly AVERAGE" ;;
-        err)  echo "analysis_error AVERAGE" ;;
-        ice)  echo "sea_ice_fraction NEAREST" ;;
-        mask) echo "mask NEAREST" ;;
+        sst)  echo "analysed_sst AVERAGE celsius" ;;
+        anom) echo "sst_anomaly AVERAGE physical" ;;
+        err)  echo "analysis_error AVERAGE physical" ;;
+        ice)  echo "sea_ice_fraction NEAREST physical" ;;
+        mask) echo "mask NEAREST raw" ;;
         *)    return 1 ;;
     esac
+}
+
+# THESE COGS CARRY REAL UNITS, NOT PACKED INTEGERS.
+#
+# GHRSST packs every field as a scaled integer -- analysed_sst is int16 with
+# scale_factor 0.001 and add_offset 298.15 -- and gdal_translate writes those
+# raw integers through, carrying scale/offset across as metadata rather than
+# applying them. The result is a file whose pixels read -26800..9207 and whose
+# histogram, statistics and pixel-inspect tools all report those numbers. Every
+# consumer then needs to know to ask for unscaling, and the one that forgets
+# draws a map of something that is not temperature.
+#
+# So the browse rasters hold degrees celsius, directly. The netCDF granule
+# remains the archival product in its original packing, for anyone who wants
+# the source values; these exist to be looked at.
+#
+# The conversion is computed here rather than left to `gdal_translate
+# -unscale`, which would give kelvin and no way to shift to celsius in the
+# same pass, and whose interaction with the fill value could not be verified
+# in this environment. Instead the ENTIRE integer domain is mapped linearly
+# with -scale, which is exact and leaves nothing to interpret: the fill value
+# maps to a known output value, and that value is declared as nodata. Whether
+# or not GDAL treats fill pixels specially, they land on the same number
+# either way.
+#
+# verify_conversion below checks the result rather than trusting this.
+scale_args() {
+    local src="$1" sub="$2" kind="$3"
+    if [ "$kind" = "raw" ]; then
+        return 0
+    fi
+    python3 - "$src" "$sub" "$kind" <<'PYEOF'
+import json, subprocess, sys
+src, sub, kind = sys.argv[1:4]
+info = json.loads(subprocess.check_output(
+    ["gdalinfo", "-json", f'NETCDF:"{src}":{sub}']))
+band = info["bands"][0]
+scale = float(band.get("scale", 1.0) or 1.0)
+offset = float(band.get("offset", 0.0) or 0.0)
+shift = 273.15 if kind == "celsius" else 0.0
+
+# The full domain of the stored type, so no input can fall outside the source
+# range and be clamped onto a legitimate value.
+lo, hi = {"Int16": (-32768, 32767), "Int8": (-128, 127),
+          "Byte": (0, 255), "UInt16": (0, 65535)}.get(band["type"], (None, None))
+if lo is None:
+    sys.exit(0)                      # unknown type: convert nothing, say nothing
+
+def out(v):
+    # Rounded, for two reasons. The log line stays readable -- -7.768 rather
+    # than -7.768000000000029 -- and the nodata value below is then exactly
+    # the same literal as the mapped minimum, instead of two spellings of
+    # almost the same float. Any two points define the line, so rounding both
+    # endpoints keeps the map linear, and 1e-6 of a degree is six orders of
+    # magnitude below the 0.001 the source itself resolves.
+    return round(scale * v + offset - shift, 6)
+
+args = ["-ot", "Float32", "-scale", str(lo), str(hi), repr(out(lo)), repr(out(hi))]
+fill = band.get("noDataValue")
+if fill is not None:
+    # Declared, not inferred: fill pixels map through the same linear
+    # function, so this is exactly where they land.
+    args += ["-a_nodata", repr(out(float(fill)))]
+print(" ".join(args))
+PYEOF
+}
+
+# What the numbers in each field should look like once converted. A browse
+# raster that silently holds kelvin, or raw DN, or a fill value smeared across
+# the ocean, is indistinguishable from a correct one at a glance -- it just
+# draws wrong somewhere else, days later. Checked here, where the failure is
+# one job and one message.
+sane_range() {
+    case "$1" in
+        sst)  echo "-5 45" ;;        # celsius, ocean
+        anom) echo "-20 20" ;;       # kelvin/celsius difference
+        err)  echo "0 20" ;;
+        ice)  echo "0 1" ;;
+        mask) echo "0 64" ;;         # bit flags
+        *)    return 1 ;;
+    esac
+}
+
+verify_conversion() {
+    local path="$1" field="$2"
+    local bounds; bounds="$(sane_range "$field")" || return 0
+    python3 - "$path" "$field" $bounds <<'PYEOF'
+import json, subprocess, sys
+path, field, lo, hi = sys.argv[1], sys.argv[2], float(sys.argv[3]), float(sys.argv[4])
+try:
+    info = json.loads(subprocess.check_output(
+        ["gdalinfo", "-json", "-stats", path], stderr=subprocess.DEVNULL))
+    st = info["bands"][0]["metadata"][""]
+    mn, mx = float(st["STATISTICS_MINIMUM"]), float(st["STATISTICS_MAXIMUM"])
+except Exception as exc:
+    print(f"    {field}: could not read statistics ({exc})", file=sys.stderr)
+    sys.exit(0)
+if mn < lo or mx > hi:
+    print(f"    {field}: WARNING values {mn:.3f}..{mx:.3f} fall outside the "
+          f"expected {lo}..{hi}. The unit conversion is probably wrong -- "
+          f"kelvin instead of celsius, raw integers, or a fill value that "
+          f"was not masked.", file=sys.stderr)
+else:
+    print(f"    {field}: {mn:.2f}..{mx:.2f}")
+PYEOF
 }
 
 default_fields() {
@@ -204,9 +326,17 @@ write_stac() {
         echo "STAC: mode unknown (no --mode, and the href has no /<doy><mode>/)" >&2
     fi
 
+    local -a published=()
+    if [[ -n "$STAC_COLLECTION" ]]; then
+        published=(--stac-collection "$STAC_COLLECTION")
+    else
+        echo "STAC: no --stac-collection, so the item carries no map links" >&2
+    fi
+
     if ! python3 "$COMMON_DIR/write_stac.py" \
             --output-dir "$out" \
             --collection mur-l4-browse \
+            "${published[@]+"${published[@]}"}" \
             --item-id "$item" \
             --datetime "$dt" \
             "${props[@]}" "$@"; then
@@ -253,10 +383,27 @@ main() {
     for f in $fields; do
         local spec; spec="$(field_spec "$f")" || {
             echo "  SKIP $f -- not a known field" >&2; failed=$((failed+1)); continue; }
-        local sub resample
+        local sub resample kind
         sub="$(echo "$spec" | cut -d' ' -f1)"
         resample="$(echo "$spec" | cut -d' ' -f2)"
+        kind="$(echo "$spec" | cut -d' ' -f3)"
         local dst="$out/${stem}_${f}.tif"
+
+        # Empty for mask, which stays in its native integer type.
+        local -a convert=()
+        if [[ "$kind" != "raw" ]]; then
+            local scaling; scaling="$(scale_args "$src" "$sub" "$kind")"
+            if [[ -z "$scaling" ]]; then
+                echo "  SKIP $f ($sub): cannot read scale/offset from the granule" >&2
+                failed=$((failed+1)); continue
+            fi
+            # Word-splitting is intended: scale_args emits a flag list.
+            # shellcheck disable=SC2206
+            convert=($scaling)
+            # PREDICTOR=3 is the float predictor; it is what keeps a Float32
+            # raster from being several times the packed integer it replaced.
+            convert+=(-co PREDICTOR=3)
+        fi
 
         # NETCDF:"file":var addresses one variable without decoding the rest.
         # DEFLATE because these fields are smooth and every reader has it.
@@ -276,12 +423,14 @@ main() {
         # produced exactly that and titiler refused to read it.
         if gdal_translate -q -of COG \
                 -a_srs EPSG:4326 \
+                "${convert[@]+"${convert[@]}"}" \
                 -co COMPRESS=DEFLATE \
                 -co "OVERVIEW_RESAMPLING=$resample" \
                 -co BLOCKSIZE=512 \
                 "NETCDF:\"$src\":$sub" "$dst" 2>"$scratch/gdal.err"; then
             local mb; mb=$(( $(stat -c%s "$dst") / 1048576 ))
             echo "  $f -> $(basename "$dst")  ${mb} MB"
+            verify_conversion "$dst" "$f"
             # Relative to the stage-out root: write_stac.py resolves asset
             # hrefs against the item file, and MAAP's ingest then rewrites
             # them to absolute s3:// URLs.
