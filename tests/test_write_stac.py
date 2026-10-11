@@ -361,3 +361,76 @@ def test_pystac_resolves_every_asset_to_a_real_file(tmp_path):
         for item in coll.get_items():
             for key, asset in item.assets.items():
                 assert pathlib.Path(asset.get_absolute_href()).is_file(), key
+
+
+# --- one table, so the collection and its items cannot disagree -------------
+
+def test_item_assets_titles_match_the_items_own(tmp_path):
+    """A live collection advertised "Analysed SST" while its items said
+    "Analysed SST (degC)", because item_assets carried its own literal
+    titles and they drifted the moment the others gained units. Both are now
+    built from ASSET_TITLES."""
+    for field in ("sst", "anom", "err", "ice", "mask"):
+        _touch(tmp_path, f"g_{field}.tif")
+    args = []
+    for field in ("sst", "anom", "err", "ice", "mask"):
+        args += ["--asset", f"{field}=g_{field}.tif"]
+    proc = _run(tmp_path, "--collection", "mur-l4-browse",
+                "--item-id", "mur-cog-20261009-25km",
+                "--datetime", "2026-10-09T09:00:00Z", *args)
+    assert proc.returncode == 0, proc.stderr
+
+    coll = json.loads(
+        (tmp_path / "mur-l4-browse" / "collection.json").read_text())
+    item = json.loads((tmp_path / "mur-l4-browse" / "mur-cog-20261009-25km"
+                       / "mur-cog-20261009-25km.json").read_text())
+    for field, definition in coll["item_assets"].items():
+        assert definition["title"] == item["assets"][field]["title"], field
+
+
+def test_every_asset_says_what_it_is(tmp_path):
+    """Without a description a STAC browser falls back to the media type and
+    shows "Cloud-Optimized GeoTIFF image", which tells a reader nothing the
+    icon did not."""
+    _touch(tmp_path, "g_sst.tif")
+    _run(tmp_path, "--collection", "mur-l4-browse",
+         "--item-id", "mur-cog-20261009-1km",
+         "--datetime", "2026-10-09T09:00:00Z", "--asset", "sst=g_sst.tif")
+    item = json.loads((tmp_path / "mur-l4-browse" / "mur-cog-20261009-1km"
+                       / "mur-cog-20261009-1km.json").read_text())
+    description = item["assets"]["sst"]["description"]
+    assert "Celsius" in description
+    assert len(description) > 40
+
+
+def test_viewer_links_are_links_and_never_assets(tmp_path):
+    """titiler computes an item's zoom bounds across all of its ASSETS and
+    dies on the first it cannot open. A PNG or an HTML page added as an asset
+    would break the tiling these links exist to make reachable."""
+    _touch(tmp_path, "g_sst.tif")
+    _run(tmp_path, "--collection", "mur-l4-browse",
+         "--item-id", "mur-cog-20261009-1km",
+         "--datetime", "2026-10-09T09:00:00Z",
+         "--stac-collection", "u__mur-cog_1756__2.0.17",
+         "--asset", "sst=g_sst.tif")
+    item = json.loads((tmp_path / "mur-l4-browse" / "mur-cog-20261009-1km"
+                       / "mur-cog-20261009-1km.json").read_text())
+
+    for asset in item["assets"].values():
+        assert asset["type"].startswith("image/tiff"), asset
+
+    rels = {l["rel"]: l for l in item["links"]}
+    assert rels["preview"]["type"] == "image/png"
+    assert rels["alternate"]["type"] == "text/html"
+    assert "u__mur-cog_1756__2.0.17" in rels["preview"]["href"]
+
+
+def test_no_links_when_the_collection_id_is_unknown(tmp_path):
+    """A link built from a guessed id looks right and 404s."""
+    _touch(tmp_path, "g_sst.tif")
+    _run(tmp_path, "--collection", "mur-l4-browse",
+         "--item-id", "mur-cog-20261009-1km",
+         "--datetime", "2026-10-09T09:00:00Z", "--asset", "sst=g_sst.tif")
+    item = json.loads((tmp_path / "mur-l4-browse" / "mur-cog-20261009-1km"
+                       / "mur-cog-20261009-1km.json").read_text())
+    assert not [l for l in item["links"] if l["rel"] in ("preview", "alternate")]

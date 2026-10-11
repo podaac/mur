@@ -379,8 +379,19 @@ main() {
 
     local made=0 failed=0
     local -a asset_args=()
-    local IFS=','
-    for f in $fields; do
+    # Commas to spaces, rather than `local IFS=','` around the loop.
+    #
+    # Setting IFS for the loop changes how EVERY expansion inside the body
+    # splits, including the one that turns scale_args' output into an
+    # argument list. With IFS=',' that string contains no commas, so it
+    # became a single argument and gdal_translate reported
+    #
+    #     ERROR 6: Unknown option name '-ot Float32 -scale -32768 ...'
+    #
+    # for every field. Only `mask` survived, because it is the one field that
+    # needs no conversion and so passed no such argument -- which is why a
+    # MUR25 job looked like it half worked and produced exactly one raster.
+    for f in ${fields//,/ }; do
         local spec; spec="$(field_spec "$f")" || {
             echo "  SKIP $f -- not a known field" >&2; failed=$((failed+1)); continue; }
         local sub resample kind
@@ -397,9 +408,9 @@ main() {
                 echo "  SKIP $f ($sub): cannot read scale/offset from the granule" >&2
                 failed=$((failed+1)); continue
             fi
-            # Word-splitting is intended: scale_args emits a flag list.
-            # shellcheck disable=SC2206
-            convert=($scaling)
+            # IFS set for this one command, so the split is on spaces no
+            # matter what the surrounding code has done to IFS.
+            IFS=' ' read -r -a convert <<< "$scaling"
             # PREDICTOR=3 is the float predictor; it is what keeps a Float32
             # raster from being several times the packed integer it replaced.
             convert+=(-co PREDICTOR=3)
@@ -442,7 +453,6 @@ main() {
             failed=$((failed+1))
         fi
     done
-    unset IFS
 
     echo ""
     echo "wrote $made COG(s), $failed skipped"

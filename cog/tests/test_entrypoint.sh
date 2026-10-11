@@ -215,6 +215,32 @@ assert_eq "nodata is the fill value put through the same linear map" \
         nod=\$(echo \"\$a\" | awk '{print \$9}')
         [[ \"\$dstmin\" == \"\$nod\" ]] && echo match || echo \"differ: \$dstmin vs \$nod\"")"
 
+# --- the argument list survives whatever IFS is doing -----------------------
+#
+# This is the bug that produced zero rasters for every field except mask.
+# `local IFS=','` around the field loop changed how EVERY expansion in the
+# body split, so scale_args' space-separated flags became one argument and
+# gdal_translate answered "Unknown option name '-ot Float32 -scale ...'".
+# mask alone survived, needing no conversion and so passing no such argument,
+# which made a MUR25 job look like it half worked.
+assert_eq "the flag list splits into separate arguments even under IFS=," \
+    "9" \
+    "$(PATH="$STUB_DIR:$PATH" bash -c "
+        source '$ENTRYPOINT' 2>/dev/null
+        IFS=,
+        s=\$(scale_args g.nc analysed_sst celsius)
+        IFS=' ' read -r -a a <<< \"\$s\"
+        echo \${#a[@]}")"
+
+assert_eq "the field loop no longer sets a global IFS" \
+    "0" "$(grep -cE "^[[:space:]]*local IFS=" "$ENTRYPOINT")"
+
+assert_eq "fields are split by substitution instead" \
+    "1" "$(grep -c 'for f in \${fields//,/ }' "$ENTRYPOINT")"
+
+assert_eq "the argument list is read with an explicitly scoped IFS" \
+    "1" "$(grep -c "IFS=' ' read -r -a convert" "$ENTRYPOINT")"
+
 rm -rf "$STUB_DIR"
 
 # --- STAC runs after the conversion, and never instead of it ---------------

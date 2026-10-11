@@ -165,16 +165,7 @@ COLLECTIONS = {
             {"name": "MUR SST", "roles": ["processor"],
              "url": "https://github.com/podaac/mur"},
         ],
-        "item_assets": {
-            "data": {"type": NETCDF_TYPE, "roles": ["data"],
-                     "title": "MUR L4 SST granule (1 km)",
-                     "description": "Global 1 km foundation SST analysis, "
-                                    "GHRSST L4 netCDF."},
-            "data25": {"type": NETCDF_TYPE, "roles": ["data"],
-                       "title": "MUR25 L4 SST granule (0.25 deg)",
-                       "description": "The same analysis on a 0.25 degree "
-                                      "grid, carrying all five fields."},
-        },
+        "item_assets": ("data", "data25"),
     },
     "mur-l4-browse": {
         "title": "MUR L4 SST Browse Imagery",
@@ -195,20 +186,30 @@ COLLECTIONS = {
             {"name": "MUR SST", "roles": ["processor"],
              "url": "https://github.com/podaac/mur"},
         ],
-        "item_assets": {
-            key: {"type": COG_TYPE, "roles": ["data", "visual"],
-                  "title": title}
-            for key, title in (
-                ("sst", "Analysed SST"),
-                ("anom", "SST anomaly"),
-                ("err", "Analysis error"),
-                ("ice", "Sea ice fraction"),
-                ("mask", "Land/sea/ice mask"),
-            )
-        },
+        "item_assets": ("sst", "anom", "err", "ice", "mask"),
     },
 }
 
+
+# What each asset actually is. STAC browsers show this when an asset is
+# expanded; without it the panel falls back to the media type and reads
+# "Cloud-Optimized GeoTIFF image", which tells a reader nothing they could
+# not see from the icon.
+ASSET_DESCRIPTIONS = {
+    "data": "Global 1 km foundation SST analysis, GHRSST L4 netCDF, in the "
+            "product's original packed form.",
+    "data25": "The same analysis on a 0.25 degree grid, carrying all five "
+              "fields, GHRSST L4 netCDF.",
+    "sst": "Foundation sea surface temperature, degrees Celsius. Converted "
+           "from the granule's packed integers so the pixel value is the "
+           "temperature.",
+    "anom": "Departure from the seasonal climatology, in degrees Celsius. A "
+            "difference, so the number is the same in Celsius or Kelvin.",
+    "err": "Estimated uncertainty of the analysis, in degrees Celsius.",
+    "ice": "Sea ice concentration as a fraction from 0 to 1.",
+    "mask": "GHRSST bit flags: water, land, lake and ice. Categorical, so it "
+            "is left in its native integer type and not converted.",
+}
 
 ASSET_TITLES = {
     "data": "MUR L4 SST granule (1 km)",
@@ -339,6 +340,8 @@ def build_item(item_id, collection, dt, assets, properties=None,
         asset["roles"] = _roles(key, relpath)
         if key in ASSET_TITLES:
             asset["title"] = ASSET_TITLES[key]
+        if key in ASSET_DESCRIPTIONS:
+            asset["description"] = ASSET_DESCRIPTIONS[key]
         if key in RENDER:
             # Carried on the asset so a reader does not have to know MUR's
             # units to draw the layer correctly. mur_maap/stac.py reads this
@@ -380,6 +383,21 @@ def build_item(item_id, collection, dt, assets, properties=None,
              "type": "application/geo+json"},
         ] + preview_links(published_collection, item_id, out),
     }
+
+
+def _definition(key):
+    """The collection-level description of one asset key."""
+    entry = {
+        "type": NETCDF_TYPE if key.startswith("data") else COG_TYPE,
+        "roles": ["data"] if key.startswith("data") else ["data", "visual"],
+    }
+    if key in ASSET_TITLES:
+        entry["title"] = ASSET_TITLES[key]
+    if key in ASSET_DESCRIPTIONS:
+        entry["description"] = ASSET_DESCRIPTIONS[key]
+    if key in UNITS:
+        entry["mur:units"] = UNITS[key]
+    return entry
 
 
 def build_collection(collection_id, title, description, items):
@@ -435,7 +453,15 @@ def build_collection(collection_id, title, description, items):
     # validation fails. The ingest service rewrites to 1.1 and keeps the
     # field either way.
     if meta.get("item_assets"):
-        out["item_assets"] = meta["item_assets"]
+        # Built from ASSET_TITLES and ASSET_DESCRIPTIONS rather than spelled
+        # out again here. This block used to carry its own literal titles,
+        # and they drifted the moment the others gained units: a live
+        # collection ended up advertising "Analysed SST" while its items said
+        # "Analysed SST (degC)". One table, named once.
+        out["item_assets"] = {
+            key: _definition(key)
+            for key in meta["item_assets"]
+        }
         out["stac_extensions"] = [
             "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json",
         ]
