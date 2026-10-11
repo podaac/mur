@@ -365,27 +365,33 @@ def test_pystac_resolves_every_asset_to_a_real_file(tmp_path):
 
 # --- one table, so the collection and its items cannot disagree -------------
 
-def test_item_assets_titles_match_the_items_own(tmp_path):
-    """A live collection advertised "Analysed SST" while its items said
-    "Analysed SST (degC)", because item_assets carried its own literal
-    titles and they drifted the moment the others gained units. Both are now
-    built from ASSET_TITLES."""
-    for field in ("sst", "anom", "err", "ice", "mask"):
-        _touch(tmp_path, f"g_{field}.tif")
-    args = []
-    for field in ("sst", "anom", "err", "ice", "mask"):
-        args += ["--asset", f"{field}=g_{field}.tif"]
-    proc = _run(tmp_path, "--collection", "mur-l4-browse",
-                "--item-id", "mur-cog-20261009-25km",
-                "--datetime", "2026-10-09T09:00:00Z", *args)
-    assert proc.returncode == 0, proc.stderr
-
+def test_the_collection_declares_no_item_assets(tmp_path):
+    """MAAP's STAC API merges item_assets into EVERY item on read, including
+    the keys an item does not have, with no href -- and titiler then raises
+    {"detail": "'href'"} walking them. That broke the 1 km product, which
+    produces sst and anom while the collection described five fields; MUR25
+    tiled fine because it produces all five. Verified against the live API.
+    """
+    _touch(tmp_path, "g_sst.tif")
+    _run(tmp_path, "--collection", "mur-l4-browse", "--item-id", "i",
+         "--datetime", "2026-10-09T09:00:00Z", "--asset", "sst=g_sst.tif")
     coll = json.loads(
         (tmp_path / "mur-l4-browse" / "collection.json").read_text())
-    item = json.loads((tmp_path / "mur-l4-browse" / "mur-cog-20261009-25km"
-                       / "mur-cog-20261009-25km.json").read_text())
-    for field, definition in coll["item_assets"].items():
-        assert definition["title"] == item["assets"][field]["title"], field
+    assert "item_assets" not in coll
+
+
+def test_an_item_declares_only_the_assets_it_actually_has(tmp_path):
+    """Every asset must carry an href. One without is what titiler dies on."""
+    for field in ("sst", "anom"):
+        _touch(tmp_path, f"g_{field}.tif")
+    _run(tmp_path, "--collection", "mur-l4-browse", "--item-id", "i",
+         "--datetime", "2026-10-09T09:00:00Z",
+         "--asset", "sst=g_sst.tif", "--asset", "anom=g_anom.tif")
+    item = json.loads(
+        (tmp_path / "mur-l4-browse" / "i" / "i.json").read_text())
+    assert sorted(item["assets"]) == ["anom", "sst"]
+    for key, asset in item["assets"].items():
+        assert asset.get("href"), key
 
 
 def test_every_asset_says_what_it_is(tmp_path):

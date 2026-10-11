@@ -448,8 +448,14 @@ class MAAPOrchestrator:
             return
         self._registered[stac.module_of(name)] = name
         suffix = stac.registration_suffix(name)
-        if suffix:
+        if suffix and suffix != self._suffix:
             self._suffix = suffix
+            # Logged so it can be pinned in the config. A run that submits
+            # only cog never sees an mrva output path and so never learns
+            # this, which is why its items came out with no viewer links.
+            logger.info("    MAAP registration suffix is %s; set "
+                        "maap.registration_suffix to keep cog-only runs "
+                        "from losing their viewer links", suffix)
 
     def _published_collection(self, module: str) -> str:
         """The collection id MAAP will assign to `module`, or "" if unknown.
@@ -463,9 +469,11 @@ class MAAPOrchestrator:
             return ""
         registered = self._registered.get(module)
         if not registered:
-            if not self._suffix:
+            suffix = self._suffix or str(
+                self.config.get("maap", {}).get("registration_suffix") or "")
+            if not suffix:
                 return ""
-            registered = f"{module}{self._suffix}"
+            registered = f"{module}{suffix}"
         version = str(self.config.get("maap", {}).get("algorithm_version")
                       or ALGORITHM_VERSION)
         return stac.dps_collection_id(user, registered, version)

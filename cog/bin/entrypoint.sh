@@ -163,9 +163,23 @@ def out(v):
 args = ["-ot", "Float32", "-scale", str(lo), str(hi), repr(out(lo)), repr(out(hi))]
 fill = band.get("noDataValue")
 if fill is not None:
+    fill = float(fill)
+    # Wrap the fill into the band's OWN domain before mapping it.
+    #
+    # GHRSST stores sea_ice_fraction as signed int8 with _FillValue -128, but
+    # GDAL reads that band as unsigned Byte, so the fill arrives as 128 while
+    # the metadata still says -128. Mapping -128 declared a nodata of -1.28,
+    # which no pixel holds, and the real fill sailed through as
+    # 128 * 0.01 = 1.28 -- an "ice fraction" of 128%, sitting over every land
+    # pixel. verify_conversion caught it on the first real granule.
+    span = hi - lo + 1
+    while fill < lo:
+        fill += span
+    while fill > hi:
+        fill -= span
     # Declared, not inferred: fill pixels map through the same linear
     # function, so this is exactly where they land.
-    args += ["-a_nodata", repr(out(float(fill)))]
+    args += ["-a_nodata", repr(out(fill))]
 print(" ".join(args))
 PYEOF
 }

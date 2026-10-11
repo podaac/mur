@@ -169,6 +169,9 @@ case "${!#}" in
   *analysed_sst)     echo '{"bands":[{"type":"Int16","scale":0.001,"offset":298.15,"noDataValue":-32768}]}' ;;
   *sst_anomaly)      echo '{"bands":[{"type":"Int16","scale":0.001,"offset":0.0,"noDataValue":-32768}]}' ;;
   *sea_ice_fraction) echo '{"bands":[{"type":"Int8","scale":0.01,"offset":0.0,"noDataValue":-128}]}' ;;
+  # What GDAL actually reports for a netCDF signed int8 band: an unsigned
+  # Byte type, with the signed _FillValue still in the metadata.
+  *ice_as_byte)      echo '{"bands":[{"type":"Byte","scale":0.01,"offset":0.0,"noDataValue":-128}]}' ;;
   *no_scale)         echo '{"bands":[{"type":"Float64"}]}' ;;
   *) echo '{"bands":[{"type":"Int16","scale":1.0,"offset":0.0}]}' ;;
 esac
@@ -194,6 +197,13 @@ assert_eq "ice uses the int8 domain, not int16" \
 
 # mask is a bit field. Converting flags to float would be nonsense, so it is
 # the one field left exactly as stored.
+# The fill must be wrapped into the band's own domain first. Unwrapped, it
+# declared a nodata of -1.28 that no pixel holds, and the real fill came
+# through as 128 * 0.01 = 1.28 -- a 128% ice fraction over every land pixel.
+assert_eq "a signed fill read through an unsigned band is wrapped, not mapped raw" \
+    "-ot Float32 -scale 0 255 0.0 2.55 -a_nodata 1.28" \
+    "$(stub_case "scale_args g.nc ice_as_byte physical")"
+
 assert_eq "mask is not converted at all" \
     "" "$(stub_case "scale_args g.nc mask raw")"
 

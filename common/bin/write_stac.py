@@ -134,7 +134,8 @@ UNITS = {
 #   (jleach_jpl__mur-mrva_1756__2.0.14): title, description, extent, license
 #   and renders all came through unchanged. Only the ID is rewritten. Three
 #   more fields are preserved on other users' collections and so are included
-#   here -- keywords, providers and item_assets.
+#   here -- keywords and providers. item_assets is NOT used; see
+#   build_collection for why it breaks tiling.
 #
 #   So the collection id is not the label. It is machine plumbing
 #   (<username>__<algorithm>__<version>), and the human-readable name is the
@@ -165,7 +166,6 @@ COLLECTIONS = {
             {"name": "MUR SST", "roles": ["processor"],
              "url": "https://github.com/podaac/mur"},
         ],
-        "item_assets": ("data", "data25"),
     },
     "mur-l4-browse": {
         "title": "MUR L4 SST Browse Imagery",
@@ -186,7 +186,6 @@ COLLECTIONS = {
             {"name": "MUR SST", "roles": ["processor"],
              "url": "https://github.com/podaac/mur"},
         ],
-        "item_assets": ("sst", "anom", "err", "ice", "mask"),
     },
 }
 
@@ -385,21 +384,6 @@ def build_item(item_id, collection, dt, assets, properties=None,
     }
 
 
-def _definition(key):
-    """The collection-level description of one asset key."""
-    entry = {
-        "type": NETCDF_TYPE if key.startswith("data") else COG_TYPE,
-        "roles": ["data"] if key.startswith("data") else ["data", "visual"],
-    }
-    if key in ASSET_TITLES:
-        entry["title"] = ASSET_TITLES[key]
-    if key in ASSET_DESCRIPTIONS:
-        entry["description"] = ASSET_DESCRIPTIONS[key]
-    if key in UNITS:
-        entry["mur:units"] = UNITS[key]
-    return entry
-
-
 def build_collection(collection_id, title, description, items):
     """The Collection every Item in this catalog belongs to.
 
@@ -447,24 +431,23 @@ def build_collection(collection_id, title, description, items):
         if meta.get(field):
             out[field] = meta[field]
 
-    # item_assets documents each asset key once, at the collection level, so a
-    # browser can label a layer without opening an item. STAC 1.1 has it in
-    # core; under 1.0 it is an extension, which has to be declared or
-    # validation fails. The ingest service rewrites to 1.1 and keeps the
-    # field either way.
-    if meta.get("item_assets"):
-        # Built from ASSET_TITLES and ASSET_DESCRIPTIONS rather than spelled
-        # out again here. This block used to carry its own literal titles,
-        # and they drifted the moment the others gained units: a live
-        # collection ended up advertising "Analysed SST" while its items said
-        # "Analysed SST (degC)". One table, named once.
-        out["item_assets"] = {
-            key: _definition(key)
-            for key in meta["item_assets"]
-        }
-        out["stac_extensions"] = [
-            "https://stac-extensions.github.io/item-assets/v1.0.0/schema.json",
-        ]
+    # NO item_assets, deliberately.
+    #
+    # It is the natural place to document each asset key once, and MAAP's
+    # STAC API merges it into EVERY item on read -- including the keys an
+    # item does not have, with no href. titiler then walks the item's assets
+    # and raises
+    #
+    #     {"detail": "'href'"}
+    #
+    # on the first one it finds. That broke the 1 km product specifically:
+    # it produces sst and anom, so the err, ice and mask definitions were
+    # merged in empty and every tile request 500'd, while MUR25 -- which
+    # produces all five -- tiled fine. Verified against the live API.
+    #
+    # The titles, descriptions and units live on each item's own assets,
+    # which is what a browser displays anyway. A collection-level copy is a
+    # nicety; tiling the flagship product is not.
 
     # Only when something here is actually renderable. The first ingested
     # collection came back with "renders": {} because the granules carry no

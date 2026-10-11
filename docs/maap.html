@@ -494,6 +494,27 @@
       before anyone reads meaning into the layer.</p>
     </div>
 
+    <h4>No <code>item_assets</code> on the collection</h4>
+
+    <p>It is the natural place to document each asset key once, and it cannot
+    be used here. MAAP's STAC API merges <code>item_assets</code> into
+    <em>every</em> item on read, including the keys an item does not have,
+    with no <code>href</code>. titiler then walks the item's assets and
+    answers</p>
+
+    <pre><code>{"detail": "'href'"}</code></pre>
+
+    <p>on the first one it finds. That broke the 1&nbsp;km product
+    specifically: it produces <code>sst</code> and <code>anom</code> while
+    the collection described five fields, so three empty definitions were
+    merged into every 1&nbsp;km item and each tile request returned 500.
+    MUR25 tiled fine, because it produces all five and nothing was merged in
+    empty. Verified against the live API.</p>
+
+    <p>The titles, descriptions and units live on each item's own assets,
+    which is what a browser displays. A collection-level copy is a nicety;
+    tiling the flagship product is not.</p>
+
     <h4>Viewer links live in <code>links</code>, never in <code>assets</code></h4>
 
     <p>An item carries a <code>preview</code> link to a rendered PNG and an

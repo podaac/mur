@@ -1291,3 +1291,30 @@ def test_a_known_collection_is_passed_to_cog(orchestrator):
     args = orchestrator._cog_args("s3://b/g.nc", "nrt")
     # Learned from mrva, applied to cog: one suffix per deployment.
     assert args["stac_collection"] == "jleach_jpl__mur-cog_1756__2.0.16"
+
+
+def test_a_configured_suffix_lets_a_cog_only_run_build_links(orchestrator):
+    """A run that submits only cog never sees an mrva DPS path, so it cannot
+    learn MAAP's registration suffix and its items came out with no viewer
+    links. Pinning it in the config closes that gap without a network call."""
+    orchestrator.config.setdefault("maap", {}).update({
+        "workspace_root": "s3://maap-ops-workspace/jleach_jpl",
+        "algorithm_version": "2.0.18",
+        "registration_suffix": "_1756",
+    })
+    args = orchestrator._cog_args("s3://b/g.nc", "nrt")
+    assert args["stac_collection"] == "jleach_jpl__mur-cog_1756__2.0.18"
+
+
+def test_a_learned_suffix_beats_the_configured_one(orchestrator):
+    """What the deployment actually returned outranks what a config remembers,
+    because a stale pin would name a collection that does not exist."""
+    orchestrator.config.setdefault("maap", {}).update({
+        "workspace_root": "s3://maap-ops-workspace/jleach_jpl",
+        "algorithm_version": "2.0.18",
+        "registration_suffix": "_9999",
+    })
+    orchestrator._note_registered(
+        "s3://b/u/dps_output/mur-mrva_1756/2.0.18/2026/10/11/1/2/3/4/x.nc")
+    args = orchestrator._cog_args("s3://b/g.nc", "nrt")
+    assert args["stac_collection"] == "jleach_jpl__mur-cog_1756__2.0.18"
