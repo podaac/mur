@@ -440,3 +440,69 @@ def test_no_links_when_the_collection_id_is_unknown(tmp_path):
     item = json.loads((tmp_path / "mur-l4-browse" / "mur-cog-20261009-1km"
                        / "mur-cog-20261009-1km.json").read_text())
     assert not [l for l in item["links"] if l["rel"] in ("preview", "alternate")]
+
+
+RENDER_EXT = "https://stac-extensions.github.io/render/v2.0.0/schema.json"
+
+
+def test_renders_survive_where_links_do_not(tmp_path):
+    """The hints a viewer needs live in properties, not links.
+
+    MAAP serves the ingested catalog through stac-fastapi-pgstac, which
+    regenerates `links` from the database -- every live item comes back with
+    exactly collection/parent/root/self. Anything a reader must still be able
+    to find has to sit in properties or assets, which are preserved.
+    """
+    _touch(tmp_path, "g_sst.tif")
+    _touch(tmp_path, "g_anom.tif")
+    _run(tmp_path, "--collection", "mur-l4-browse",
+         "--item-id", "mur-cog-20261011-1km",
+         "--datetime", "2026-10-11T09:00:00Z",
+         "--stac-collection", "u__mur-cog_1756__2.0.18",
+         "--asset", "sst=g_sst.tif", "--asset", "anom=g_anom.tif")
+    props = json.loads((tmp_path / "mur-l4-browse" / "mur-cog-20261011-1km"
+                        / "mur-cog-20261011-1km.json").read_text())["properties"]
+
+    assert set(props["renders"]) == {"sst", "anom"}
+    assert "u__mur-cog_1756__2.0.18" in props["mur:map_url"]
+    assert "u__mur-cog_1756__2.0.18" in props["mur:image_url"]
+
+
+def test_renders_rescale_is_the_spec_type_not_titilers(tmp_path):
+    """[[min, max]] in the block, `rescale=-2,35` in the URL.
+
+    RENDER stores titiler's query-string spelling because the URLs need it.
+    The Render extension types the same field as an array of number pairs, so
+    a string fails validation and is ignored -- silently leaving the viewer on
+    its own default, which is the whole problem the block exists to fix.
+    """
+    _touch(tmp_path, "g_sst.tif")
+    _run(tmp_path, "--collection", "mur-l4-browse",
+         "--item-id", "mur-cog-20261011-1km",
+         "--datetime", "2026-10-11T09:00:00Z",
+         "--stac-collection", "u__mur-cog_1756__2.0.18",
+         "--asset", "sst=g_sst.tif")
+    item = json.loads((tmp_path / "mur-l4-browse" / "mur-cog-20261011-1km"
+                       / "mur-cog-20261011-1km.json").read_text())
+
+    assert item["properties"]["renders"]["sst"]["rescale"] == [[-2.0, 35.0]]
+    assert "rescale=-2%2C35" in item["properties"]["mur:map_url"]
+    assert RENDER_EXT in item["stac_extensions"]
+
+
+def test_the_render_extension_is_not_declared_without_renders(tmp_path):
+    """The schema makes `renders` required of anything claiming the extension.
+
+    Granule items are netCDF, which no tile server draws, so their renders
+    block is empty -- declaring the extension anyway made every one of them
+    invalid. Caught by pystac, not by reading the schema.
+    """
+    _touch(tmp_path, "g.nc")
+    _run(tmp_path, "--collection", "mur-l4-sst",
+         "--item-id", "mur-l4-20261011-nrt",
+         "--datetime", "2026-10-11T09:00:00Z", "--asset", "granule=g.nc")
+    item = json.loads((tmp_path / "mur-l4-sst" / "mur-l4-20261011-nrt"
+                       / "mur-l4-20261011-nrt.json").read_text())
+
+    assert "renders" not in item["properties"]
+    assert RENDER_EXT not in item["stac_extensions"]

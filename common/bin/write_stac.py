@@ -294,9 +294,18 @@ def preview_links(published_collection, item_id, asset_keys):
     holding a GeoTIFF beside a Zarr would not tile for any value of
     `assets=`, including the GeoTIFF's own key. Adding a PNG and an HTML page
     as assets would reintroduce exactly that, breaking the tiling this is
-    meant to make easier. Nothing reads `links` when tiling, so they are
-    safe there, and a STAC browser renders them as the clickable links they
-    are.
+    meant to make easier.
+
+    THESE DO NOT REACH THE API, and that is not fixable from here. MAAP
+    serves the ingested catalog through stac-fastapi-pgstac, which stores an
+    item's properties and assets but regenerates `links` from the database on
+    every response. Checked against the live service: every ingested item,
+    cog and mrva alike, comes back with exactly collection/parent/root/self
+    and nothing else. They are still written because the staged-out
+    catalog.json in dps_output is itself a valid static catalog that anything
+    pointed at it will follow -- but a reader coming in through the API sees
+    them only as the `renders` block and the mur:map_url properties below,
+    which are carried in places the ingest does preserve.
 
     One pair for the field a reader wants first, rather than a pair per
     field: MUR25 carries five, and ten more entries would bury the data.
@@ -315,6 +324,62 @@ def preview_links(published_collection, item_id, asset_keys):
         {"rel": "alternate", "href": urls["map"], "type": "text/html",
          "title": f"Interactive map ({label})"},
     ]
+
+
+def render_block(key):
+    """One Render-extension entry for `key`, in the spec's own types.
+
+    RENDER holds titiler's query-string spellings, because that is what the
+    viewer URLs need: `rescale=-2,35`. The Render extension is JSON and types
+    the same field as an array of min/max pairs -- [[-2, 35]] -- so a string
+    there fails validation and is ignored by anything that reads the block
+    for its defaults, which is the entire point of writing it. Converted
+    here, once, rather than keeping two spellings of every range in RENDER.
+    """
+    params = dict(RENDER[key])
+    lo, _, hi = params.pop("rescale", "").partition(",")
+    block = {"assets": [key], "title": ASSET_TITLES.get(key, key)}
+    if lo and hi:
+        block["rescale"] = [[float(lo), float(hi)]]
+    block.update(params)
+    return block
+
+
+def item_render_properties(item_id, assets, published_collection):
+    """Render hints and viewer URLs, in the places the ingest preserves.
+
+    Two separate jobs, both of which used to be done somewhere that did not
+    survive:
+
+    `renders` is the STAC Render extension, and is the only one of these a
+    generic client understands. Each entry names the assets to draw and the
+    stretch to draw them with, so a viewer opens on the right colour scale
+    instead of its own default. The Collection already carried this and it
+    came through ingest intact, which is the evidence that properties are
+    preserved where `links` are not.
+
+    mur:map_url / mur:image_url repeat the primary field's viewer URLs at the
+    top level. They are on each asset too, but an asset-level property is
+    several clicks down in a browser, and these are the two links a person
+    actually wants. Omitted entirely when the published collection id is
+    unknown, for the same reason preview_links omits them: a URL that looks
+    right and 404s is worse than no URL.
+    """
+    out = {}
+
+    renders = {key: render_block(key) for key in assets if key in RENDER}
+    if renders:
+        out["renders"] = renders
+
+    primary = next((k for k in ("sst", "anom", "ice", "err", "mask")
+                    if k in assets and k in RENDER), None)
+    if published_collection and primary:
+        urls = viewer_links(published_collection, item_id, primary,
+                            RENDER[primary])
+        out["mur:map_url"] = urls["map"]
+        out["mur:image_url"] = urls["image"]
+
+    return out
 
 
 def build_item(item_id, collection, dt, assets, properties=None,
@@ -355,6 +420,25 @@ def build_item(item_id, collection, dt, assets, properties=None,
             asset["mur:image_url"] = links["image"]
         out[key] = asset
 
+    render_props = item_render_properties(item_id, out, published_collection)
+
+    extensions = [
+        "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
+    ]
+    # The Render extension is how a client is told which bands to draw and
+    # with what stretch. Without it every viewer falls back to its own
+    # defaults, and titiler's default for a Float32 band is the dtype range
+    # -- -3.4e38..3.4e38 -- which maps the whole ocean onto one colour.
+    #
+    # Declared only when there is something to declare: the schema makes
+    # `renders` a REQUIRED property of any item claiming the extension, so an
+    # unconditional entry makes every granule item invalid. The granule items
+    # are exactly the ones with nothing to render -- a netCDF is not a layer
+    # a tile server can draw -- so this is the common case, not the edge.
+    if render_props.get("renders"):
+        extensions.append(
+            "https://stac-extensions.github.io/render/v2.0.0/schema.json")
+
     return {
         "type": "Feature",
         "stac_version": STAC_VERSION,
@@ -362,14 +446,12 @@ def build_item(item_id, collection, dt, assets, properties=None,
         # measured: the netCDF path has no raster library, and GHRSST L4
         # carries no grid_mapping, which is the whole reason the COG step
         # passes -a_srs EPSG:4326.
-        "stac_extensions": [
-            "https://stac-extensions.github.io/projection/v1.1.0/schema.json",
-        ],
+        "stac_extensions": extensions,
         "id": item_id,
         "collection": collection,
         "geometry": GLOBAL_GEOMETRY,
         "bbox": list(GLOBAL_BBOX),
-        "properties": dict(props, **{"proj:epsg": 4326}),
+        "properties": dict(props, **render_props, **{"proj:epsg": 4326}),
         "assets": out,
         "links": [
             {"rel": "root", "href": "../../catalog.json",
@@ -453,8 +535,7 @@ def build_collection(collection_id, title, description, items):
     # collection came back with "renders": {} because the granules carry no
     # renderable field -- correct, and pure noise in the catalogue.
     renders = {
-        key: dict(params, assets=[key], title=ASSET_TITLES.get(key, key))
-        for key, params in RENDER.items()
+        key: render_block(key) for key in RENDER
         if any(key in i["assets"] for i in items)
     }
     if renders:
