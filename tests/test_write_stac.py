@@ -506,3 +506,35 @@ def test_the_render_extension_is_not_declared_without_renders(tmp_path):
 
     assert "renders" not in item["properties"]
     assert RENDER_EXT not in item["stac_extensions"]
+
+
+def test_the_collection_title_carries_the_version(tmp_path):
+    """Four collections called the same thing is how you open a stale one.
+
+    Every version forks a new collection and they all take one title from
+    COLLECTIONS, so the catalogue listing cannot be navigated without
+    opening each entry. The version is not visible inside a job -- MAAP
+    stamps processing:version on ingest -- but the published collection id
+    ends in it.
+    """
+    _touch(tmp_path, "g_sst.tif")
+    _run(tmp_path, "--collection", "mur-l4-browse",
+         "--item-id", "mur-cog-20261011-1km",
+         "--datetime", "2026-10-11T09:00:00Z",
+         "--stac-collection", "u__mur-cog_1756__2.0.19",
+         "--asset", "sst=g_sst.tif")
+    coll = json.loads(
+        (tmp_path / "mur-l4-browse" / "collection.json").read_text())
+    assert coll["title"].endswith(" v2.0.19"), coll["title"]
+
+
+def test_an_unknown_version_leaves_the_title_alone(tmp_path):
+    """A fragment of a malformed id appended to the title helps nobody."""
+    _touch(tmp_path, "g_sst.tif")
+    _run(tmp_path, "--collection", "mur-l4-browse",
+         "--item-id", "mur-cog-20261011-1km",
+         "--datetime", "2026-10-11T09:00:00Z",
+         "--asset", "sst=g_sst.tif")
+    coll = json.loads(
+        (tmp_path / "mur-l4-browse" / "collection.json").read_text())
+    assert " v" not in coll["title"], coll["title"]

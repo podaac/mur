@@ -60,6 +60,7 @@ import datetime
 import json
 import os
 import posixpath
+import re
 import sys
 
 STAC_VERSION = "1.0.0"
@@ -467,7 +468,35 @@ def build_item(item_id, collection, dt, assets, properties=None,
     }
 
 
-def build_collection(collection_id, title, description, items):
+def versioned_title(title, published_collection):
+    """`title`, with the algorithm version appended when it is knowable.
+
+    Every version of an algorithm forks a new collection, and they all take
+    the same title from COLLECTIONS -- so the catalogue lists four entries
+    reading "MUR L4 SST Browse Imagery" with nothing to tell them apart, and
+    the only way to find the current one is to open each and read the items.
+    That has sent a reader to a stale collection more than once.
+
+    The version is not otherwise visible from inside a job: MAAP stamps
+    processing:version on ingest, the container never sees it. But the
+    published collection id the orchestrator passes in ends in it --
+    jleach_jpl__mur-cog_1756__2.0.19 -- so where that is known, so is the
+    version. Where it is not, the title is left exactly as it was rather
+    than guessed at.
+    """
+    if not published_collection or "__" not in published_collection:
+        return title
+    version = published_collection.rsplit("__", 1)[-1]
+    # Only something that actually looks like a version. A collection id in
+    # an unexpected shape should leave the title alone, not append a
+    # fragment of itself to it.
+    if not re.match(r"^\d+(\.\d+)+$", version):
+        return title
+    return "%s v%s" % (title, version)
+
+
+def build_collection(collection_id, title, description, items,
+                     published_collection=""):
     """The Collection every Item in this catalog belongs to.
 
     Exactly one, deliberately: the ingestion service requires a single
@@ -489,7 +518,8 @@ def build_collection(collection_id, title, description, items):
         "type": "Collection",
         "stac_version": STAC_VERSION,
         "id": collection_id,
-        "title": meta.get("title") or title,
+        "title": versioned_title(meta.get("title") or title,
+                                 published_collection),
         "description": meta.get("description") or description,
         "license": "proprietary",
         "extent": {
@@ -597,7 +627,8 @@ def existing_items(output_dir, collection_id, excluding=()):
     return found
 
 
-def write_catalog(output_dir, collection_id, title, description, items):
+def write_catalog(output_dir, collection_id, title, description, items,
+                  published_collection=""):
     """Write catalog.json, the collection, and every item. Returns paths."""
     written = []
 
@@ -616,7 +647,8 @@ def write_catalog(output_dir, collection_id, title, description, items):
     linked = list(items) + existing_items(
         output_dir, collection_id, excluding={i["id"] for i in items})
     dump(os.path.join(cdir, "collection.json"),
-         build_collection(collection_id, title, description, linked))
+         build_collection(collection_id, title, description, linked,
+                          published_collection))
     # Last, so a crash midway leaves no catalog.json for the ingest service
     # to find and reject. Absent metadata is a missing layer; half-written
     # metadata is a published lie.
@@ -714,7 +746,7 @@ def main(argv=None):
         args.output_dir, args.collection,
         args.collection_title or args.collection,
         args.collection_description or args.collection_title or args.collection,
-        [item])
+        [item], published_collection=args.stac_collection)
 
     print("STAC: %s with %d asset(s) -> catalog.json" % (
         args.item_id, len(assets)))
