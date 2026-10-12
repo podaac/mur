@@ -514,12 +514,19 @@
     order is to have the collection dropped first, then delete the
     objects.</p>
 
-    <p>Collection metadata also appears to be stamped on FIRST ingest and not
-    revised afterwards: the 2.0.18 analysis collection came out with no title
-    or keywords while 2.0.15 through 2.0.17 carried them from identical code,
-    and its items are correct. So a first job into a new version sets that
-    collection's description for good. Not confirmed with MAAP, but it fits
-    what is observable.</p>
+    <p>Collection metadata, by contrast, is NOT frozen. MAAP's own
+    documentation is explicit: &ldquo;Later jobs can overwrite metadata on
+    generated Catalog and Collection records. Do not rely on manual edits to
+    those records surviving ingestion.&rdquo; So a collection that comes out
+    with the wrong title is repaired by running another job at that same
+    version &mdash; no version bump, and nothing to clean up.</p>
+
+    <p>One case here is unexplained: the 2.0.18 analysis collection ingested
+    with no title, keywords or providers, while 2.0.15 through 2.0.17 carried
+    all three. The image was current &mdash; its items' asset descriptions
+    match this repository's text exactly &mdash; so the catalog it staged out
+    did contain them. Recorded rather than rationalised; the items are
+    correct and the gap is cosmetic.</p>
 
     <h4>No <code>item_assets</code> on the collection</h4>
 

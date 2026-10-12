@@ -9,11 +9,17 @@
 Run it in a MAAP workspace: it needs credentials for your bucket.
 
 WHAT THIS CAN AND CANNOT CLEAN UP
-    It deletes OBJECTS. It cannot remove STAC entries, and neither can you:
-    dps-stac.maap-project.org answers 405 to DELETE on both items and
-    collections, and its 29 conformance classes include no Transaction. An
-    ingested collection is there until MAAP removes it, which is a support
-    request rather than a command.
+    It deletes OBJECTS. It cannot remove STAC entries, and neither can you.
+    Every one of the deployed API's 21 routes registers GET and nothing else
+    -- no DELETE, POST, PUT or PATCH anywhere in its OpenAPI document -- and
+    live requests confirm it: DELETE on an item and on a collection both
+    answer 405. maap-eoapi can expose collection writes, but this deployment
+    does not. An ingested collection is there until MAAP removes it, which is
+    a request to support@maap-project.org rather than a command.
+
+    A wrong collection TITLE is a different matter and needs no cleanup at
+    all: MAAP's docs say later jobs overwrite collection metadata, so running
+    another job at the same version repairs it in place.
 
     That asymmetry is the reason for the safety check below. Deleting a
     version's objects while its STAC items survive does not tidy anything --
