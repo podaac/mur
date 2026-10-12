@@ -296,16 +296,18 @@ def preview_links(published_collection, item_id, asset_keys):
     as assets would reintroduce exactly that, breaking the tiling this is
     meant to make easier.
 
-    THESE DO NOT REACH THE API, and that is not fixable from here. MAAP
-    serves the ingested catalog through stac-fastapi-pgstac, which stores an
-    item's properties and assets but regenerates `links` from the database on
-    every response. Checked against the live service: every ingested item,
-    cog and mrva alike, comes back with exactly collection/parent/root/self
-    and nothing else. They are still written because the staged-out
-    catalog.json in dps_output is itself a valid static catalog that anything
-    pointed at it will follow -- but a reader coming in through the API sees
-    them only as the `renders` block and the mur:map_url properties below,
-    which are carried in places the ingest does preserve.
+    These DO survive ingest, and STAC Browser renders both: rel=alternate
+    appears under "Additional Resources" and rel=preview becomes the item's
+    thumbnail. Confirmed on a live 2.0.19 item.
+
+    That was briefly believed to be false. The 2.0.18 items came back from
+    the API with exactly collection/parent/root/self, which looked like the
+    ingest regenerating `links` -- stac-fastapi-pgstac does exactly that for
+    some fields, so the theory fit. It was wrong: those items had no viewer
+    links because that run never passed --stac-collection, so the guard below
+    returned [] and nothing was ever written. An absent input and a stripped
+    field are indistinguishable from the far end, which is why the check that
+    settles it is the one on the emitted file, not the served one.
 
     One pair for the field a reader wants first, rather than a pair per
     field: MUR25 carries five, and ten more entries would bury the data.
@@ -348,22 +350,21 @@ def render_block(key):
 def item_render_properties(item_id, assets, published_collection):
     """Render hints and viewer URLs, in the places the ingest preserves.
 
-    Two separate jobs, both of which used to be done somewhere that did not
-    survive:
-
-    `renders` is the STAC Render extension, and is the only one of these a
+    `renders` is the STAC Render extension, and is the only thing here a
     generic client understands. Each entry names the assets to draw and the
     stretch to draw them with, so a viewer opens on the right colour scale
-    instead of its own default. The Collection already carried this and it
-    came through ingest intact, which is the evidence that properties are
-    preserved where `links` are not.
+    instead of its own default -- and titiler's default for a Float32 band is
+    the dtype range, -3.4e38..3.4e38, which maps the whole ocean onto one
+    colour. The Collection already carried a renders block and it came
+    through ingest intact, so this is a field the ingest preserves.
 
     mur:map_url / mur:image_url repeat the primary field's viewer URLs at the
-    top level. They are on each asset too, but an asset-level property is
-    several clicks down in a browser, and these are the two links a person
-    actually wants. Omitted entirely when the published collection id is
-    unknown, for the same reason preview_links omits them: a URL that looks
-    right and 404s is worse than no URL.
+    top level, where a reader can find them without opening an asset. They
+    duplicate the links preview_links writes; both are cheap, and they fail
+    in different ways -- a client that ignores one may honour the other.
+    Omitted entirely when the published collection id is unknown, for the
+    same reason preview_links omits them: a URL that looks right and 404s is
+    worse than no URL.
     """
     out = {}
 

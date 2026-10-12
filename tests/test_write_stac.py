@@ -445,13 +445,13 @@ def test_no_links_when_the_collection_id_is_unknown(tmp_path):
 RENDER_EXT = "https://stac-extensions.github.io/render/v2.0.0/schema.json"
 
 
-def test_renders_survive_where_links_do_not(tmp_path):
-    """The hints a viewer needs live in properties, not links.
+def test_render_hints_are_carried_in_properties_too(tmp_path):
+    """A viewer should not have to read `links` to style the layer.
 
-    MAAP serves the ingested catalog through stac-fastapi-pgstac, which
-    regenerates `links` from the database -- every live item comes back with
-    exactly collection/parent/root/self. Anything a reader must still be able
-    to find has to sit in properties or assets, which are preserved.
+    The links carry the same URLs and do survive ingest, but only a client
+    that follows rel=alternate benefits. `renders` is the field a generic
+    STAC client reads for its defaults, and without it titiler falls back to
+    the Float32 dtype range.
     """
     _touch(tmp_path, "g_sst.tif")
     _touch(tmp_path, "g_anom.tif")
