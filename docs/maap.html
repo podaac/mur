@@ -494,6 +494,33 @@
       before anyone reads meaning into the layer.</p>
     </div>
 
+    <h4>Nothing in this catalogue can be deleted</h4>
+
+    <p>Verified against the live service: <code>DELETE</code> on an item and
+    on a collection both answer <strong>405</strong>, and the API's 29
+    conformance classes include no Transaction. Ingestion is automatic and
+    one-way. An ingested collection stays until MAAP removes it, which is a
+    request to <code>support@maap-project.org</code> rather than a
+    command.</p>
+
+    <p>Two consequences worth planning around. First, every algorithm version
+    leaves a collection behind permanently, so the version in the collection
+    id is not just a label &mdash; it is a row in a list that only grows.
+    Second, and more sharply: <strong>deleting a version's objects while its
+    STAC items survive makes things worse, not better.</strong> It turns an
+    old collection nobody opens into a collection whose every link is broken,
+    and that state cannot be undone. <code>utils/mur_cleanup.py</code>
+    refuses to do it for that reason unless explicitly overridden; the right
+    order is to have the collection dropped first, then delete the
+    objects.</p>
+
+    <p>Collection metadata also appears to be stamped on FIRST ingest and not
+    revised afterwards: the 2.0.18 analysis collection came out with no title
+    or keywords while 2.0.15 through 2.0.17 carried them from identical code,
+    and its items are correct. So a first job into a new version sets that
+    collection's description for good. Not confirmed with MAAP, but it fits
+    what is observable.</p>
+
     <h4>No <code>item_assets</code> on the collection</h4>
 
     <p>It is the natural place to document each asset key once, and it cannot
