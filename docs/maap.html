@@ -496,10 +496,14 @@
 
     <h4>Nothing in this catalogue can be deleted</h4>
 
-    <p>Verified against the live service: <code>DELETE</code> on an item and
-    on a collection both answer <strong>405</strong>, and the API's 29
-    conformance classes include no Transaction. Ingestion is automatic and
-    one-way. An ingested collection stays until MAAP removes it, which is a
+    <p>Verified two ways. Its OpenAPI document registers exactly two verbs
+    across 21 routes &mdash; <code>GET</code> everywhere, and
+    <code>POST</code> on <code>/search</code>, which is a query rather than a
+    write. And live requests agree: <code>DELETE</code> on an item and on a
+    collection both answer <strong>405</strong>, with no Transaction among
+    the API's 29 conformance classes. (<code>maap-eoapi</code> can expose
+    collection writes as an opt-in; this deployment does not.) Ingestion is
+    automatic and one-way. An ingested collection stays until MAAP removes it, which is a
     request to <code>support@maap-project.org</code> rather than a
     command.</p>
 

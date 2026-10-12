@@ -10,10 +10,10 @@ Run it in a MAAP workspace: it needs credentials for your bucket.
 
 WHAT THIS CAN AND CANNOT CLEAN UP
     It deletes OBJECTS. It cannot remove STAC entries, and neither can you.
-    Every one of the deployed API's 21 routes registers GET and nothing else
-    -- no DELETE, POST, PUT or PATCH anywhere in its OpenAPI document -- and
-    live requests confirm it: DELETE on an item and on a collection both
-    answer 405. maap-eoapi can expose collection writes, but this deployment
+    The deployed API's OpenAPI document registers exactly two verbs across
+    its 21 routes: GET everywhere, and POST on /search -- which is a query,
+    not a write. No DELETE, PUT or PATCH anywhere. Live requests agree:
+    DELETE on an item and on a collection both answer 405. maap-eoapi can expose collection writes, but this deployment
     does not. An ingested collection is there until MAAP removes it, which is
     a request to support@maap-project.org rather than a command.
 
