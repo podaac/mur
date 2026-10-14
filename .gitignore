@@ -86,3 +86,6 @@ download_log.tar.gz
 downloads_*.jsonl
 log_*.txt
 *.nc
+
+# Backfill progress record (utils/backfill_mur_maap.py --ledger)
+backfill_ledger.jsonl
