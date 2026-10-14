@@ -33,6 +33,7 @@ import pathlib
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+import mur_certs
 import mur_config
 import mur_date
 import mur_window
@@ -41,6 +42,11 @@ from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
 from mrva_static_files import MRVA_STATIC_RELATIVE_PATHS, seasonal_relative_path
 from mur_maap import outputs, paths, stac
 from mur_maap import tags
+
+# mur_maap.stac reads MAAP's STAC over urllib, which carries no CA store of
+# its own. Without this, link decoration fails with CERTIFICATE_VERIFY_FAILED
+# on an interpreter whose default verify paths were never populated.
+mur_certs.configure()
 from mur_maap.version import ALGORITHM_VERSION
 
 logger = logging.getLogger(__name__)

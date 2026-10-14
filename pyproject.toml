@@ -89,6 +89,7 @@ include = [
     "mur_config.py",
     "mur_date.py",
     "mur_window.py",
+    "mur_certs.py",
     "iquam_date_flags.py",
     "landice_static_files.py",
     "mrva_static_files.py",

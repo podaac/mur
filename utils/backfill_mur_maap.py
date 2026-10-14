@@ -59,8 +59,14 @@ import urllib.request
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+import mur_certs                                           # noqa: E402
 import mur_window                                          # noqa: E402
 from mur_maap import stac                                  # noqa: E402
+
+# Before the first HTTPS call. urllib has no bundled CA store, so on an
+# interpreter whose default verify paths were never populated every STAC
+# lookup fails with CERTIFICATE_VERIFY_FAILED. See mur_certs.
+mur_certs.configure()
 
 MRVA_ALGORITHM = "mur-mrva"
 
@@ -268,8 +274,30 @@ def main(argv=None):
         # published" would resubmit an entire backfill.
         print(f"\nERROR: could not read MAAP's STAC to find existing "
               f"products: {exc}")
-        print("       Re-run when it is reachable, or pass --force to "
-              "reprocess regardless.")
+        if "CERTIFICATE_VERIFY_FAILED" in str(exc):
+            # Distinct from unreachable, and --force is the wrong remedy: it
+            # would reprocess days that are already done.
+            print("\n       This is certificate verification, not "
+                  "reachability. Either this interpreter has no CA store, or\n"
+                  "       a TLS-inspecting proxy is presenting a privately "
+                  "signed certificate.\n")
+            print(f"       bundle in use: "
+                  f"{os.environ.get('SSL_CERT_FILE') or '(none)'}\n")
+            print("       Diagnose with:")
+            print("         python -c \"import ssl,certifi;"
+                  "print(ssl.get_default_verify_paths());print(certifi.where())\"")
+            print("         openssl s_client -connect "
+                  "dps-stac.maap-project.org:443 -showcerts </dev/null \\")
+            print("           2>/dev/null | grep -E '^(depth|verify|.*issuer)'")
+            print("\n       If the issuer is a corporate root, append it to a "
+                  "bundle and point\n       SSL_CERT_FILE at that:")
+            print("         cat $(python -c 'import certifi;print(certifi.where())') \\")
+            print("             /path/to/corporate-root.pem > ~/.mur-ca-bundle.pem")
+            print("         setenv SSL_CERT_FILE ~/.mur-ca-bundle.pem   # tcsh")
+        else:
+            print("       Re-run when it is reachable.")
+        print("\n       --force skips the check entirely, but then days "
+              "already processed\n       will be processed again.")
         if not args.force:
             return 2
     print(f"collections    {len(collections)} mur-mrva "
