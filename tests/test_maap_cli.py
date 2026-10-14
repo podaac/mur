@@ -395,12 +395,24 @@ def test_the_version_comes_from_the_checkout_by_default():
         {"maap": {}}) == (ALGORITHM_VERSION, False)
 
 
+def _other_version():
+    """A version that is deliberately not this checkout's.
+
+    Hardcoding one couples the test to today's number: these were written when
+    the repo was at 2.0.4 and broke the moment it rolled to 2.0.19, because an
+    override equal to the checkout is correctly not a pin.
+    """
+    from mur_maap.version import ALGORITHM_VERSION
+    major, _, _ = ALGORITHM_VERSION.partition(".")
+    return f"{int(major) - 1}.0.0"
+
+
 def test_a_config_override_is_reported_as_pinned():
     import run_mur_maap
 
-    version, pinned = run_mur_maap.resolve_version(
-        {"maap": {"algorithm_version": "2.0.19"}})
-    assert (version, pinned) == ("2.0.19", True)
+    other = _other_version()
+    assert run_mur_maap.resolve_version(
+        {"maap": {"algorithm_version": other}}) == (other, True)
 
 
 def test_an_override_equal_to_the_checkout_is_not_a_pin():
@@ -433,7 +445,8 @@ def test_the_dry_run_plan_names_the_version(capsys, tmp_path):
          / "config.maap.example.json").read_text())
     config["maap"]["workspace_root"] = "s3://maap-ops-workspace/someone"
     config["maap"]["queue"] = "maap-dps-worker-8gb"
-    config["maap"]["algorithm_version"] = "2.0.19"
+    other = _other_version()
+    config["maap"]["algorithm_version"] = other
     for section in ("landice", "mrva"):
         config[section]["static_resources_dir"] = (
             "s3://maap-ops-workspace/someone/mur/static-resources")
@@ -443,4 +456,4 @@ def test_the_dry_run_plan_names_the_version(capsys, tmp_path):
     assert run_mur_maap.main(
         ["--config", str(path), "-p", "-5", "--dry-run"]) == 0
     out = capsys.readouterr().out
-    assert "version        2.0.19 (pinned by config)" in out
+    assert f"version        {other} (pinned by config)" in out
