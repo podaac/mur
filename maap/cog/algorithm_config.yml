@@ -14,8 +14,8 @@ algorithm_description: >
   titiler-dps-stac.maap-project.org, so the layers are discoverable by date
   without a registration request or a public bucket.
 algorithm_name: mur-cog
-algorithm_version: "2.0.4"
-algorithm_container_url: ghcr.io/podaac/mur/cog-dps:2.0.4
+algorithm_version: "2.0.19"
+algorithm_container_url: ghcr.io/podaac/mur/cog-dps:2.0.19
 
 keywords: MUR, SST, GHRSST, COG, visualization
 code_repository: https://github.com/podaac/mur
