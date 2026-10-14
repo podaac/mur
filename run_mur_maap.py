@@ -31,7 +31,7 @@ import logging
 import os
 import pathlib
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import mur_config
 import mur_date
@@ -1324,6 +1324,27 @@ def _warn_about_broken_queues(queue: str, queues: Optional[Dict[str, str]]) -> N
                 who, q, BROKEN_QUEUES[q])
 
 
+def resolve_version(config: Dict) -> Tuple[str, bool]:
+    """The algorithm version jobs will run, and whether a config overrode it.
+
+    The version comes from the code, not from a config default. MAAP keeps
+    every registered version, so asking for an old one succeeds and runs an
+    old image -- a config that silently disagreed with the deployed packages
+    would be indistinguishable from a working one. An explicit override is
+    still allowed (rolling back, or testing a package deployed from another
+    checkout), but it has to be deliberate and it says so.
+
+    Shared with main() so that --dry-run can report the version without
+    building a client: resolving it only inside build_client() meant the plan
+    never named the version, and a plan that does not say which code it will
+    run cannot be checked before a long backfill.
+    """
+    override = (config.get("maap") or {}).get("algorithm_version")
+    if override and str(override) != ALGORITHM_VERSION:
+        return str(override), True
+    return ALGORITHM_VERSION, False
+
+
 def build_client(config: Dict, args):
     """Construct the real client from config plus CLI overrides."""
     from mur_maap.client import MaapPyClient
@@ -1348,16 +1369,8 @@ def build_client(config: Dict, args):
         for s, cfg in (l2p.get("sensors") or {}).items()
     }
 
-    # The version comes from the code, not from a config default. MAAP keeps
-    # every registered version, so asking for an old one succeeds and runs an
-    # old image -- a config that silently disagreed with the deployed packages
-    # would be indistinguishable from a working one. An explicit override is
-    # still allowed (rolling back, or testing a package deployed from another
-    # checkout), but it has to be deliberate and it says so.
-    version = ALGORITHM_VERSION
-    override = maap_cfg.get("algorithm_version")
-    if override and str(override) != ALGORITHM_VERSION:
-        version = str(override)
+    version, _ = resolve_version(config)
+    if version != ALGORITHM_VERSION:
         logger.warning(
             "config pins algorithm_version %s, but this checkout builds %s. "
             "Jobs will run the %s packages, which were deployed from a "
@@ -1819,6 +1832,9 @@ def main(argv=None) -> int:
     for d in days:
         print(f"  {d}  {mur_window.mode_for(d, day1, force_nrt=args.force_nrt)}")
     print(f"sensors        {', '.join(config['l2p']['active_sensors'])}")
+    version, pinned = resolve_version(config)
+    note = " (pinned by config)" if pinned else " (from this checkout)"
+    print(f"version        {version}{note}")
 
     _print_job_plan(config, days, reference_today, args)
 

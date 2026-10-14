@@ -377,3 +377,70 @@ def test_a_good_queue_map_says_nothing(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         run_mur_maap.build_client(config, args)
     assert "broken" not in caplog.text
+
+
+# --- which algorithm version a run will use --------------------------------
+#
+# MAAP keeps every version ever registered, so naming an old one succeeds: it
+# resolves, it submits, and it runs an old image with nothing in the output
+# saying so. Resolution used to live only inside build_client(), which --dry-run
+# never calls, so the plan could not be checked before a long run.
+
+def test_the_version_comes_from_the_checkout_by_default():
+    import run_mur_maap
+    from mur_maap.version import ALGORITHM_VERSION
+
+    assert run_mur_maap.resolve_version({}) == (ALGORITHM_VERSION, False)
+    assert run_mur_maap.resolve_version(
+        {"maap": {}}) == (ALGORITHM_VERSION, False)
+
+
+def test_a_config_override_is_reported_as_pinned():
+    import run_mur_maap
+
+    version, pinned = run_mur_maap.resolve_version(
+        {"maap": {"algorithm_version": "2.0.19"}})
+    assert (version, pinned) == ("2.0.19", True)
+
+
+def test_an_override_equal_to_the_checkout_is_not_a_pin():
+    """Same number is not a disagreement, and must not read as a rollback."""
+    import run_mur_maap
+    from mur_maap.version import ALGORITHM_VERSION
+
+    assert run_mur_maap.resolve_version(
+        {"maap": {"algorithm_version": ALGORITHM_VERSION}}) == (
+            ALGORITHM_VERSION, False)
+
+
+def test_a_null_override_falls_back_to_the_checkout():
+    """config.maap.example.json ships algorithm_version: null deliberately."""
+    import run_mur_maap
+    from mur_maap.version import ALGORITHM_VERSION
+
+    assert run_mur_maap.resolve_version(
+        {"maap": {"algorithm_version": None}}) == (ALGORITHM_VERSION, False)
+
+
+def test_the_dry_run_plan_names_the_version(capsys, tmp_path):
+    """A plan that does not say which code it will run cannot be checked."""
+    import json
+    import pathlib
+    import run_mur_maap
+
+    config = json.loads(
+        (pathlib.Path(run_mur_maap.__file__).parent
+         / "config.maap.example.json").read_text())
+    config["maap"]["workspace_root"] = "s3://maap-ops-workspace/someone"
+    config["maap"]["queue"] = "maap-dps-worker-8gb"
+    config["maap"]["algorithm_version"] = "2.0.19"
+    for section in ("landice", "mrva"):
+        config[section]["static_resources_dir"] = (
+            "s3://maap-ops-workspace/someone/mur/static-resources")
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config))
+
+    assert run_mur_maap.main(
+        ["--config", str(path), "-p", "-5", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "version        2.0.19 (pinned by config)" in out
