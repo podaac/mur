@@ -145,13 +145,46 @@ printf %s "$MAAP_PGT" | sha256sum</code></pre>
       eyeballing it; <code>--check</code> also flags a clipped prefix.</p>
     </div>
 
-    <p>On the target host, keep it out of shell history:</p>
-<pre><code>read -rsp 'MAAP_PGT: ' MAAP_PGT &amp;&amp; export MAAP_PGT
+    <p>On the target host, store the <strong>raw token value and nothing
+    else</strong> in <code>~/.maap-token</code> &mdash; no <code>export</code>,
+    no quoting. A file of shell syntax is only sourceable from the shell that
+    wrote it, and a raw value is read identically from bash, tcsh and Python.
+    <code>utils/cron_mur_maap.sh</code> reads this file, strips any whitespace
+    a paste introduced, and still honours the older
+    <code>export MAAP_PGT=&hellip;</code> form.</p>
 
-# or persist it, which is worth it if a long upload needs restarting
-umask 077
-printf 'export MAAP_PGT=%q\n' 'PASTE_HERE' &gt; ~/.maap-token
-source ~/.maap-token</code></pre>
+    <p>Type it into a prompt rather than a command, so it reaches neither shell
+    history nor <code>ps</code>. From bash:</p>
+<pre><code>umask 077
+read -rsp 'MAAP_PGT: ' T &amp;&amp; echo
+printf %s "$T" &gt; ~/.maap-token &amp;&amp; chmod 600 ~/.maap-token &amp;&amp; unset T</code></pre>
+
+    <p>From <strong>tcsh</strong>, which has no <code>read</code>, borrow bash
+    for the one step:</p>
+<pre><code>bash -c 'umask 077; read -rsp "MAAP_PGT: " T &amp;&amp; echo &amp;&amp; \
+    printf %s "$T" &gt; ~/.maap-token &amp;&amp; chmod 600 ~/.maap-token'</code></pre>
+
+    <p>Then verify the paste survived, comparing both numbers against the
+    source host. This is the step that catches a clipped prefix:</p>
+<pre><code>wc -c &lt; ~/.maap-token
+tr -d '[:space:]' &lt; ~/.maap-token | shasum -a 256</code></pre>
+
+    <p>To use it interactively in the shell &mdash; needed for
+    <code>backfill_mur_maap.py</code> and the <code>--check</code> runs below,
+    though <em>not</em> for the cron wrapper, which reads the file itself:</p>
+<pre><code># bash
+export MAAP_PGT="$(tr -d '[:space:]' &lt; ~/.maap-token)"
+
+# tcsh
+setenv MAAP_PGT "`tr -d '[:space:]' &lt; ~/.maap-token`"</code></pre>
+
+    <div class="note">
+      <p>cron does not use your login shell. cronie runs each entry under
+      <code>/bin/sh</code> unless the crontab sets <code>SHELL=</code>, and
+      <code>cron_mur_maap.sh</code> carries a <code>#!/usr/bin/env bash</code>
+      shebang regardless &mdash; so a tcsh login shell changes nothing about
+      the scheduled run. It only changes how you set the variable by hand.</p>
+    </div>
 
     <h2 id="static">3. Stage the static data</h2>
 

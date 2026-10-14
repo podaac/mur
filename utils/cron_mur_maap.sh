@@ -27,10 +27,28 @@ PROCESS_DAYS="${MUR_PROCESS_DAYS:--1}"
 mkdir -p "$LOGDIR"
 LOG="$LOGDIR/maap_$(date -u +%F_%H%MZ).txt"
 
-# Keep the token out of the crontab and out of ps. ~/.maap-token holds
-# `export MAAP_PGT=...` under umask 077; see docs/maap-deployment.html.
-# shellcheck source=/dev/null
-[[ -f "$HOME/.maap-token" ]] && source "$HOME/.maap-token"
+# Keep the token out of the crontab and out of ps. ~/.maap-token holds the
+# RAW token value and nothing else -- no `export`, no quoting -- so that it can
+# be read identically from bash, tcsh (`setenv MAAP_PGT "`cat ~/.maap-token`"`)
+# or Python. A file of shell syntax would only be sourceable from the shell
+# that wrote it, and this host's login shell is tcsh while this script is bash.
+#
+# Stripping all whitespace is deliberate rather than tidy: a trailing newline
+# or a space picked up in a copy-paste is invisible, and the API's only
+# response is "Invalid session or insufficient permissions". A JWT contains no
+# whitespace, so there is nothing legitimate to lose.
+TOKEN_FILE="${MUR_TOKEN_FILE:-$HOME/.maap-token}"
+if [[ -z "${MAAP_PGT:-}" && -f "$TOKEN_FILE" ]]; then
+    if [[ "$(head -c7 "$TOKEN_FILE" 2>/dev/null)" == "export " ]]; then
+        # Older files written as `export MAAP_PGT=...`; still honoured.
+        # shellcheck source=/dev/null
+        source "$TOKEN_FILE"
+        MAAP_PGT="$(printf %s "${MAAP_PGT:-}" | tr -d '[:space:]')"
+    else
+        MAAP_PGT="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+    fi
+    export MAAP_PGT
+fi
 
 exec >>"$LOG" 2>&1 </dev/null
 echo "=== $(date -uIs) starting (repo=$REPO days=$PROCESS_DAYS) ==="
@@ -47,8 +65,9 @@ fail() { echo "ERROR: $1"; exit "${2:-1}"; }
     || fail "maap-py and/or boto3 missing from $PYTHON.
        Install with:  $PYTHON -m pip install 'maap-py>=5.0.0' 'boto3>=1.34.0'" 78
 
-[[ -n "${MAAP_PGT:-}" ]] || fail "MAAP_PGT is not set. Put 'export MAAP_PGT=...'
-       in ~/.maap-token, from https://console.maap-project.org/profile/tokens" 78
+[[ -n "${MAAP_PGT:-}" ]] || fail "MAAP_PGT is not set. Put the raw token value
+       (and nothing else) in $TOKEN_FILE, from
+       https://console.maap-project.org/profile/tokens" 78
 
 # A clipped paste loses the leading 'j'. Every call then returns only
 # "Invalid session or insufficient permissions", with no other clue.
