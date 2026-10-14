@@ -142,6 +142,17 @@ class MAAPClient:
         """
         raise NotImplementedError("MAAPClient.object_exists: wire up boto3 HEAD")
 
+    def object_modified(self, s3_uri: str) -> Optional[datetime.datetime]:
+        """When `s3_uri` was last written, or None if it does not exist.
+
+        Separate from object_exists because the answer is used for a different
+        question: not "is there a cached BIC" but "was it built before its own
+        data had finished arriving". A HEAD already returns LastModified, so
+        this costs nothing extra -- object_exists simply discards it.
+        """
+        raise NotImplementedError(
+            "MAAPClient.object_modified: wire up boto3 HEAD")
+
     def list_objects(self, prefix: str) -> List[str]:
         """List S3 hrefs under a prefix, for fan-in inputs (plan section 9).
 
@@ -274,12 +285,17 @@ class MAAPOrchestrator:
         config: Dict,
         client: MAAPClient,
         force_nrt: bool = False,
+        rebuild_stale_bics: bool = False,
         today_fn: Optional[Callable[[], datetime.date]] = None,
         stages: Optional[Iterable[str]] = None,
     ):
         self.config = mur_config.normalize_config(config)
         self.client = client
         self.force_nrt = force_nrt
+        # Opt-in: a reanalysis wants BICs rebuilt from the settled granule
+        # set, but turning this on by default would silently invalidate every
+        # cache a routine daily run depends on.
+        self.rebuild_stale_bics = rebuild_stale_bics
         # Which of the four container stages to submit. Narrowing this is how
         # you test one mechanism without paying for 23 jobs.
         self.stages = validate_stages(stages)
@@ -323,8 +339,14 @@ class MAAPOrchestrator:
         self,
         sensor: str,
         data_day: datetime.date,
+        *,
+        min_age_days: Optional[int] = None,
     ) -> Optional[str]:
         """Href of an already-produced BIC for this sensor/day, or None.
+
+        `min_age_days` rejects a BIC written fewer than that many days after
+        the day it describes -- see _bic_is_stale. None (the default) keeps the
+        historic behaviour of trusting any BIC that exists.
 
         Probes compressed then plain: l2p's writebic.m emits an uncompressed
         `.bic`, while production archives are `.bic.gz` and makebiq.m accepts
@@ -334,9 +356,40 @@ class MAAPOrchestrator:
         would be missed by mrva4com_container.m's per-sensor scan.
         """
         for candidate in paths.bic_candidate_hrefs(self.workspace_root, sensor, data_day):
-            if self.client.object_exists(candidate):
-                return candidate
+            if not self.client.object_exists(candidate):
+                continue
+            if min_age_days and self._bic_is_stale(
+                    candidate, data_day, min_age_days):
+                logger.info(
+                    "    %s %s: cached BIC was written before its granules "
+                    "had settled; rebuilding", sensor, data_day)
+                return None
+            return candidate
         return None
+
+    def _bic_is_stale(
+        self,
+        href: str,
+        data_day: datetime.date,
+        min_age_days: int,
+    ) -> bool:
+        """Whether this BIC was built before its own day's data had settled.
+
+        A BIC produced by an NRT run was built from the granules that had
+        arrived within a day or so of the swath. More keep arriving for
+        `stable` days afterwards. is_rewrite() covers that for a day that is
+        still young NOW, but it cannot see a day that was young WHEN THE BIC
+        WAS WRITTEN -- which is every day of a backfill. The file's own
+        LastModified is what carries that, and a HEAD already returns it.
+
+        Unknown mtime means not stale: an existence check that silently became
+        a rebuild-everything would be a far worse failure than a reused BIC.
+        """
+        modified = self.client.object_modified(href)
+        if modified is None:
+            return False
+        written = modified.date() if hasattr(modified, "date") else modified
+        return (written - data_day).days < min_age_days
 
     def _promote_bic(self, sensor: str, data_day: datetime.date, job: str) -> str:
         """Copy a fresh BIC from its DPS output path to the canonical key.
@@ -861,7 +914,9 @@ class MAAPOrchestrator:
 
                 cached_href = None
                 if not rewrite:
-                    cached_href = self._find_cached_bic(sensor, data_day)
+                    cached_href = self._find_cached_bic(
+                        sensor, data_day,
+                        min_age_days=stable if self.rebuild_stale_bics else None)
                 if cached_href is not None:
                     bic_results[(sensor, data_day)] = (cached_href, None)
                     continue
@@ -1785,6 +1840,14 @@ def parse_args(argv=None):
     parser.add_argument("--no-dedup", action="store_true",
                         help=argparse.SUPPRESS)   # now the default; kept so
                                                   # existing commands still run
+    parser.add_argument("--rebuild-stale-bics", action="store_true",
+                        help="Rebuild a cached BIC that was written fewer "
+                             "than its sensor's `stable` days after the day "
+                             "it describes. Such a BIC was produced by an NRT "
+                             "run from granules that were still arriving, so "
+                             "reusing it in a reanalysis defeats the point. "
+                             "Off by default: it invalidates caches a routine "
+                             "daily run relies on.")
     parser.add_argument("--force-nrt", action="store_true",
                         help="Process every day in NRT mode.")
     parser.add_argument("--dry-run", action="store_true",
@@ -1860,6 +1923,7 @@ def main(argv=None) -> int:
     orchestrator = MAAPOrchestrator(
         config, client,
         force_nrt=args.force_nrt,
+        rebuild_stale_bics=args.rebuild_stale_bics,
         today_fn=lambda: reference_today,     # frozen: a run must not drift
         stages=args.execute.split(",") if args.execute else None,
     )

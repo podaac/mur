@@ -262,15 +262,30 @@ class MaapPyClient(MAAPClient):
     # -- S3 -----------------------------------------------------------------
 
     def object_exists(self, s3_uri: str) -> bool:
+        return self._head(s3_uri) is not None
+
+    def object_modified(self, s3_uri: str):
+        """LastModified for `s3_uri`, or None if it is not there."""
+        head = self._head(s3_uri)
+        return None if head is None else head.get("LastModified")
+
+    def _head(self, s3_uri: str):
+        """The HEAD response, or None for an absent/unreadable object.
+
+        One place, because object_exists() and object_modified() ask the same
+        question of S3 and differ only in what they keep. 403 counts as absent
+        deliberately: the workspace session policy scopes you to your own
+        prefix, so a denied HEAD means "not yours", which for a cache probe is
+        the same answer as "not there".
+        """
         from botocore.exceptions import ClientError
         bucket, key = split_s3_uri(s3_uri)
         try:
-            self.workspace.s3().head_object(Bucket=bucket, Key=key)
-            return True
+            return self.workspace.s3().head_object(Bucket=bucket, Key=key)
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
             if code in ("404", "NoSuchKey", "403", "AccessDenied", "NotFound"):
-                return False
+                return None
             raise
 
     def list_objects(self, prefix: str) -> List[str]:

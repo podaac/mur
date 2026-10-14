@@ -197,6 +197,8 @@ def run_one_day(day, reference_today, args):
                         ("--sensors", args.sensors)):
         if value:
             cmd += [flag, value]
+    if getattr(args, "rebuild_stale_bics", False):
+        cmd.append("--rebuild-stale-bics")
     print(f"  $ {' '.join(cmd)}", flush=True)
     return subprocess.call(cmd, cwd=str(REPO))
 
@@ -232,6 +234,11 @@ def main(argv=None):
     ap.add_argument("--stop-on-error", action="store_true",
                     help="Abort the backfill on the first failing day "
                          "instead of carrying on.")
+    ap.add_argument("--rebuild-stale-bics", action="store_true",
+                    help="Rebuild BICs that an NRT run produced before the "
+                         "day's granules had finished arriving. Wanted for "
+                         "any day the daily pipeline already touched; days "
+                         "never processed before have no stale BIC to find.")
     ap.add_argument("--queue", help="Override the default queue.")
     ap.add_argument("--execute", help="Comma-separated stage subset.")
     ap.add_argument("--sensors", help="Comma-separated sensor subset.")

@@ -545,6 +545,8 @@ def test_maap_client_stub_methods_raise_not_implemented():
     with pytest.raises(NotImplementedError):
         client.object_exists("s3://bucket/key")
     with pytest.raises(NotImplementedError):
+        client.object_modified("s3://bucket/key")
+    with pytest.raises(NotImplementedError):
         client.list_objects("s3://bucket/prefix")
     with pytest.raises(NotImplementedError):
         client.write_manifest("mur/manifests/x.json", {"files": []})
@@ -1318,3 +1320,125 @@ def test_a_learned_suffix_beats_the_configured_one(orchestrator):
         "s3://b/u/dps_output/mur-mrva_1756/2.0.18/2026/10/11/1/2/3/4/x.nc")
     args = orchestrator._cog_args("s3://b/g.nc", "nrt")
     assert args["stac_collection"] == "jleach_jpl__mur-cog_1756__2.0.18"
+
+
+# --- stale BIC detection ---------------------------------------------------
+#
+# is_rewrite() asks whether a day is young NOW. It cannot ask whether a day was
+# young WHEN ITS BIC WAS WRITTEN, which is the only question that matters in a
+# backfill: every day is old, so nothing is ever a rewrite, and a BIC an NRT
+# run built from half-arrived granules is reused unchanged in the reanalysis.
+
+class _MtimeClient(FakeMAAPClient):
+    """FakeMAAPClient that also answers object_modified."""
+
+    def __init__(self, *args, mtimes=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.mtimes = mtimes or {}
+
+    def object_modified(self, s3_uri):
+        return self.mtimes.get(s3_uri)
+
+
+def _bic_href(orchestrator, sensor, day):
+    from mur_maap import paths
+    return paths.bic_candidate_hrefs(
+        orchestrator.workspace_root, sensor, day)[0]
+
+
+def _orchestrator_with_bic(day, *, written, rebuild_stale_bics, stable=2):
+    """An orchestrator whose only cached BIC was written on `written`."""
+    config = _single_sensor_config()
+    config["l2p"]["sensors"]["AMSR2R"]["stable"] = stable
+
+    client = _MtimeClient()
+    orchestrator = MAAPOrchestrator(
+        config, client, rebuild_stale_bics=rebuild_stale_bics,
+        today_fn=lambda: datetime.date(2026, 10, 14))
+    href = _bic_href(orchestrator, "AMSR2R", day)
+    client.existing_objects.add(href)
+    client.mtimes[href] = written
+    return orchestrator, href
+
+
+def test_a_bic_written_while_its_granules_were_still_arriving_is_rejected():
+    """The NRT-era BIC: written one day after the swath, stable is 2."""
+    day = datetime.date(2026, 10, 9)
+    orchestrator, _ = _orchestrator_with_bic(
+        day, written=datetime.date(2026, 10, 10), rebuild_stale_bics=True)
+    assert orchestrator._find_cached_bic("AMSR2R", day, min_age_days=2) is None
+
+
+def test_a_bic_written_after_the_data_settled_is_reused():
+    day = datetime.date(2026, 10, 9)
+    orchestrator, href = _orchestrator_with_bic(
+        day, written=datetime.date(2026, 10, 12), rebuild_stale_bics=True)
+    assert orchestrator._find_cached_bic(
+        "AMSR2R", day, min_age_days=2) == href
+
+
+def test_the_boundary_is_stable_days_after_the_data_day():
+    day = datetime.date(2026, 10, 9)
+    for written, expected_reuse in ((datetime.date(2026, 10, 10), False),
+                                    (datetime.date(2026, 10, 11), True)):
+        orchestrator, href = _orchestrator_with_bic(
+            day, written=written, rebuild_stale_bics=True)
+        got = orchestrator._find_cached_bic("AMSR2R", day, min_age_days=2)
+        assert (got == href) is expected_reuse, written
+
+
+def test_an_unknown_mtime_is_not_treated_as_stale():
+    """A cache probe that silently became rebuild-everything would be a far
+    worse failure than one reused BIC."""
+    day = datetime.date(2026, 10, 9)
+    orchestrator, href = _orchestrator_with_bic(
+        day, written=None, rebuild_stale_bics=True)
+    assert orchestrator._find_cached_bic(
+        "AMSR2R", day, min_age_days=2) == href
+
+
+def test_without_min_age_days_any_existing_bic_is_trusted():
+    """The historic behaviour, and what a running backfill still gets."""
+    day = datetime.date(2026, 10, 9)
+    orchestrator, href = _orchestrator_with_bic(
+        day, written=datetime.date(2026, 10, 10), rebuild_stale_bics=False)
+    assert orchestrator._find_cached_bic("AMSR2R", day) == href
+
+
+def test_the_flag_is_off_by_default():
+    """Turning this on by default would invalidate the caches every routine
+    daily run depends on."""
+    orchestrator = MAAPOrchestrator(_single_sensor_config(), FakeMAAPClient())
+    assert orchestrator.rebuild_stale_bics is False
+
+
+def test_the_default_path_never_asks_for_an_mtime():
+    """Proves a running backfill is unaffected: with the flag off, the extra
+    HEAD is not even issued."""
+    day = datetime.date(2026, 10, 9)
+    config = _single_sensor_config()
+
+    asked = []
+
+    class _Recording(FakeMAAPClient):
+        def object_modified(self, s3_uri):
+            asked.append(s3_uri)
+            return None
+
+    client = _Recording()
+    orchestrator = MAAPOrchestrator(config, client,
+                                    today_fn=lambda: datetime.date(2026, 10, 14))
+    client.existing_objects.add(_bic_href(orchestrator, "AMSR2R", day))
+    orchestrator._find_cached_bic("AMSR2R", day)
+    assert asked == []
+
+
+def test_a_datetime_mtime_works_as_well_as_a_date():
+    """boto3 returns a tz-aware datetime, the fakes a date; both must compare."""
+    import datetime as _dt
+    day = datetime.date(2026, 10, 9)
+    orchestrator, _ = _orchestrator_with_bic(
+        day,
+        written=_dt.datetime(2026, 10, 10, 3, 0, tzinfo=_dt.timezone.utc),
+        rebuild_stale_bics=True)
+    assert orchestrator._find_cached_bic("AMSR2R", day, min_age_days=2) is None
