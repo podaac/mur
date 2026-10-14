@@ -54,6 +54,17 @@ dev = [
     # built rather than inside one.
     "pystac[validation]>=1.10.0",
 ]
+# Everything run_mur_maap.py needs that the rest of the project does not.
+# An extra rather than a core dependency: maap-py only works against MAAP's
+# API, and nothing else here -- the local docker pipeline, the dataviewer,
+# the tests -- imports it. Inside a MAAP workspace the pangeo image already
+# ships it, which is why this gap went unnoticed until the orchestrator was
+# first run from an ordinary server.
+maap = [
+    "maap-py>=5.0.0",
+    "boto3>=1.34.0",
+]
+
 viz = [
     "cartopy>=0.22.0",
 ]
@@ -67,9 +78,21 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["dataviewer", "mur_maap"]
+# Both console scripts live at the repo root, not in a package, so each
+# entry point's module and everything it imports has to be listed. Omitting
+# any of these still builds a wheel -- the `mur-pipeline`/`mur-maap` scripts
+# then ImportError at first run, which an editable install never reveals.
 include = [
     "run_mur_pipeline.py",
     "run_web_viewer.py",
+    "run_mur_maap.py",
+    "mur_config.py",
+    "mur_date.py",
+    "mur_window.py",
+    "iquam_date_flags.py",
+    "landice_static_files.py",
+    "mrva_static_files.py",
+    "static_resources_layout.py",
 ]
 
 [dependency-groups]
