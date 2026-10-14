@@ -40,7 +40,7 @@ import mur_window
 from iquam_date_flags import format_iquam_reference_date
 from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
 from mrva_static_files import MRVA_STATIC_RELATIVE_PATHS, seasonal_relative_path
-from mur_maap import outputs, paths, stac
+from mur_maap import auth, outputs, paths, stac
 from mur_maap import tags
 
 # mur_maap.stac reads MAAP's STAC over urllib, which carries no CA store of
@@ -1841,6 +1841,12 @@ def main(argv=None) -> int:
     version, pinned = resolve_version(config)
     note = " (pinned by config)" if pinned else " (from this checkout)"
     print(f"version        {version}{note}")
+
+    # Loaded here rather than at import so that --dry-run reports the
+    # provenance without needing a token, and a real run fails with the
+    # reason rather than an Unauthorized from deep inside maap-py.
+    token_source = auth.load(warn=logger.warning)
+    print(f"token          {token_source or 'NOT FOUND'}")
 
     _print_job_plan(config, days, reference_today, args)
 
