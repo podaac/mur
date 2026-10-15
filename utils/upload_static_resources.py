@@ -309,18 +309,22 @@ def _token_shape_warnings(token: str):
     if stripped.startswith("jwt:"):
         return warnings                       # expected shape
 
-    # The specific, easy-to-miss failure: the jwt: prefix lost characters off
-    # the front, leaving the JWT body intact behind a partial prefix.
-    truncated = re.match(r"^(j?w?t?):(eyJ)", stripped)
-    if truncated:
+    # One specific, unambiguous failure: a PARTIAL `jwt:` prefix in front of a
+    # JWT body. `wt:eyJ...` cannot be a token in its own right, so this is a
+    # clip and nothing else.
+    #
+    # Nothing else about the shape is judged. MAAP tokens come in more than one
+    # form -- a workspace session ticket starts `jwt:`, a token generated at
+    # console.maap-project.org need not -- and an earlier version of this
+    # function called the latter an "unrecognized shape", which read as a
+    # problem while the token worked perfectly. Only the authenticated calls
+    # below decide whether a token is good.
+    if re.match(r"^(j?w?t?):(eyJ)", stripped):
         warnings.append(
-            f"!! starts {stripped[:4]!r} but a MAAP token starts 'jwt:' -- the "
-            f"leading character(s) were clipped when it was copied.")
+            f"!! starts {stripped[:4]!r}, which is a partial 'jwt:' prefix in "
+            f"front of a JWT -- the leading character(s) were clipped when it "
+            f"was copied.")
         warnings.append("   Re-copy it; do not hand-repair it, in case more is missing.")
-    elif stripped.startswith("eyJ"):
-        warnings.append("!! looks like a bare JWT with the 'jwt:' prefix missing.")
-    else:
-        warnings.append("   (unrecognized shape; a MAAP token normally starts 'jwt:')")
     return warnings
 
 
