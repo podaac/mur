@@ -261,9 +261,10 @@ def test_a_clipped_token_is_not_silently_repaired():
     assert any("Re-copy" in w for w in warnings)
 
 
-def test_a_bare_jwt_without_the_prefix_is_identified():
-    warnings = upload._token_shape_warnings("eyJhbGciOiJIUzI1NiJ9.body.sig")
-    assert any("prefix missing" in w for w in warnings)
+def test_a_bare_jwt_is_not_complained_about():
+    """It may well be a valid token. MAAP issues more than one form, and only
+    an authenticated call can tell a good one from a bad one."""
+    assert upload._token_shape_warnings("eyJhbGciOiJIUzI1NiJ9.body.sig") == []
 
 
 def test_whitespace_is_reported():
@@ -275,9 +276,26 @@ def test_whitespace_around_an_otherwise_valid_token_is_the_only_complaint():
     assert len(warnings) == 1 and "whitespace" in warnings[0]
 
 
-def test_an_unrecognized_shape_is_flagged_without_asserting_what_is_wrong():
-    warnings = upload._token_shape_warnings("some-opaque-token")
-    assert warnings and any("unrecognized" in w for w in warnings)
+@pytest.mark.parametrize("token", [
+    "some-opaque-token",
+    "PGT-9876-abcdef",
+    "jwt:eyJhbGciOiJIUzI1NiJ9.body.sig",
+    "QUdPUkEtMTIzNDU2Nzg5MC1hYmNkZWZnaGlqa2xtbm9w",   # 43 chars, as seen live
+])
+def test_a_shape_that_is_merely_unfamiliar_is_not_a_warning(token):
+    """An earlier version called anything not starting 'jwt:' an
+    "unrecognized shape". A 43-character console token tripped it while the
+    credentials check immediately below passed and the token went on to drive
+    a full run -- a note that reads as a problem, printed above evidence that
+    there is none, is worse than no note."""
+    assert upload._token_shape_warnings(token) == []
+
+
+def test_only_an_unambiguous_clip_is_warned_about():
+    """`wt:eyJ...` cannot be a token in its own right: a partial 'jwt:' prefix
+    in front of a JWT body is a clip and nothing else."""
+    warnings = upload._token_shape_warnings("wt:eyJhbGciOiJIUzI1NiJ9.body.sig")
+    assert any("clipped" in w for w in warnings)
 
 
 # --- orphaned multipart uploads --------------------------------------------
