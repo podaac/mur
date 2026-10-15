@@ -54,6 +54,15 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import static_resources_layout as layout  # noqa: E402
 
+# The token lives in ~/.maap-token, found identically by the cron wrapper, the
+# orchestrator and the backfill. Reading only os.environ meant --check failed
+# for anyone who had not also exported it by hand -- including as the cron
+# wrapper's pre-flight, where it is the one gate that must not give a false
+# negative.
+from mur_maap import auth as _auth  # noqa: E402
+
+_auth.load()
+
 DEFAULT_SUBPREFIX = "mur/static-resources"
 REFRESH_MARGIN_SECONDS = 900  # re-mint with 15 min left, matching botocore's advisory refresh
 
