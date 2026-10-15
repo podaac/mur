@@ -59,7 +59,7 @@ echo '{}' > "$FAKE/config.maap.json"
 : > "$FAKE/run_mur_maap.py"
 
 printf 'jwt:eyJgoodtoken\n' > "$TMP/token.good"
-printf 'wt:eyJclipped\n'    > "$TMP/token.clipped"
+printf 'PGT-9876-opaque\n'  > "$TMP/token.console"
 printf '   \n'              > "$TMP/token.blank"
 printf "export MAAP_PGT='jwt:eyJlegacy'\n" > "$TMP/token.legacy"
 
@@ -84,11 +84,13 @@ assert_says "the check reports the interpreter" "interpreter" "$out"
 out="$(run "$TMP/token.legacy")"; rc=$?
 assert_rc "the legacy export-form token file still works" 0 "$rc" "$out"
 
-# --- the token gates ------------------------------------------------------
+# A console-generated token is not shaped like a workspace session ticket. An
+# earlier version hard-failed on anything not starting "jwt:eyJ" and rejected
+# a working credential; only the live auth call may judge a token.
+out="$(run "$TMP/token.console")"; rc=$?
+assert_rc "a token that is not a JWT is not rejected on its shape" 0 "$rc" "$out"
 
-out="$(run "$TMP/token.clipped")"; rc=$?
-assert_rc   "a clipped token is rejected" 78 "$rc" "$out"
-assert_says "...and says why" "jwt:eyJ" "$out"
+# --- the token gates ------------------------------------------------------
 
 out="$(run "$TMP/absent")"; rc=$?
 assert_rc   "a missing token file is rejected" 78 "$rc" "$out"
@@ -142,7 +144,7 @@ out="$(env -i HOME="$TMP" MUR_REPO="$FAKE" MUR_PYTHON="$FAKE/python-badauth" \
     MUR_CONFIG="$FAKE/config.maap.json" MUR_LOGDIR="$TMP/logs" \
     MUR_TOKEN_FILE="$TMP/token.good" bash "$WRAPPER" --check 2>&1)"; rc=$?
 assert_rc   "a failed auth pre-flight exits 75, not 78" 75 "$rc" "$out"
-assert_says "...and blames the token" "expired" "$out"
+assert_says "...and blames the token" "expired, truncated" "$out"
 
 # --- --check must not submit ----------------------------------------------
 

@@ -107,23 +107,27 @@ def test_the_token_file_env_var_is_honoured(tmp_path, monkeypatch):
 
 # --- warnings --------------------------------------------------------------
 
-def test_a_clipped_token_is_warned_about(tmp_path):
-    """The failure mode this exists to catch: one byte short, and the API says
-    only 'Invalid session or insufficient permissions'."""
-    path = tmp_path / "token"
-    path.write_text("wt:eyJabc\n")
-    said = []
-    auth.load(str(path), warn=lambda msg, *a: said.append(msg % a if a else msg))
-    assert len(said) == 1
-    assert "truncated" in said[0]
+@pytest.mark.parametrize("value", [
+    "jwt:eyJabc",          # a workspace session ticket
+    "eyJabc.def.ghi",      # a bare JWT
+    "PGT-1234-abcdef",     # a CAS proxy ticket
+    "abcdef0123456789",    # an opaque console token
+])
+def test_no_token_format_is_assumed(tmp_path, value):
+    """A format check here can only produce false negatives.
 
-
-def test_a_well_formed_token_warns_about_nothing(tmp_path):
+    An earlier version required "jwt:eyJ", inferred from a workspace session
+    ticket, and rejected a valid token generated at console.maap-project.org
+    -- which is a different shape. Only an authenticated call can distinguish
+    a good token from a bad one, and the cron wrapper makes that call before
+    submitting. So any non-empty value loads, and warns about nothing."""
     path = tmp_path / "token"
-    path.write_text("jwt:eyJabc\n")
+    path.write_text(value + "\n")
     said = []
-    auth.load(str(path), warn=lambda msg, *a: said.append(msg))
+    assert auth.load(str(path), warn=lambda msg, *a: said.append(msg)) \
+        == f"file:{path}"
     assert said == []
+    assert os.environ["MAAP_PGT"] == value
 
 
 def test_a_missing_token_warns_with_where_to_get_one(tmp_path):

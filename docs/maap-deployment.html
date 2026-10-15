@@ -135,14 +135,19 @@ printf %s "$MAAP_PGT" | sha256sum</code></pre>
     which exists for off-platform automation.</p>
 
     <div class="warn">
-      <p><strong>A MAAP token is <code>jwt:</code> followed by a JWT</strong>, and
-      a JWT always begins <code>eyJ</code> (base64 for <code>{"</code>).
-      Selecting a wrapped value with the mouse in a browser terminal can clip a
-      leading character, leaving <code>wt:eyJ&hellip;</code>. The value still
-      looks like a long opaque blob, the length is one short, and the server
-      answers only <code>{"message": "Invalid session or insufficient
-      permissions."}</code>. Compare length and hash at both ends rather than
-      eyeballing it; <code>--check</code> also flags a clipped prefix.</p>
+      <p><strong>Do not assume a token's shape.</strong> A workspace's
+      <code>MAAP_PGT</code> is <code>jwt:</code> followed by a JWT, but a token
+      generated at the console is not necessarily &mdash; an earlier version of
+      <code>cron_mur_maap.sh</code> required the first shape and rejected a
+      valid instance of the second. Nothing in this repo checks the format any
+      more, and nothing should: only an authenticated call can tell a good
+      token from a bad one, which is what
+      <code>upload_static_resources.py --check</code> does.</p>
+      <p>What is still worth checking is that the value arrived intact.
+      Selecting a wrapped value with the mouse in a browser terminal can clip
+      the leading character, and the server then answers only
+      <code>{"message": "Invalid session or insufficient permissions."}</code>.
+      Compare length and hash at both ends rather than eyeballing it.</p>
     </div>
 
     <p>On the target host, store the <strong>raw token value and nothing

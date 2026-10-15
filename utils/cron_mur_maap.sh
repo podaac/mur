@@ -121,18 +121,20 @@ echo "interpreter    ${RUN[*]}"
        (and nothing else) in $TOKEN_FILE, from
        https://console.maap-project.org/profile/tokens" 78
 
-# A clipped paste loses the leading 'j'. Every call then returns only
-# "Invalid session or insufficient permissions", with no other clue.
-[[ "$MAAP_PGT" == jwt:eyJ* ]] \
-    || fail "MAAP_PGT does not start with 'jwt:eyJ' -- truncated or malformed" 78
-
 cd "$REPO"
 
 # Prove the token still works before submitting anything: --check does a real
 # put/get/delete against the workspace bucket and exits non-zero on failure.
-# Tokens expire, and an expired one otherwise looks like a broken pipeline.
+#
+# This is the ONLY check on the token's validity, deliberately. An earlier
+# version also required it to start "jwt:eyJ", inferred from the shape of a
+# workspace session ticket -- and rejected a perfectly valid token generated
+# at console.maap-project.org, which is a different shape. A guess about the
+# format can only add false negatives; an authenticated round-trip cannot.
 "${RUN[@]}" utils/upload_static_resources.py --check \
-    || fail "MAAP auth pre-flight failed -- token has most likely expired" 75
+    || fail "MAAP auth pre-flight failed. The token is expired, truncated or
+       otherwise not accepted -- the output above is the server's own answer.
+       A fresh one: https://console.maap-project.org/profile/tokens" 75
 
 if (( CHECK_ONLY )); then
     # The orchestrator's own --dry-run resolves the config, the algorithm

@@ -32,11 +32,12 @@ import re
 
 DEFAULT_TOKEN_FILE = "~/.maap-token"
 
-# A MAAP token is `jwt:` followed by a JWT, and a JWT always starts `eyJ`
-# (base64 for `{"`). Selecting a wrapped value with the mouse in a browser
-# terminal clips the leading character, leaving `wt:eyJ...`: still a long
-# opaque blob, one byte short, and rejected with no explanation.
-EXPECTED_PREFIX = "jwt:eyJ"
+# No format check lives here, on purpose. A workspace session ticket is
+# `jwt:` followed by a JWT, but a token generated at
+# console.maap-project.org is not, and asserting the first shape rejected a
+# valid instance of the second. Only an authenticated call can tell a good
+# token from a bad one -- utils/upload_static_resources.py --check is that
+# call, and the cron wrapper runs it before submitting anything.
 
 _EXPORT = re.compile(r"""^\s*export\s+MAAP_PGT=['"]?(.*?)['"]?\s*$""", re.M)
 
@@ -75,14 +76,7 @@ def load(path=None, *, warn=None):
             os.environ["MAAP_PGT"] = token
             source = f"file:{path}"
 
-    if warn and source:
-        token = os.environ["MAAP_PGT"]
-        if not token.startswith(EXPECTED_PREFIX):
-            warn("MAAP_PGT does not start with %r, so it is probably "
-                 "truncated -- a mouse-selected paste drops the leading "
-                 "character. Every call will return 'Invalid session or "
-                 "insufficient permissions'." % EXPECTED_PREFIX)
-    elif warn:
+    if warn and not source:
         warn("MAAP_PGT is not set and %s has no token, so MAAP calls will "
              "fail with Unauthorized. Get one from "
              "https://console.maap-project.org/profile/tokens" % path)
