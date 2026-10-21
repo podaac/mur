@@ -51,14 +51,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
 
-# Copy custom MATLAB Runtime installer from builder stage
-COPY --from=builder /tmp/runtime_installer/ /tmp/runtime_installer/
-
 # Install custom MATLAB Runtime
-RUN cd /tmp/runtime_installer && \
+# The installer is bind-mounted from the builder stage, not COPY'd: a COPY
+# leaves the ~640 MiB installer in its own layer of the final image, and a
+# later rm only hides it. rw lets the installer write beside itself; those
+# writes are discarded with the mount. Needs BuildKit (default since Docker 23).
+#
+# The bundled JRE (sys/java, Java 1.8.0_202) is removed in this same RUN so it
+# never lands in a layer. iquam's dependency analysis pulls it in, but nothing
+# iquam calls uses Java: with sys/java absent the runtime logs "Disabling Java
+# support" and carries on, and the .bii output was byte-identical to a run with
+# the JVM loaded. The other modules' custom runtimes do not include it at all.
+RUN --mount=type=bind,from=builder,source=/tmp/runtime_installer,target=/tmp/runtime_installer,rw \
+    cd /tmp/runtime_installer && \
     chmod +x iquam_runtime.install && \
     ./iquam_runtime.install -mode silent -agreeToLicense yes -destinationFolder /opt/matlabruntime && \
-    rm -rf /tmp/runtime_installer
+    rm -rf /opt/matlabruntime/R2024b/sys/java
 
 # Create application directory
 RUN mkdir -p /opt/iquam/bin
