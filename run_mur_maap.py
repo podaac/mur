@@ -40,7 +40,7 @@ import mur_window
 from iquam_date_flags import format_iquam_reference_date
 from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
 from mrva_static_files import MRVA_STATIC_RELATIVE_PATHS, seasonal_relative_path
-from mur_maap import auth, outputs, paths, stac
+from mur_maap import auth, paths, stac
 from mur_maap import tags
 
 # mur_maap.stac reads MAAP's STAC over urllib, which carries no CA store of
@@ -153,6 +153,14 @@ class MAAPClient:
         raise NotImplementedError(
             "MAAPClient.object_modified: wire up boto3 HEAD")
 
+    def object_size(self, s3_uri: str) -> Optional[int]:
+        """Size in bytes of `s3_uri`, or None if it does not exist.
+
+        A buoy file that exists can still hold nothing: see
+        IQUAM_EMPTY_BII_BYTES.
+        """
+        raise NotImplementedError("MAAPClient.object_size: wire up boto3 HEAD")
+
     def list_objects(self, prefix: str) -> List[str]:
         """List S3 hrefs under a prefix, for fan-in inputs (plan section 9).
 
@@ -192,8 +200,8 @@ class MAAPClient:
         landice/iquam/l2p/mrva bin/entrypoint.sh) so the CWL wiring layer can
         map them 1:1 to inputBinding prefixes (plan section 8.2).
 
-        `tag` is the label MAAP shows beside the job and the key
-        list_jobs(tag=...) searches on -- see mur_maap/tags.py.
+        `tag` names the MAAP Console batch the job is listed under -- see
+        mur_maap/tags.py.
 
         TODO: maap-py OGC job submission (plan section 8, 9).
         """
@@ -234,6 +242,16 @@ class MAAPClient:
 # so a run that omits it is a complete scientific run missing only its
 # pictures -- which is why nothing downstream treats its absence as an error.
 ALL_STAGES = ("landice", "iquam", "l2p", "mrva", "cog")
+
+# A .bii holding zero observations. writeiquambii.m writes two Fortran
+# records: the header (4-byte marker, int32 N, int16 year, int16 doy, 4-byte
+# marker = 16 bytes) and the data, which for N=0 is just its two markers
+# (8 bytes). makedailyiquam writes one of these when the source has nothing
+# for the day yet -- which is every day an NRT run reaches before iQUAM has
+# published it. Every MAAP buoy file from 2026/282 on was exactly this, and
+# because any existing object counted as cached, none was ever rebuilt: MRVA
+# ran with no buoys at all.
+IQUAM_EMPTY_BII_BYTES = 24
 
 
 def validate_stages(stages: Optional[Iterable[str]]) -> set:
@@ -285,17 +303,31 @@ class MAAPOrchestrator:
         config: Dict,
         client: MAAPClient,
         force_nrt: bool = False,
-        rebuild_stale_bics: bool = False,
+        rebuild_stale_bics: bool = True,
         today_fn: Optional[Callable[[], datetime.date]] = None,
         stages: Optional[Iterable[str]] = None,
+        rerun_final: bool = False,
     ):
         self.config = mur_config.normalize_config(config)
         self.client = client
         self.force_nrt = force_nrt
-        # Opt-in: a reanalysis wants BICs rebuilt from the settled granule
-        # set, but turning this on by default would silently invalidate every
-        # cache a routine daily run depends on.
+        # On by default. With it off, a BIC's LAST build was at 06Z the day
+        # after its data day -- six hours after the day ended -- and it was
+        # frozen from then on. Whatever PO.DAAC had not yet ingested was lost
+        # for good: MODISA 2026/293 kept 113 of prod's 322 granules. Requiring
+        # the BIC to have been written `stable` days after its day moves the
+        # last build one run later, once, and costs one extra L2P job per
+        # sensor-day. Off (--trust-cached-bics) reuses any BIC that exists.
         self.rebuild_stale_bics = rebuild_stale_bics
+        # A REA ("Final") day whose granule already exists is skipped, as
+        # nrtMRVA.py's KEEPING OLD does; this redoes it anyway.
+        self.rerun_final = rerun_final
+        # What this run has already built, so that a day reached from several
+        # analysis days in one sweep is built once, not once per window it
+        # falls in. nrtMRVA.py gets the same from its makebiccmd_* files,
+        # which it deletes at the start of each run ("just written").
+        self._built_bics: Dict[Tuple[str, datetime.date], str] = {}
+        self._built_iquam: Dict[datetime.date, Optional[str]] = {}
         # Which of the four container stages to submit. Narrowing this is how
         # you test one mechanism without paying for 23 jobs.
         self.stages = validate_stages(stages)
@@ -467,19 +499,67 @@ class MAAPOrchestrator:
         return list(mur_window.day_range_dates(
             process_date, day_range, reference_today=reference_today))
 
-    def _find_cached_iquam(self, data_day: datetime.date) -> Optional[str]:
-        candidate = paths.iquam_href(self.workspace_root, data_day)
-        return candidate if self.client.object_exists(candidate) else None
+    def _find_cached_iquam(
+        self,
+        data_day: datetime.date,
+        reference_today: Optional[datetime.date] = None,
+    ) -> Optional[str]:
+        """Canonical href of a usable buoy file for this day, or None.
 
-    def _promote_iquam(self, data_day: datetime.date, job: str) -> str:
-        """Copy one day's buoy file out of a job that wrote its whole window."""
+        Three ways a file that exists is still not reusable:
+
+          * this run already rebuilt it -- then that answer stands;
+          * the day is younger than iquam.stable_latency (nrtMRVA.py's
+            buoystablat), so iQUAM may still be adding to it. Production
+            rebuilds it on every run until then;
+          * it holds no observations (IQUAM_EMPTY_BII_BYTES). A header-only
+            file is what a too-early run leaves behind, and trusting it
+            forever is how MRVA came to run with no buoys.
+        """
+        if data_day in self._built_iquam:
+            return self._built_iquam[data_day]
+        reference_today = reference_today or self.get_reference_today()
+        stable = self.config.get("iquam", {}).get("stable_latency", 2)
+        if mur_window.is_rewrite(reference_today, data_day, stable):
+            return None
+        candidate = paths.iquam_href(self.workspace_root, data_day)
+        size = self.client.object_size(candidate)
+        if size is None:
+            return None
+        if size <= IQUAM_EMPTY_BII_BYTES:
+            logger.info("    IQUAM0 %s: cached file has no observations "
+                        "(%d bytes); rebuilding", data_day, size)
+            return None
+        return candidate
+
+    def _promote_iquam(self, data_day: datetime.date, job: str) -> Optional[str]:
+        """Copy one day's buoy file out of a job that wrote its whole window.
+
+        An empty result is not promoted: it would overwrite a file that may
+        hold data with one that does not, and the manifest gains nothing from
+        an entry MRVA logs as "no content". None leaves the day out.
+        """
         src = self.client.get_job_output(
             job, "output",
             year=data_day.year,
             doy=f"{data_day.timetuple().tm_yday:03d}",
         )
         dest = paths.iquam_href(self.workspace_root, data_day)
-        return self.client.copy_object(src, dest)
+        size = self.client.object_size(src)
+        if size is not None and size <= IQUAM_EMPTY_BII_BYTES:
+            existing = self.client.object_size(dest)
+            if existing is not None and existing > IQUAM_EMPTY_BII_BYTES:
+                logger.warning("    IQUAM0 %s: rebuilt file is empty; keeping "
+                               "the earlier one (%d bytes)", data_day, existing)
+                self._built_iquam[data_day] = dest
+                return dest
+            logger.warning("    IQUAM0 %s: no observations yet; left out of "
+                           "the manifest", data_day)
+            self._built_iquam[data_day] = None
+            return None
+        promoted = self.client.copy_object(src, dest)
+        self._built_iquam[data_day] = promoted
+        return promoted
 
     @property
     def username(self) -> str:
@@ -614,9 +694,9 @@ class MAAPOrchestrator:
         the promotion in _promote_l4 had to come first: a result path embeds
         the job id and cannot be derived from a date.
 
-        Returns the assets it managed to produce, empty if there is nothing to
-        work from -- which is a legitimate state for a day that has not been
-        analysed, not an error.
+        Returns the promoted granules it submitted cog jobs for, empty if
+        there is nothing to work from -- which is a legitimate state for a day
+        that has not been analysed, not an error.
         """
         found = {}
         for asset_prefix, resolution, key in (
@@ -627,8 +707,7 @@ class MAAPOrchestrator:
             if not self.client.object_exists(href):
                 continue
             found[key] = href
-            found.update(self._browse_one(process_date, mode, asset_prefix,
-                                          href))
+            self._submit_browse(process_date, mode, asset_prefix, href)
 
         if not found:
             logger.info(
@@ -638,46 +717,34 @@ class MAAPOrchestrator:
                 paths.l4_key(process_date, mode, "1km"))
             return {}
 
-        rasters = {k: v for k, v in found.items() if v.endswith(".tif")}
-        logger.info("    regenerated %d browse raster(s) from the promoted "
-                    "granule(s)", len(rasters))
-        if rasters:
-            self._report_stac(process_date, mode)
-        if rasters:
-            self.client.publish_stac_item(
-                found.get("data") or found.get("mur25"), process_date, mode,
-                extra_assets={k: v for k, v in found.items() if k != "data"},
-                analysis_level=int(
-                    self.config.get("mrva", {}).get("max_level", 11)))
+        self._report_stac(process_date, mode)
         return found
 
-    def _browse_one(self, process_date: datetime.date, mode: str,
-                    asset_prefix: str, granule_href: str) -> Dict[str, str]:
-        """Submit one cog job and collect whatever it produced.
+    def _submit_browse(self, process_date: datetime.date, mode: str,
+                       asset_prefix: str, granule_href: str) -> Optional[str]:
+        """Submit one cog job and return its id without waiting for it.
 
-        Every failure is swallowed: these are pictures, and a day with a
-        granule must not be reported as failed because a derived image did
-        not appear.
+        Its result reaches the catalogue through the catalog.json the job
+        stages out, so there is nothing here to collect. A failure, then or
+        later, only costs pictures -- a day with a granule must not be
+        reported as failed for them -- so it is logged with the job id that
+        utils/job_logs.py needs, and swallowed.
         """
-        out = {}
         try:
             job = self.client.submit_job(
+                # --mode is passed because the granule filename cannot carry
+                # it: mode lives in the directory (.../279nrt/...), and cog's
+                # STAC item would otherwise record the day with no indication
+                # of whether it is the interim or the final analysis.
                 "mur-cog", self._cog_args(granule_href, mode),
-                tag=tags.job_tag("cog", process_date, mode,
-                                 sensor=asset_prefix))
-            self.client.wait_all([job])
+                tag=tags.batch("cog"))
         except Exception as exc:                          # noqa: BLE001
-            logger.warning("    browse rasters for %s failed (%s); the "
-                           "granule is unaffected", asset_prefix, exc)
-            return out
-        for output_name in sorted(outputs.OUTPUT_PATTERNS.get("mur-cog", {})):
-            try:
-                href = self.client.get_job_output(job, output_name)
-            except Exception:                             # noqa: BLE001
-                continue
-            self._note_registered(href)
-            out[f"{asset_prefix}_{output_name.split('_')[-1]}"] = href
-        return out
+            logger.warning("    browse rasters for %s not submitted (%s); "
+                           "the granule is unaffected", asset_prefix, exc)
+            return None
+        logger.info("    %s rasters submitted as %s, not waited on; check "
+                    "with utils/job_logs.py %s", asset_prefix, job, job)
+        return job
 
     def _promote_l4(self, process_date: datetime.date, mode: str, job: str,
                     output_name: str, resolution: str) -> Optional[str]:
@@ -842,6 +909,19 @@ class MAAPOrchestrator:
 
         reference_today = self.get_reference_today()
 
+        # nrtMRVA.py's KEEPING OLD: a Final day is analysed once. The daily
+        # sweep reaches T-9..T-4 every run, so without this each of those
+        # days would be re-analysed six times over. Its inputs need nothing
+        # either: every young BIC and buoy file its window reaches is also
+        # in a later NRT day's window, which the same sweep processes next.
+        if mode == "rea" and "mrva" in self.stages and not self.rerun_final:
+            final = paths.l4_href(self.workspace_root, process_date, "rea")
+            if self.client.object_exists(final):
+                logger.info("    %s: Final granule already exists; keeping it "
+                            "(--rerun-final to redo)", process_date)
+                return DayResult(process_date=process_date, mode=mode,
+                                 mrva_job_id=None, netcdf_href=final)
+
         # Reuse before resubmitting. DPS puts a job's outputs at an
         # unreconstructable path, so an output that is not promoted to a
         # canonical key is lost the moment the run ends -- which is why
@@ -866,13 +946,18 @@ class MAAPOrchestrator:
                 "landmask_p01_file": landice_hrefs["landmask_p01"],
                 "gridindex_north_p01_file": landice_hrefs["gridindex_north_p01"],
                 "gridindex_south_p01_file": landice_hrefs["gridindex_south_p01"],
-            }, tag=tags.job_tag("landice", process_date, mode))
+            }, tag=tags.batch("landice"))
 
         iquam_job = None
         iquam_days = self._iquam_window_days(process_date, reference_today)
         iquam_cached = {d: h for d in iquam_days
-                        if (h := self._find_cached_iquam(d)) is not None}
-        if iquam_days and len(iquam_cached) == len(iquam_days):
+                        if (h := self._find_cached_iquam(d, reference_today))
+                        is not None}
+        # A day this run already rebuilt is settled for the rest of the run,
+        # even when the answer was "nothing yet" -- resubmitting the job for
+        # every analysis day that reaches it would only get the same answer.
+        iquam_settled = set(iquam_cached) | (set(iquam_days) & set(self._built_iquam))
+        if iquam_days and len(iquam_settled) == len(iquam_days):
             logger.info("    iquam %s: all %d day(s) already in the bucket; "
                         "not resubmitting", process_date, len(iquam_days))
         elif "iquam" in self.stages:
@@ -885,7 +970,7 @@ class MAAPOrchestrator:
                     self.get_reference_today()),
                 "buoy_day_range": iquam_config["buoy_dayrange"],
                 "stability_latency": iquam_config["stable_latency"],
-            }, tag=tags.job_tag("iquam", process_date, mode))
+            }, tag=tags.batch("iquam"))
 
         l2p_jobs = []
         # Maps (sensor, data_day) -> (cached_href_or_None, job_or_None) for
@@ -911,6 +996,10 @@ class MAAPOrchestrator:
                 reference_today=reference_today,
             ):
                 rewrite = mur_window.is_rewrite(reference_today, data_day, stable)
+
+                if (built := self._built_bics.get((sensor, data_day))):
+                    bic_results[(sensor, data_day)] = (built, None)
+                    continue
 
                 cached_href = None
                 if not rewrite:
@@ -968,9 +1057,8 @@ class MAAPOrchestrator:
                         "credentials and its granule fetches will fail",
                         sensor, data_day)
 
-                # sensor + data day: one analysis day submits a job per
-                # sensor per day in that sensor's window, and they are
-                # otherwise indistinguishable in MAAP's job table.
+                # Every L2P job shares the MUR-L2P batch; which sensor and
+                # data day a row is shows in its inputs (sensor, year, doy).
                 # A rewrite must defeat dedup. The manifest lives at a
                 # stable key -- manifests/l2p/<sensor>/<year>/<doy>.json -- so
                 # reprocessing a day with late-arriving granules rewrites the
@@ -983,8 +1071,7 @@ class MAAPOrchestrator:
                 # first bug.
                 job = self.client.submit_job(
                     "mur-l2p", l2p_args,
-                    tag=tags.job_tag("l2p", process_date, mode,
-                                     sensor=sensor, data_date=data_day),
+                    tag=tags.batch("l2p"),
                     dedup=False if rewrite else None)
                 l2p_jobs.append(job)
                 bic_results[(sensor, data_day)] = (None, job)
@@ -1012,6 +1099,7 @@ class MAAPOrchestrator:
                 continue
             sensor, data_day = key
             bic_results[key] = (self._promote_bic(sensor, data_day, job), job)
+            self._built_bics[key] = bic_results[key][0]
             promoted += 1
 
         # Landice and iquam get the same treatment for the same reason, and
@@ -1021,17 +1109,19 @@ class MAAPOrchestrator:
             landice_cached = self._promote_landice(process_date, landice_job)
         if iquam_job is not None and iquam_job not in failures:
             for data_day in iquam_days:
-                if data_day in iquam_cached:
+                if data_day in iquam_settled:
                     continue
                 try:
-                    iquam_cached[data_day] = self._promote_iquam(
-                        data_day, iquam_job)
+                    promoted_iquam = self._promote_iquam(data_day, iquam_job)
                 except LookupError as exc:
                     # The mrva window can reach past what iquam's own
                     # buoy_dayrange wrote. Not an error -- the manifest simply
                     # omits that day.
                     logger.warning("    no IQUAM0 output for %s: %s",
                                    data_day, exc)
+                    continue
+                if promoted_iquam is not None:
+                    iquam_cached[data_day] = promoted_iquam
 
         if failures:
             if promoted:
@@ -1148,7 +1238,7 @@ class MAAPOrchestrator:
 
         mrva_job = self.client.submit_job(
             "mur-mrva", mrva_args,
-            tag=tags.job_tag("mrva", process_date, mode))
+            tag=tags.batch("mrva"))
         self.client.wait_all([mrva_job])
 
         # Promote this day's coefficient so tomorrow can chain from it.
@@ -1181,40 +1271,17 @@ class MAAPOrchestrator:
         # regenerated for any granule in the bucket without redoing the
         # analysis, and a colormap change does not rebuild MATLAB.
         #
-        # Every failure here is swallowed. These are pictures: a day that
-        # produced an L4 granule must not be failed because a derived image
-        # did not appear, and "cog" is absent from self.stages whenever the
-        # operator did not ask for it.
+        # Submitted and not waited on, so the next day starts while these
+        # run. Nothing here needs their outputs: each cog job stages out its
+        # own catalog.json, MAAP ingests it, and every tool reads the browse
+        # layers from there (utils/mur_stac.py, utils/mur_layers.py).
         if "cog" in self.stages:
             for asset_prefix, granule_href in (
                 ("browse", netcdf_href), ("browse25", extras.get("mur25")),
             ):
-                if not granule_href:
-                    continue
-                try:
-                    cog_job = self.client.submit_job(
-                        # --mode is passed because the granule filename
-                        # cannot carry it: mode lives in the directory
-                        # (.../279nrt/...), and cog's STAC item would
-                        # otherwise record the day with no indication of
-                        # whether it is the interim or the final analysis.
-                        "mur-cog", self._cog_args(granule_href, mode),
-                        tag=tags.job_tag("cog", process_date, mode,
-                                         sensor=asset_prefix))
-                    self.client.wait_all([cog_job])
-                except Exception as exc:                   # noqa: BLE001
-                    logger.warning(
-                        "    browse rasters for %s failed (%s); the granule "
-                        "is unaffected", asset_prefix, exc)
-                    continue
-                for output_name in sorted(
-                        outputs.OUTPUT_PATTERNS.get("mur-cog", {})):
-                    try:
-                        href = self.client.get_job_output(cog_job, output_name)
-                    except Exception:                      # noqa: BLE001
-                        continue
-                    self._note_registered(href)
-                    extras[f"{asset_prefix}_{output_name.split('_')[-1]}"] = href
+                if granule_href:
+                    self._submit_browse(process_date, mode, asset_prefix,
+                                        granule_href)
 
         if extras:
             logger.info("    catalogued %d extra asset(s): %s",
@@ -1259,6 +1326,11 @@ class MAAPOrchestrator:
 # staging are already in place. It is not a remote driver -- there is no
 # mechanism here for talking to MAAP from outside a workspace.
 # ---------------------------------------------------------------------------
+
+# nrtMRVA.py's daily window: T-SCAN_LATENCY .. T-NRT_LATENCY, i.e. -9:-1.
+DEFAULT_PROCESS_DAYS = (f"-{mur_window.SCAN_LATENCY}:"
+                        f"-{mur_window.NRT_LATENCY}")
+
 
 def parse_process_days(value: str) -> List[int]:
     """Offsets from the run day: "-1", or a range like "-9:-1"."""
@@ -1770,8 +1842,10 @@ def _report_interrupt(client) -> None:
     print("    maap.get_job_status('<job id>')")
     print("To stop them:")
     print("    maap.cancel_job('<job id>')")
-    print("To find them again after this terminal is gone:")
-    print(f"    maap.list_jobs(tag='{getattr(client, 'tag_prefix', 'mur')}.<process>')")
+    print("To find them again after this terminal is gone, open the job's")
+    print("batch at https://console.maap-project.org/batches (MUR-L2P,")
+    print("MUR-MRVA, ...), or:")
+    print("    maap.list_jobs(tag='MUR-<STAGE>')")
     print()
     print("Re-running is safe: completed work is reused rather than redone,")
     print("and dedup suppresses an identical resubmission.")
@@ -1787,9 +1861,9 @@ def parse_args(argv=None):
             "Run this inside a MAAP workspace. Authentication is ambient there, "
             "and granule staging needs the Earthdata credentials that live in "
             "the workspace.\n\n"
+            "  python run_mur_maap.py --config config.maap.json\n"
+            "  python run_mur_maap.py --config config.maap.json --dry-run\n"
             "  python run_mur_maap.py --config config.maap.json -p -1\n"
-            "  python run_mur_maap.py --config config.maap.json -p -1 --dry-run\n"
-            "  python run_mur_maap.py --config config.maap.json -p=-9:-1\n"
             "  python run_mur_maap.py --config config.maap.json -p -1 "
             "--execute landice,iquam\n"
         ),
@@ -1806,10 +1880,13 @@ def parse_args(argv=None):
                              "the workspace root from your MAAP credentials, then "
                              "exit.")
     parser.add_argument("--date", help="Treat this YYYY-MM-DD as the run day.")
-    parser.add_argument("-p", "--process-days", default="-1",
+    parser.add_argument("-p", "--process-days", default=DEFAULT_PROCESS_DAYS,
                         help="Offset(s) from the run day: -1, or a range. A range "
                              "needs an equals sign -- -p=-9:-1 -- because argparse "
-                             "reads a bare -9:-1 as an option (default: %(default)s).")
+                             "reads a bare -9:-1 as an option. The default is "
+                             "nrtMRVA.py's daily sweep: Final runs for T-9..T-4 "
+                             "(a day whose Final granule exists is kept), Interim "
+                             "runs for T-3..T-1 (default: %(default)s).")
     parser.add_argument("--execute",
                         help="Comma-separated stages to run: landice,iquam,l2p,mrva,cog. "
                              "Default: all. MRVA needs l2p's outputs, so excluding "
@@ -1840,14 +1917,19 @@ def parse_args(argv=None):
     parser.add_argument("--no-dedup", action="store_true",
                         help=argparse.SUPPRESS)   # now the default; kept so
                                                   # existing commands still run
+    parser.add_argument("--trust-cached-bics", action="store_true",
+                        help="Reuse any cached BIC once its day is past `stable`. "
+                             "By default a BIC written fewer than its sensor's "
+                             "`stable` days after the day it describes is "
+                             "rebuilt once: it was made from granules PO.DAAC "
+                             "was still ingesting.")
     parser.add_argument("--rebuild-stale-bics", action="store_true",
-                        help="Rebuild a cached BIC that was written fewer "
-                             "than its sensor's `stable` days after the day "
-                             "it describes. Such a BIC was produced by an NRT "
-                             "run from granules that were still arriving, so "
-                             "reusing it in a reanalysis defeats the point. "
-                             "Off by default: it invalidates caches a routine "
-                             "daily run relies on.")
+                        help=argparse.SUPPRESS)   # now the default; kept so
+                                                  # existing commands still run
+    parser.add_argument("--rerun-final", action="store_true",
+                        help="Re-analyse a Final (REA) day even when its granule "
+                             "already exists. Without it such a day is kept, as "
+                             "nrtMRVA.py keeps it.")
     parser.add_argument("--force-nrt", action="store_true",
                         help="Process every day in NRT mode.")
     parser.add_argument("--dry-run", action="store_true",
@@ -1923,9 +2005,10 @@ def main(argv=None) -> int:
     orchestrator = MAAPOrchestrator(
         config, client,
         force_nrt=args.force_nrt,
-        rebuild_stale_bics=args.rebuild_stale_bics,
+        rebuild_stale_bics=not args.trust_cached_bics,
         today_fn=lambda: reference_today,     # frozen: a run must not drift
         stages=args.execute.split(",") if args.execute else None,
+        rerun_final=args.rerun_final,
     )
 
     failed = []

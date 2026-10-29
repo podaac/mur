@@ -64,16 +64,51 @@ def discover_day(
             temporal=(f"{data_day.isoformat()}T00:00:00Z",
                       f"{data_day.isoformat()}T23:59:59Z"),
         )
+        kept = 0
         for granule in results:
             # access="direct" yields the s3:// href; "external" would give an
             # https:// one. Both are fetchable now, but s3:// avoids egress
             # and is what the podaac access kind is built around.
-            for link in granule.data_links(access="direct"):
-                if link.endswith(".nc"):
-                    hrefs.append(link)
-        logger.info("    %s %s: %d granule(s) in CMR",
-                    collection, data_day, len(results))
+            links = [link for link in granule.data_links(access="direct")
+                     if link.endswith(".nc")]
+            # CMR's temporal search matches on OVERLAP, so the 23:5x granule
+            # that started yesterday and ends today comes back for both days.
+            # Production files a granule under its START day only
+            # (podaac-data-subscriber -dydoy, mur_cron/*.sh), and l2p2bic
+            # reads that one directory -- so keeping the overlap put the
+            # previous day's last swath into this BIC as well (AVMTBG
+            # 2026/291: two extra granules, ~7% more points than prod).
+            if starts_on(granule, links, data_day) is False:
+                continue
+            kept += 1
+            hrefs.extend(links)
+        logger.info("    %s %s: %d granule(s) in CMR, %d starting that day",
+                    collection, data_day, len(results), kept)
     return sorted(set(hrefs))
+
+
+def starts_on(granule, links: List[str], data_day: datetime.date) -> Optional[bool]:
+    """Whether a CMR result begins on `data_day`; None when it cannot be told.
+
+    The UMM BeginningDateTime is the authority. The GHRSST filename, which
+    leads with the start time (20261020235501-JPL-L2P_...), is the fallback.
+    None keeps the granule: dropping one whose date could not be read would
+    be a silent loss, and the overlap it guards against is one swath a day.
+    """
+    try:
+        begin = (granule["umm"]["TemporalExtent"]["RangeDateTime"]
+                 ["BeginningDateTime"])
+        return datetime.date.fromisoformat(str(begin)[:10]) == data_day
+    except (KeyError, TypeError, ValueError):
+        pass
+    for link in links:
+        stem = link.rsplit("/", 1)[-1][:8]
+        if stem.isdigit():
+            try:
+                return datetime.datetime.strptime(stem, "%Y%m%d").date() == data_day
+            except ValueError:
+                continue
+    return None
 
 
 def _try_login(earthaccess) -> bool:

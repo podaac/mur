@@ -54,6 +54,7 @@
       <b>On this page</b>
       <ul>
         <li><a href="#model">The execution model</a></li>
+        <li><a href="#run-flow">How a run executes</a></li>
         <li><a href="#contract">What a container receives</a></li>
         <li><a href="#fanin">Fan-in: the manifest mechanism</a></li>
         <li><a href="#stageout">Stage-out, and who chooses the path</a></li>
@@ -139,6 +140,194 @@
     <code>maap/Dockerfile.dps</code> derives a <code>-dps</code> image that
     clears it. The change is metadata only: no layer content, no MATLAB Runtime
     rebuild, and local execution keeps using the base image untouched.</p>
+
+    <h2 id="run-flow">How a run executes</h2>
+
+    <p>The window and mode rules are the ones in
+    <a href="sequence.html">Daily execution</a>. What changes on MAAP is the
+    scheduling. Every stage becomes a DPS job, and <code>run_mur_maap.py</code>
+    decides which jobs run together and which must wait. The pattern is a loop
+    over days, oldest first. Within a day, the input jobs fan out, the run
+    waits for all of them, and then MRVA runs.</p>
+
+    <figure class="diagram">
+    <svg viewBox="0 0 820 262" width="100%" role="img" aria-labelledby="run-timeline-title" style="max-width:820px;display:block;margin:0 auto;font-family:inherit;font-size:12px">
+    <title id="run-timeline-title">Two consecutive days on MAAP: each day fans out landice, iQUAM and L2P jobs in parallel, waits for all of them, then runs MRVA and COG; the next day starts afterwards.</title>
+    <defs><marker id="rt-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2f6f3e"/></marker><marker id="rt-time" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5a6b7c"/></marker></defs>
+    <rect x="98" y="6" width="264" height="215" rx="6" fill="#f3f6f9" stroke="#d9e1e8"/>
+    <text x="104" y="22" fill="#1c2530" font-weight="600">Day T-4 &#183; REA</text>
+    <rect x="374" y="6" width="264" height="215" rx="6" fill="#eef3f0" stroke="#d9e1e8"/>
+    <text x="380" y="22" fill="#1c2530" font-weight="600">Day T-3 &#183; NRT</text>
+    <rect x="650" y="6" width="166" height="215" rx="6" fill="#f6f8fa" stroke="#d9e1e8" stroke-dasharray="4 3"/>
+    <text x="656" y="22" fill="#5a6b7c" font-weight="600">T-2, T-1 &#8230;</text>
+    <text x="656" y="56" fill="#5a6b7c">same pattern,</text>
+    <text x="656" y="72" fill="#5a6b7c">one day</text>
+    <text x="656" y="88" fill="#5a6b7c">at a time</text>
+    <text x="86" y="55" text-anchor="end" fill="#1c2530">landice</text>
+    <text x="86" y="77" text-anchor="end" fill="#1c2530">iQUAM</text>
+    <text x="86" y="108" text-anchor="end" fill="#1c2530">L2P</text>
+    <text x="86" y="121" text-anchor="end" fill="#5a6b7c" font-size="10.5">sensor &#215; day</text>
+    <text x="86" y="169" text-anchor="end" fill="#1c2530">MRVA</text>
+    <text x="86" y="201" text-anchor="end" fill="#1c2530">COG</text>
+    <text x="86" y="214" text-anchor="end" fill="#5a6b7c" font-size="10.5">browse</text>
+    <rect x="104" y="44" width="50" height="15" rx="3" fill="#f6d99a" stroke="#c2932b"/>
+    <rect x="104" y="66" width="76" height="15" rx="3" fill="#f6d99a" stroke="#c2932b"/>
+    <rect x="104" y="90" width="62" height="7" rx="2" fill="#f6d99a" stroke="#c2932b"/>
+    <rect x="104" y="100" width="96" height="7" rx="2" fill="#f6d99a" stroke="#c2932b"/>
+    <rect x="104" y="110" width="80" height="7" rx="2" fill="#f6d99a" stroke="#c2932b"/>
+    <rect x="104" y="120" width="112" height="7" rx="2" fill="#f6d99a" stroke="#c2932b"/>
+    <rect x="104" y="130" width="70" height="7" rx="2" fill="#f6d99a" stroke="#c2932b"/>
+    <line x1="222" y1="38" x2="222" y2="152" stroke="#1c2530" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <text x="227" y="48" fill="#1c2530" font-size="11">wait for all</text>
+    <rect x="230" y="158" width="128" height="19" rx="3" fill="#f1aeae" stroke="#bf5050"/>
+    <text x="294" y="171" text-anchor="middle" fill="#1c2530" font-size="11">mur-mrva</text>
+    <rect x="362" y="190" width="52" height="15" rx="3" fill="#bcd3e6" stroke="#5b87a8" stroke-dasharray="3 2"/>
+    <rect x="380" y="44" width="50" height="15" rx="3" fill="#f6d99a" stroke="#c2932b"/>
+    <rect x="380" y="66" width="76" height="15" rx="3" fill="#f6d99a" stroke="#c2932b"/>
+    <rect x="380" y="90" width="74" height="7" rx="2" fill="#f6d99a" stroke="#c2932b"/>
+    <rect x="380" y="100" width="104" height="7" rx="2" fill="#f6d99a" stroke="#c2932b"/>
+    <rect x="380" y="110" width="58" height="7" rx="2" fill="#f6d99a" stroke="#c2932b"/>
+    <rect x="380" y="120" width="90" height="7" rx="2" fill="#f6d99a" stroke="#c2932b"/>
+    <rect x="380" y="130" width="110" height="7" rx="2" fill="#f6d99a" stroke="#c2932b"/>
+    <line x1="498" y1="38" x2="498" y2="152" stroke="#1c2530" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <text x="503" y="48" fill="#1c2530" font-size="11">wait for all</text>
+    <rect x="506" y="158" width="128" height="19" rx="3" fill="#f1aeae" stroke="#bf5050"/>
+    <text x="570" y="171" text-anchor="middle" fill="#1c2530" font-size="11">mur-mrva</text>
+    <rect x="638" y="190" width="52" height="15" rx="3" fill="#bcd3e6" stroke="#5b87a8" stroke-dasharray="3 2"/>
+    <text x="108" y="152" fill="#5a6b7c" font-size="10.5">all submitted together</text>
+    <text x="420" y="201" fill="#5a6b7c" font-size="10.5">runs on while the next day starts</text>
+    <line x1="360" y1="168" x2="504" y2="168" stroke="#2f6f3e" stroke-width="1.6" marker-end="url(#rt-arrow)"/>
+    <text x="422" y="163" text-anchor="middle" fill="#2f6f3e" font-size="11">c06 &#8594; --prior-csp-file</text>
+    <line x1="96" y1="237" x2="812" y2="237" stroke="#5a6b7c" marker-end="url(#rt-time)"/>
+    <text x="808" y="231" text-anchor="end" fill="#5a6b7c" font-size="11">time</text>
+    <rect x="96" y="246" width="14" height="10" rx="2" fill="#f6d99a" stroke="#c2932b"/>
+    <text x="115" y="255" fill="#5a6b7c" font-size="11">input jobs (parallel)</text>
+    <rect x="250.6" y="246" width="14" height="10" rx="2" fill="#f1aeae" stroke="#bf5050"/>
+    <text x="269.6" y="255" fill="#5a6b7c" font-size="11">analysis</text>
+    <rect x="332.4" y="246" width="14" height="10" rx="2" fill="#bcd3e6" stroke="#5b87a8"/>
+    <text x="351.4" y="255" fill="#5a6b7c" font-size="11">browse rasters, not waited on</text>
+    </svg>
+    <figcaption>Two consecutive days of a <code>-p -9:-1</code> sweep. Each
+    day submits its input jobs together, waits until every one has finished,
+    then runs MRVA. The next day starts as soon as MRVA's outputs are
+    promoted; the browse rasters are submitted but not waited on, so they
+    run alongside it. The green arrow is the one place a day hands anything
+    to the next.</figcaption>
+    </figure>
+
+    <ol>
+      <li><strong>Loop over days, oldest first.</strong>
+          <code>main()</code> calls <code>run_day()</code> once per day and
+          blocks until it returns. Every REA day in the range finishes before
+          the first NRT day starts. A failed day is logged and the loop moves
+          on, and the exit status still reports the failure.</li>
+      <li><strong>Fan out the inputs.</strong> <code>mur-landice</code>,
+          <code>mur-iquam</code> and every <code>mur-l2p</code> job are
+          submitted before anything is waited on, because none of them
+          depends on another. L2P submits one job per active sensor per data
+          day in that sensor's <code>l2p.sensors[X].day_range</code>,
+          dropping future days. Inputs already in the bucket are not
+          resubmitted: landice, iQUAM, and BICs past their
+          <code>stable</code> age. A typical NRT day is twenty-odd jobs.</li>
+      <li><strong>Wait for all of them.</strong> <code>wait_all</code>
+          blocks until every input job has finished. Outputs from the jobs
+          that succeeded are promoted to canonical S3 keys <em>before</em>
+          the day is failed for any that did not, so a re-run submits only
+          what is still missing. See <a href="#stageout">Stage-out</a>.</li>
+      <li><strong>Run MRVA.</strong> It reads every input through one
+          sensor manifest (BICs plus IQUAM0) and takes about an hour. Its
+          L4 granule is promoted and its sidecar STAC item written.</li>
+      <li><strong>Submit the browse rasters and move on.</strong> One
+          <code>mur-cog</code> job each for the 1&nbsp;km and MUR25
+          granules, submitted and never waited on. Each stages out its own
+          <code>catalog.json</code>, MAAP ingests it, and every tool reads
+          the browse layers from there (<code>utils/mur_stac.py</code>,
+          <code>utils/mur_layers.py</code>), so the run has nothing to
+          collect. The job ids are logged; a failure costs pictures, never
+          the day, and shows in <code>utils/job_logs.py</code>.</li>
+    </ol>
+
+    <div class="note">
+      <p><strong>Possible speed-up.</strong> The next day's input jobs depend
+      on nothing from this day, so they could be submitted while this day's
+      MRVA runs. That would hide most of the input stage. Only MRVA has to
+      stay in day order, and it only matters on the day that receives a
+      coefficient. Today only the browse rasters overlap the next day;
+      the input jobs still wait for the previous day's MRVA.</p>
+    </div>
+
+    <div class="note">
+      <p><strong>The daily run is production's T-9&hellip;T-1 sweep.</strong>
+      With no <code>-p</code>, which is how <code>cron_mur_maap.sh</code> calls
+      it, <code>run_mur_maap.py</code> runs <code>nrtMRVA.py</code>'s window. T-9&hellip;T-4
+      are Final (REA) days, and one whose Final granule already exists is
+      kept, as <code>nrtMRVA.py</code>'s KEEPING OLD does
+      (<code>--rerun-final</code> redoes it). T-3&hellip;T-1 are redone as
+      Interim (NRT) days every run. A BIC or buoy file that several days'
+      windows reach is built once per run. Set <code>MUR_PROCESS_DAYS=-1</code>
+      in the crontab to go back to one NRT day.</p>
+      <p>Until 2026-10-28 the cron passed <code>-p -1</code>. As a result no
+      day ever got a Final run, and no NRT day had a <code>.c06</code> to
+      chain from.</p>
+    </div>
+
+    <h3>What counts as cached</h3>
+
+    <ul>
+      <li><strong>BICs</strong> are rebuilt while their day is younger than
+      the sensor's <code>stable</code>. After that, a BIC written fewer than
+      <code>stable</code> days after its day is rebuilt once more. Without
+      that rule a BIC was last built at 06Z the day after its data, which is
+      before PO.DAAC had ingested everything. MODISA 2026/293 was frozen with
+      113 of production's 322 granules. <code>--trust-cached-bics</code>
+      restores the old rule.</li>
+      <li><strong>Buoy files</strong> are rebuilt while their day is younger
+      than <code>iquam.stable_latency</code> (<code>buoystablat</code>), and
+      a header-only file (24 bytes, no observations) is never reused or
+      promoted. Before this, every <code>.bii</code> from 2026/282 on was
+      empty and was never rebuilt.</li>
+      <li><strong>Granules</strong> belong to the day they start on, as in
+      production's <code>-dydoy</code> download layout. CMR's overlap search
+      also returns the previous day's last swath, which is now dropped.</li>
+    </ul>
+
+    <h3>Coefficient chaining</h3>
+
+    <p>An NRT day passes <code>--prior-csp-file</code> pointing at the
+    previous day's L=6 coefficient, <code>csp/&lt;year&gt;/&lt;YYYYMMDD&gt;09_MRVA4_Global.c06</code>.
+    This matches <code>mrva4com.m</code>'s <code>realtime</code> branch. Only
+    an REA run writes a <code>.c06</code>. REA starts at <code>L0=2</code>
+    and saves c02&ndash;c11, while NRT starts at <code>L0=Lref=7</code> and saves
+    c07&ndash;c10. The first NRT job on MAAP (2026-10-06) confirmed this: it
+    staged out c07&ndash;c10 and no c06. So:</p>
+    <ul>
+      <li>In a full <code>-9:-1</code> sweep, T-3 chains from T-4's REA
+          coefficient (the green arrow). T-2 and T-1 find no
+          <code>.c06</code> and build their reference field from scratch.</li>
+      <li>With the default <code>-p -1</code>, T-1 looks for T-2's
+          <code>.c06</code>, which will not exist until T-2 is reanalysed
+          three days later. The daily NRT run therefore always builds its
+          reference field from scratch.</li>
+    </ul>
+    <p>Either way the run is valid, because <code>mrva4com_container.m</code>
+    treats a missing prior coefficient as a reason to bootstrap, not as an error. The orchestrator
+    HEADs the key before passing it, so it never sends a path it has not
+    checked.</p>
+
+    <h3>Details</h3>
+
+    <ul>
+      <li><strong>Two windows.</strong> <code>l2p.sensors[X].day_range</code>
+          controls which BICs this run <em>builds</em>.
+          <code>mrva.sensors[X].day_range</code> controls which ones the
+          analysis <em>reads</em>. When MRVA's window reaches a day this run
+          did not build, the orchestrator uses the BIC already in the
+          bucket.</li>
+      <li><strong>Narrowing with <code>--execute</code>.</strong> Leaving
+          <code>mrva</code> out stops each day after the wait. With
+          <code>cog</code> still included, browse rasters are generated from an
+          L4 granule that was already promoted.</li>
+    </ul>
 
     <h2 id="contract">What a container receives</h2>
 
@@ -606,9 +795,13 @@ and is not recognized as a supported dataset name</code></pre>
     ingested &mdash; confirmed by fetching one over plain HTTP from a machine
     holding no MAAP, AWS or Earthdata credentials at all. The sidecar Item that
     <code>MaapPyClient.publish_stac_item</code> still writes into the workspace
-    bucket is a local convenience for the dataviewer &mdash; readable the
-    instant a run finishes, where MAAP ingests on its own schedule &mdash; not
-    the published Item.</p>
+    bucket is not the published Item. The dataviewer, <code>utils/mur_stac.py</code>
+    and <code>utils/mur_layers.py</code> all read the DPS STAC; the dataviewer
+    falls back to the sidecar only for a day MAAP has not ingested yet, since
+    the sidecar is readable the instant a run finishes. The sidecar carries the
+    granule and its MUR25 sibling but no browse rasters: those are catalogued
+    by the cog jobs themselves, which is why the run does not wait for
+    them.</p>
 
     <p>The static resources are not catalogued either, for the same reason as
     the intermediates: containers receive explicit hrefs built by joining a

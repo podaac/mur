@@ -35,6 +35,7 @@ from run_mur_maap import MAAPClient
 
 from . import outputs as _outputs
 from . import stac as _stac
+from . import tags
 from .workspace import WorkspaceBucket, split_s3_uri
 
 logger = logging.getLogger(__name__)
@@ -159,7 +160,6 @@ class MaapPyClient(MAAPClient):
         queue: str,
         queues: Optional[Dict[str, str]] = None,
         version: str,
-        tag_prefix: str = "mur",
         workspace=None,
         # Off, and not a tuning knob. MAAP's dedup does not reuse the
         # earlier job's OUTPUTS -- it returns a new id with status "deduped"
@@ -184,7 +184,6 @@ class MaapPyClient(MAAPClient):
         # fails MRVA at the very end, after everything else has succeeded.
         self.queues = dict(queues or {})
         self.version = str(version)
-        self.tag_prefix = tag_prefix
         self.dedup = dedup
         self.poll_interval = poll_interval
         self.workspace = workspace if workspace is not None else WorkspaceBucket(maap)
@@ -269,6 +268,11 @@ class MaapPyClient(MAAPClient):
         head = self._head(s3_uri)
         return None if head is None else head.get("LastModified")
 
+    def object_size(self, s3_uri: str) -> Optional[int]:
+        """Size in bytes of `s3_uri`, or None if it is not there."""
+        head = self._head(s3_uri)
+        return None if head is None else head.get("ContentLength")
+
     def _head(self, s3_uri: str):
         """The HEAD response, or None for an absent/unreadable object.
 
@@ -345,7 +349,7 @@ class MaapPyClient(MAAPClient):
             inputs=inputs,
             queue=queue,
             dedup=self.dedup if dedup is None else dedup,
-            tag=tag or f"{self.tag_prefix}.{process_id}",
+            tag=tag or tags.batch(process_id),
         )
         body = resp.json() if resp.content else {}
         job_id = next((body[k] for k in ("jobID", "jobId", "job_id", "id")

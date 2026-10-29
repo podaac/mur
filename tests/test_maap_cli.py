@@ -226,7 +226,6 @@ def test_interrupt_reports_the_jobs_left_running(capsys):
     """Ctrl-C stops the polling, not the jobs. Their ids live only in this
     process, so losing them makes running work untrackable."""
     class FakeClient:
-        tag_prefix = "mur"
         _job_process = {"abc-123": "mur-landice", "def-456": "mur-l2p"}
 
     cli._report_interrupt(FakeClient())
@@ -457,3 +456,10 @@ def test_the_dry_run_plan_names_the_version(capsys, tmp_path):
         ["--config", str(path), "-p", "-5", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert f"version        {other} (pinned by config)" in out
+
+
+def test_the_default_is_nrtmrvas_daily_sweep():
+    """The cron wrapper passes no -p. It used to pass -1, so no day ever got
+    its Final run."""
+    assert cli.parse_process_days(cli.parse_args([]).process_days) == \
+        list(range(-9, 0))

@@ -81,9 +81,10 @@ def result_prefix_even_if_failed(client, job_id):
 def jobs_by_tag(client, tag_prefix):
     """Job ids whose tag starts with `tag_prefix`.
 
-    A run tags every job mur.<mode>.<analysis-date>.<stage>[...], so one
-    prefix names a whole day -- which beats pasting eighteen UUIDs to find
-    out why a run is sitting still.
+    A tag is a batch name, one per stage (MUR-L2P, MUR-MRVA, ... -- see
+    mur_maap/tags.py), so this finds every job of that stage MAAP still
+    lists, from every day. Pair it with --status-only to see what failed
+    before pulling logs for all of them.
     """
     resp = client.maap.list_jobs()
     body = resp.json() if resp.content else {}
@@ -159,7 +160,7 @@ def main(argv=None) -> int:
                         help="job ids, or use --tag to find them")
     parser.add_argument("--tag",
                         help="find jobs by tag prefix instead of listing ids, "
-                             "e.g. --tag mur.nrt.2026-09-20 for a whole day")
+                             "e.g. --tag MUR-L2P for every L2P job")
     parser.add_argument("--full", action="store_true",
                         help=f"print the whole log, not the last {TAIL_LINES} lines")
     parser.add_argument("--status-only", action="store_true")

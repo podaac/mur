@@ -217,6 +217,27 @@ output comparison. By default sensors that are missing on one side are
 excluded from the comparison; pass `--include-missing` to penalise them
 instead.
 
+## Comparing a MAAP day's inputs against production (`compare_maap_prod_inputs.py`)
+
+Fetches the input logs both pipelines already write, from MAAP's DPS job
+outputs and (over one `ssh … bash -s`) from the prod host, and diffs them
+stage by stage: MRVA's ingest log (`<YYYYMMDD>09_MRVA4_Global_inputs.txt`,
+points per sensor/day), the MRVA job's parameters (notably `prior_csp_file`),
+the per-BIC `L2Plist_*.txt` granule lists, landice `icefiles_*.txt`, and
+iQUAM `.bii` sizes. Logs only, so no data is downloaded. Runs anywhere with
+`maap-py` and a MAAP token (`MAAP_PGT` or `~/.maap-token`).
+
+```bash
+python utils/compare_maap_prod_inputs.py --date 2026-10-20 --host podaac-mure
+python utils/compare_maap_prod_inputs.py --date 2026-10-20 --skip-remote   # MAAP side only
+# A mirror with a different layout: override the remote roots
+python utils/compare_maap_prod_inputs.py --date 2026-10-20 --host podaac-mure \
+    --bic-root /mirror/bic --csp-root /mirror/cyc4out --iquam-root /mirror/iquam
+```
+
+Raw files from both sides, `report.json` and a self-contained `report.html`
+land in `./maap_vs_prod_<YYYY>_<DDD>/`.
+
 ## L2P download orphan capture (`l2p_capture.py`)
 
 Proves, in real time, how many L2P granules the **hourly incremental** download

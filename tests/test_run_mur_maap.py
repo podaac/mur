@@ -136,6 +136,8 @@ class FakeMAAPClient(MAAPClient):
         # Job ids the test wants to come back failed.
         self.failing_jobs = set()
         self.dedups = []
+        # Byte sizes for object_size, by href; see there for the default.
+        self.sizes = {}
 
     def job_id_for(self, process_id, **match):
         """Job id of the single recorded submission for `process_id`,
@@ -162,6 +164,19 @@ class FakeMAAPClient(MAAPClient):
 
     def object_exists(self, s3_uri):
         return s3_uri in self.existing_objects
+
+    def object_modified(self, s3_uri):
+        # Unknown, which _bic_is_stale reads as "not stale".
+        return None
+
+    def object_size(self, s3_uri):
+        # Anything that exists holds data unless a test says otherwise;
+        # job outputs are never in existing_objects, so they get the default.
+        if s3_uri in self.sizes:
+            return self.sizes[s3_uri]
+        if s3_uri in self.existing_objects or s3_uri.startswith("s3://podaac/output/"):
+            return 4096
+        return None
 
     def list_objects(self, prefix):
         return [uri for uri in self.existing_objects if uri.startswith(prefix)]
@@ -1131,20 +1146,32 @@ def test_a_failed_landice_job_is_not_promoted(orchestrator):
     assert not [d for _s, d in client.copied if "/mur/landice/" in d]
 
 
-def test_browse_rasters_and_mur25_are_catalogued_with_the_granule(orchestrator):
-    """The COGs are only useful if the STAC item points at them.
-
-    stac.py gives a .tif asset the COG media type, the "visual" role and a
-    titiler TileJSON URL -- but none of that fires unless the orchestrator
-    actually resolves the outputs and passes them, which it did not until the
-    assets existed to pass.
-    """
+def test_mur25_is_catalogued_with_the_granule(orchestrator):
     orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
     extras = orchestrator.client.published_extras[0]
     assert extras is not None
     assert "mur25" in extras
-    assert {"browse_sst", "browse_anom"} <= set(extras)
-    assert {"browse25_sst", "browse25_ice", "browse25_mask"} <= set(extras)
+
+
+def test_browse_rasters_are_submitted_and_not_waited_on(orchestrator):
+    """cog runs while the next day starts.
+
+    Its rasters reach the catalogue through the catalog.json each job stages
+    out, and every tool reads them from there, so the run has nothing to
+    collect from it. Waiting only held up the next day. Hence: one cog job per
+    granule, none of them ever waited on, and no browse asset in the sidecar.
+    """
+    client = orchestrator.client
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    cog_jobs = [job for (process, _args), job
+                in zip(client.submitted, client.job_ids)
+                if process == "mur-cog"]
+    assert len(cog_jobs) == 2                  # 1 km and MUR25
+    waited = {j for batch in client.waited for j in batch}
+    assert not waited & set(cog_jobs)
+    assert not any(k.startswith("browse")
+                   for k in client.published_extras[0])
 
 
 def test_a_missing_browse_raster_does_not_fail_the_day():
@@ -1405,16 +1432,16 @@ def test_without_min_age_days_any_existing_bic_is_trusted():
     assert orchestrator._find_cached_bic("AMSR2R", day) == href
 
 
-def test_the_flag_is_off_by_default():
-    """Turning this on by default would invalidate the caches every routine
-    daily run depends on."""
+def test_stale_bics_are_rebuilt_by_default():
+    """Off, a BIC's last build was 06Z the day after its data day and it was
+    frozen there: MODISA 2026/293 kept 113 of prod's 322 granules."""
     orchestrator = MAAPOrchestrator(_single_sensor_config(), FakeMAAPClient())
-    assert orchestrator.rebuild_stale_bics is False
+    assert orchestrator.rebuild_stale_bics is True
 
 
-def test_the_default_path_never_asks_for_an_mtime():
-    """Proves a running backfill is unaffected: with the flag off, the extra
-    HEAD is not even issued."""
+def test_trusting_cached_bics_never_asks_for_an_mtime():
+    """--trust-cached-bics is the old behaviour exactly: the extra HEAD is not
+    even issued."""
     day = datetime.date(2026, 10, 9)
     config = _single_sensor_config()
 
@@ -1426,7 +1453,7 @@ def test_the_default_path_never_asks_for_an_mtime():
             return None
 
     client = _Recording()
-    orchestrator = MAAPOrchestrator(config, client,
+    orchestrator = MAAPOrchestrator(config, client, rebuild_stale_bics=False,
                                     today_fn=lambda: datetime.date(2026, 10, 14))
     client.existing_objects.add(_bic_href(orchestrator, "AMSR2R", day))
     orchestrator._find_cached_bic("AMSR2R", day)
@@ -1442,3 +1469,114 @@ def test_a_datetime_mtime_works_as_well_as_a_date():
         written=_dt.datetime(2026, 10, 10, 3, 0, tzinfo=_dt.timezone.utc),
         rebuild_stale_bics=True)
     assert orchestrator._find_cached_bic("AMSR2R", day, min_age_days=2) is None
+
+
+# --- buoy files: when an existing one is not good enough ---------------------
+#
+# Every MAAP .bii from 2026/282 on was 24 bytes -- a header and no
+# observations -- written at 06Z on its own day, before iQUAM had any data.
+# Any existing object counted as cached, so none was rebuilt and MRVA ran with
+# no buoys at all.
+
+def _iquam_href(day):
+    from mur_maap import paths
+    return paths.iquam_href(WORKSPACE_ROOT, day)
+
+
+def _iquam_orchestrator(today=datetime.date(2026, 10, 28)):
+    client = FakeMAAPClient()
+    return MAAPOrchestrator(CONFIG, client, today_fn=lambda: today), client
+
+
+def test_a_header_only_buoy_file_is_not_reused():
+    orch, client = _iquam_orchestrator()
+    day = datetime.date(2026, 10, 20)
+    client.existing_objects.add(_iquam_href(day))
+    client.sizes[_iquam_href(day)] = rmm.IQUAM_EMPTY_BII_BYTES
+    assert orch._find_cached_iquam(day) is None
+    client.sizes[_iquam_href(day)] = rmm.IQUAM_EMPTY_BII_BYTES + 9   # N=1
+    assert orch._find_cached_iquam(day) == _iquam_href(day)
+
+
+def test_a_buoy_file_younger_than_stable_latency_is_rebuilt():
+    """nrtMRVA.py's buoystablat: iQUAM may still be adding to it."""
+    orch, client = _iquam_orchestrator()
+    for age, reused in ((0, False), (1, False), (2, True)):
+        day = datetime.date(2026, 10, 28) - datetime.timedelta(days=age)
+        client.existing_objects.add(_iquam_href(day))
+        assert (orch._find_cached_iquam(day) is not None) is reused, age
+
+
+def test_an_empty_rebuild_does_not_overwrite_a_file_with_data():
+    orch, client = _iquam_orchestrator()
+    day = datetime.date(2026, 10, 27)
+    client.existing_objects.add(_iquam_href(day))
+    client.sizes["s3://podaac/output/job-9/output/doy=300/year=2026"] = 24
+    assert orch._promote_iquam(day, "job-9") == _iquam_href(day)
+    assert not client.copied
+
+
+def test_an_empty_rebuild_with_nothing_earlier_is_left_out():
+    orch, client = _iquam_orchestrator()
+    day = datetime.date(2026, 10, 27)
+    client.sizes["s3://podaac/output/job-9/output/doy=300/year=2026"] = 24
+    assert orch._promote_iquam(day, "job-9") is None
+    assert not client.copied
+
+
+def test_empty_buoy_days_stay_out_of_the_mrva_manifest():
+    orch, client = _iquam_orchestrator(today=datetime.date(2026, 8, 9))
+    client.sizes.update({
+        f"s3://podaac/output/job-1/output/doy={d}/year=2026": 24
+        for d in (217, 218)})
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    _prefix, manifest = client.written_manifests[-1]
+    days = sorted(f["relative_path"] for f in manifest["files"]
+                  if f["sensor"] == "IQUAM0")
+    assert days and not any(d.endswith(("_217.bii", "_218.bii")) for d in days)
+
+
+# --- the daily sweep ----------------------------------------------------------
+
+def test_a_young_bic_is_built_once_per_run_not_once_per_window():
+    """In a T-9..T-1 sweep T-1 sits in three analysis days' windows. nrtMRVA.py
+    builds it once a run ("just written"); so must this."""
+    config = _single_sensor_config()
+    config["l2p"]["sensors"]["AMSR2R"]["day_range"] = [2, 2]
+    client = FakeMAAPClient()
+    today = datetime.date(2026, 8, 9)
+    orch = MAAPOrchestrator(config, client, today_fn=lambda: today)
+    for back in (3, 2, 1):
+        orch.run_day(today - datetime.timedelta(days=back), mode="nrt")
+    l2p_days = [(a["year"], a["doy"]) for p, a in client.submitted if p == "mur-l2p"]
+    assert len(l2p_days) == len(set(l2p_days)), l2p_days
+
+
+def test_a_final_day_that_already_exists_is_kept():
+    from mur_maap import paths
+    orch, client = _iquam_orchestrator(today=datetime.date(2026, 8, 9))
+    day = datetime.date(2026, 8, 3)
+    client.existing_objects.add(paths.l4_href(WORKSPACE_ROOT, day, "rea"))
+    result = orch.run_day(day, mode="rea")
+    assert client.submitted == []
+    assert result.netcdf_href == paths.l4_href(WORKSPACE_ROOT, day, "rea")
+
+
+def test_rerun_final_redoes_it():
+    from mur_maap import paths
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client, rerun_final=True,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    day = datetime.date(2026, 8, 3)
+    client.existing_objects.add(paths.l4_href(WORKSPACE_ROOT, day, "rea"))
+    orch.run_day(day, mode="rea")
+    assert "mur-mrva" in [p for p, _ in client.submitted]
+
+
+def test_an_nrt_granule_does_not_count_as_final():
+    from mur_maap import paths
+    orch, client = _iquam_orchestrator(today=datetime.date(2026, 8, 9))
+    day = datetime.date(2026, 8, 3)
+    client.existing_objects.add(paths.l4_href(WORKSPACE_ROOT, day, "nrt"))
+    orch.run_day(day, mode="rea")
+    assert "mur-mrva" in [p for p, _ in client.submitted]

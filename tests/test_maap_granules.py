@@ -111,7 +111,8 @@ def test_the_module_does_not_mint_credentials():
 def test_no_bucket_writing_helpers_survive():
     tree = ast.parse(MODULE_SOURCE)
     defined = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
-    assert defined == {"discover_day", "_try_login", "granules_for_day"}, \
+    assert defined == {"discover_day", "_try_login", "granules_for_day",
+                       "starts_on"}, \
         f"unexpected public surface: {sorted(defined)}"
 
 
@@ -135,3 +136,55 @@ def test_missing_earthaccess_names_the_fix(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", no_earthaccess)
     with pytest.raises(granules.GranuleDiscoveryError, match="pip install earthaccess"):
         granules.discover_day(["C"], DAY)
+
+
+# --- the day boundary -------------------------------------------------------
+#
+# CMR's temporal search matches on overlap, so a granule that starts at 23:55
+# yesterday comes back for today too. Production files each granule under its
+# start day only (podaac-data-subscriber -dydoy), so that one must be dropped.
+
+class _Granule(dict):
+    def __init__(self, begin, name):
+        super().__init__()
+        if begin is not None:
+            self["umm"] = {"TemporalExtent": {"RangeDateTime": {
+                "BeginningDateTime": begin}}}
+        self._link = f"s3://podaac-ops-cumulus-protected/C/{name}"
+
+    def data_links(self, access="direct"):
+        return [self._link]
+
+
+def _fake_earthaccess(monkeypatch, results):
+    import sys
+    import types
+    fake = types.ModuleType("earthaccess")
+    fake.search_data = lambda **kw: results
+    fake.login = lambda **kw: None
+    monkeypatch.setitem(sys.modules, "earthaccess", fake)
+
+
+def test_a_granule_that_started_the_day_before_is_dropped(monkeypatch):
+    _fake_earthaccess(monkeypatch, [
+        _Granule("2026-08-05T23:55:01.000Z", "20260805235501-JPL-L2P.nc"),
+        _Granule("2026-08-06T00:00:01.000Z", "20260806000001-JPL-L2P.nc"),
+        _Granule("2026-08-06T23:55:01.000Z", "20260806235501-JPL-L2P.nc"),
+    ])
+    got = granules.discover_day(["C"], DAY)
+    assert [h.rsplit("/", 1)[-1] for h in got] == [
+        "20260806000001-JPL-L2P.nc", "20260806235501-JPL-L2P.nc"]
+
+
+def test_the_filename_decides_when_cmr_gives_no_start_time():
+    assert granules.starts_on(
+        _Granule(None, "x"), ["s3://b/20260805235501-JPL-L2P.nc"], DAY) is False
+    assert granules.starts_on(
+        _Granule(None, "x"), ["s3://b/20260806000001-JPL-L2P.nc"], DAY) is True
+
+
+def test_a_granule_whose_start_cannot_be_read_is_kept(monkeypatch):
+    """Dropping it would be a silent loss; the overlap is one swath a day."""
+    assert granules.starts_on(_Granule(None, "x"), ["s3://b/AMSR2_L2P.nc"], DAY) is None
+    _fake_earthaccess(monkeypatch, [_Granule(None, "AMSR2_L2P.nc")])
+    assert len(granules.discover_day(["C"], DAY)) == 1

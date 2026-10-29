@@ -6,8 +6,9 @@
 #   * cron's environment is nearly empty. It does not read ~/.bashrc, so
 #     MAAP_PGT is absent and PATH is roughly /usr/bin:/bin -- no venv, no uv.
 #     Everything the run needs is named explicitly below.
-#   * run_mur_maap.py blocks for the whole run -- three serial barriers
-#     (l2p fan-in, mrva, cog) -- and keeps no resumable state. Two overlapping
+#   * run_mur_maap.py blocks for the whole run -- two serial barriers per
+#     day (l2p fan-in, mrva; cog is submitted and not waited on) -- and
+#     keeps no resumable state. Two overlapping
 #     runs would resubmit the same jobs, and dedup is off by design
 #     (mur_maap/client.py:163). flock in the crontab makes the second exit.
 #   * A token that has expired must fail here, loudly, rather than as 25
@@ -16,6 +17,8 @@
 # Override any of these in the crontab if the layout differs:
 #   MUR_REPO (default ~/mur)   MUR_PYTHON / MUR_UV (default: find uv)
 #   MUR_CONFIG (default $MUR_REPO/config.maap.json)   MUR_LOGDIR
+#   MUR_PROCESS_DAYS (default: unset, i.e. run_mur_maap.py's own default --
+#   nrtMRVA.py's T-9..T-1 sweep. Set it, e.g. to -1, only to narrow a run.)
 set -euo pipefail
 
 # --check runs every gate, reports what it found, prints the command it would
@@ -33,7 +36,13 @@ CHECK_ONLY=0
 REPO="${MUR_REPO:-$HOME/mur}"
 CONFIG="${MUR_CONFIG:-$REPO/config.maap.json}"
 LOGDIR="${MUR_LOGDIR:-$HOME/mur-maap-logs}"
-PROCESS_DAYS="${MUR_PROCESS_DAYS:--1}"
+# No -p by default, so the run is the orchestrator's full T-9..T-1 sweep, as
+# production's nrtMRVA.py does it. This used to pass -p -1: T-1 in NRT and
+# nothing else, so no day ever got its Final (REA) run, and no NRT day had a
+# .c06 to chain from, since only a Final run writes one.
+PROCESS_DAYS="${MUR_PROCESS_DAYS:-}"
+DAYS_ARGS=()
+[[ -n "$PROCESS_DAYS" ]] && DAYS_ARGS=("-p=$PROCESS_DAYS")
 
 mkdir -p "$LOGDIR"
 # `date -u +%F` and the explicit format below rather than -Is: BSD date has no
@@ -72,7 +81,7 @@ if (( CHECK_ONLY )); then
 else
     exec >>"$LOG" 2>&1 </dev/null
 fi
-echo "=== $(now) starting (repo=$REPO days=$PROCESS_DAYS) ==="
+echo "=== $(now) starting (repo=$REPO days=${PROCESS_DAYS:-default sweep}) ==="
 
 fail() { echo "ERROR: $1"; exit "${2:-1}"; }
 
@@ -140,15 +149,15 @@ if (( CHECK_ONLY )); then
     # The orchestrator's own --dry-run resolves the config, the algorithm
     # version and the token provenance without submitting -- the three things
     # that are wrong when a run fails for a reason the gates above cannot see.
-    "${RUN[@]}" run_mur_maap.py --config "$CONFIG" -p "$PROCESS_DAYS" --dry-run \
+    "${RUN[@]}" run_mur_maap.py --config "$CONFIG" ${DAYS_ARGS[@]+"${DAYS_ARGS[@]}"} --dry-run \
         | grep -E "^(run day|analysis days|version|token|sensors)" || true
     echo
     echo "all gates passed. The scheduled run would be:"
-    echo "  ${RUN[*]} run_mur_maap.py --config $CONFIG -p $PROCESS_DAYS"
+    echo "  ${RUN[*]} run_mur_maap.py --config $CONFIG ${DAYS_ARGS[*]:-}"
     echo "  logging to $LOGDIR/maap_<timestamp>.txt"
     exit 0
 fi
 
 echo "--- pre-flight passed, submitting ---"
-"${RUN[@]}" run_mur_maap.py --config "$CONFIG" -p "$PROCESS_DAYS"
+"${RUN[@]}" run_mur_maap.py --config "$CONFIG" ${DAYS_ARGS[@]+"${DAYS_ARGS[@]}"}
 echo "=== $(now) finished rc=0 ==="
