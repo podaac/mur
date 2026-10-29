@@ -62,7 +62,7 @@ COPY mrva/src/fortran/cx/*.f /app/fortran/cx/
 COPY mrva/src/fortran/cx/Makefile /app/fortran/cx/
 
 # Update Makefiles to use ifort from oneAPI (just update the path, keep optimization flags)
-# The original Makefiles use Intel-specific flags: -80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost
+# The Makefiles use these flags (-march, not the reference -xHost; see mrva/src/fortran/Makefile): -80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -march=core-avx-i
 RUN sed -i 's|^FC = /opt/intel/bin/ifort|FC = ifort|g' /app/fortran/Makefile && \
     sed -i 's|^FC = /opt/intel/bin/ifort|FC = ifort|g' /app/fortran/cx/Makefile && \
     sed -i 's|^default:.*|default: cbscxdata cbscxcoeff cbscxcoeffvector|g' /app/fortran/cx/Makefile && \
@@ -76,7 +76,7 @@ RUN sed -i 's|^FC = /opt/intel/bin/ifort|FC = ifort|g' /app/fortran/Makefile && 
 #
 # Build modes (controlled by DEBUG build arg):
 #   DEBUG=0 (default): Production build with full optimizations
-#     -80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost -fpp
+#     -80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -march=core-avx-i -fpp
 #   DEBUG=1: Debug build with symbols, bounds checking, and tracebacks
 #     -80 -qopenmp -fpp -g -traceback -check bounds -check uninit -fpe0 -warn all -O0
 #
@@ -310,7 +310,7 @@ LABEL maintainer="MUR Team"
 LABEL build-pattern="3-stage: (1) Intel ifort Fortran build, (2) MATLAB compilation, (3) Base runtime image"
 LABEL base-image="mur-matlab-base:r2024b"
 LABEL compiler="Intel Fortran Compiler (ifort) from oneAPI HPC Toolkit 2024.0.1"
-LABEL compiler-flags-production="-80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost"
+LABEL compiler-flags-production="-80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -march=core-avx-i"
 LABEL compiler-flags-debug="-80 -qopenmp -g -traceback -check bounds -check uninit -fpe0 -warn all -O0"
 LABEL build-arg-debug="Set DEBUG=1 for debug build with symbols and bounds checking"
 LABEL interface="Named args only: --year --doy --mode plus explicit static/dynamic input flags and --sensor-inputs-manifest"

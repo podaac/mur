@@ -36,7 +36,8 @@ FCOPT_BASE = -80 -qopenmp -heap-arrays 64
 # refuses to grant. See mrva/src/fortran/Makefile for the full account.
 
 # Production optimization flags
-FCOPT_PROD = -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost
+# -march, not -xHost: see ../Makefile. -x refuses to run on AMD.
+FCOPT_PROD = -pad -ipo -O3 -no-prec-div -fp-model fast=2 -march=core-avx-i
 
 # Debug flags
 FCOPT_DEBUG = -g -traceback -check bounds -check uninit -fpe0 -warn all -O0

@@ -64,13 +64,21 @@ FCOPT_BASE = -80 -qopenmp -fpp -heap-arrays 64
 # only KMP_STACKSIZE, so they were one L-level away from the same crash.
 
 # Production optimization flags
-FCOPT_PROD = -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost
+FCOPT_PROD = -pad -ipo -O3 -no-prec-div -fp-model fast=2 -march=core-avx-i
 # -pad = Enables changing of variable and array memory layout
 # -ipo = Interprocedural optimization
 # -O3 = Aggressive optimizations
 # -no-prec-div = Faster division
 # -fp-model fast=2 = Fast floating point model
-# -xHost = Optimize for host CPU
+# -march=core-avx-i = AVX + F16C, any x86-64 vendor (see below)
+# -march=core-avx-i, not -xHost. Any -x option makes ifort insert a check
+# that refuses to start on a non-Intel CPU, whatever instructions it has:
+# DPS job on r7a.2xlarge (AMD EPYC), 2026-10-29 --
+#   Please verify that both the operating system and the processor support
+#   Intel(R) X87, CMOV, MMX, FXSAVE, SSE, ..., AVX and F16C instructions.
+# -xHost also tied the code to whichever machine built the image; that list
+# is what it resolved to there (AVX + F16C). -march= targets the same set
+# with no vendor check, so it runs on Intel and AMD pools alike.
 
 # Debug flags for crash investigation
 FCOPT_DEBUG = -g -traceback -check bounds -check uninit -fpe0 -warn all -O0
