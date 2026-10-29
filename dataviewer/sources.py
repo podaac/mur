@@ -58,6 +58,12 @@ L4_NAME_RE = re.compile(
     r"v(?P<gds>[\d.]+)-fv(?P<version>[\d.]+)\.nc4?$"
 )
 
+#: ``jleach_jpl__mur-mrva_1756__2.0.19`` -- how MAAP names the collection it
+#: ingests a mur-mrva job's catalog.json into. Same shape utils/mur_stac.py
+#: matches; only mur-mrva carries L4 granules.
+MRVA_COLLECTION_RE = re.compile(
+    r"^(?P<user>[^_].*?)__mur-mrva(?:_\d+)?__(?P<version>.+)$")
+
 PROGRESS = Optional[Callable[[float, str], None]]
 
 
@@ -120,6 +126,10 @@ class Granule:
         bits = [self.name]
         if self.mode:
             bits.append(f"[{self.mode.upper()}]")
+        if self.extra.get("version"):
+            # Every algorithm version is its own MAAP collection, so one day
+            # can be listed several times under an identical filename.
+            bits.append(f"v{self.extra['version']}")
         if self.size:
             bits.append(f"({self.size / 1e6:.0f} MB)")
         return " ".join(bits)
@@ -471,17 +481,17 @@ class MaapStacCatalog(Catalog):
 
     Two discovery routes, tried in order:
 
-      1. A STAC API ``/search``, when ``maap_stac_url`` is set. Plain HTTP
-         against the STAC spec rather than pystac-client, to avoid a new hard
-         dependency for one POST.
-      2. The deterministic item keys in the workspace bucket
+      1. MAAP's DPS STAC (``maap_stac_url``), the same catalogue
+         utils/mur_stac.py and the published browse rasters use. Each mur-mrva
+         job stages out a catalog.json and MAAP ingests it into a
+         ``<user>__mur-mrva_<suffix>__<version>`` collection. Those ids are
+         discovered rather than configured, because the suffix is assigned
+         at registration. Plain HTTP against the STAC spec rather than
+         pystac-client, to avoid a new hard dependency.
+      2. The sidecar items run_mur_maap.py writes to the workspace bucket
          (``mur/stac/items/<year>/<doy><mode>.json``, from
-         mur_maap/paths.stac_item_key). This is what run_mur_maap.py actually
-         writes today, and it works before any STAC API exists to point at --
-         which, per docs/maap.html, is still the state of things.
-
-    Route 2 is also the honest one while the MAAP client is stubbed: it reads
-    files we know we wrote, at keys we chose.
+         mur_maap/paths.stac_item_key). Used only when route 1 finds nothing,
+         which covers a day that finished but that MAAP has not ingested yet.
     """
 
     name = "maap"
@@ -501,32 +511,97 @@ class MaapStacCatalog(Catalog):
 
     # -- route 1: STAC API ------------------------------------------------
 
+    def _username(self) -> str:
+        """The MAAP username: the last segment of the workspace root."""
+        root = self.config.maap_workspace_root.rstrip("/")
+        if not root.startswith("s3://") or root.count("/") < 3:
+            return ""
+        return root.rsplit("/", 1)[-1]
+
+    def _collections(self, requests, headers: Dict) -> List[str]:
+        """Which collections to search: the configured ones, else every
+        mur-mrva collection the API lists, narrowed to this user's when the
+        workspace root names one."""
+        configured = [c.strip() for c in self.config.maap_collection.split(",")
+                      if c.strip()]
+        if configured:
+            return configured
+
+        url = self.config.maap_stac_url.rstrip("/") + "/collections?limit=500"
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            body = response.json()
+        except Exception as exc:
+            raise CatalogError(
+                f"STAC collection listing at {url} failed: {exc}") from exc
+
+        user = self._username()
+        found = []
+        for collection in body.get("collections") or []:
+            match = MRVA_COLLECTION_RE.match(str(collection.get("id", "")))
+            if match and (not user or match.group("user") == user):
+                found.append(collection["id"])
+        return found
+
     def _search_api(self, start: datetime.date,
                     end: datetime.date) -> List[Granule]:
         import requests
 
-        url = self.config.maap_stac_url.rstrip("/") + "/search"
-        payload = {
-            "collections": [self.config.maap_collection],
-            "datetime": (f"{start.isoformat()}T00:00:00Z/"
-                         f"{end.isoformat()}T23:59:59Z"),
-            "limit": 500,
-        }
         headers = {"Content-Type": "application/json"}
         if self.config.maap_stac_token:
             headers["Authorization"] = f"Bearer {self.config.maap_stac_token}"
 
-        try:
-            response = requests.post(url, json=payload, headers=headers,
-                                     timeout=30)
-            response.raise_for_status()
-            body = response.json()
-        except Exception as exc:
-            raise CatalogError(f"STAC search at {url} failed: {exc}") from exc
+        collections = self._collections(requests, headers)
+        if not collections:
+            return []
+
+        url = self.config.maap_stac_url.rstrip("/") + "/search"
+        payload = {
+            "collections": collections,
+            "datetime": (f"{start.isoformat()}T00:00:00Z/"
+                         f"{end.isoformat()}T23:59:59Z"),
+            "limit": 500,
+        }
+
+        features = []
+        # Bounded so a server that keeps handing back a next link cannot hang
+        # the sidebar. 20 pages of 500 is decades of daily granules.
+        for _ in range(20):
+            try:
+                response = requests.post(url, json=payload, headers=headers,
+                                         timeout=30)
+                response.raise_for_status()
+                body = response.json()
+            except Exception as exc:
+                raise CatalogError(
+                    f"STAC search at {url} failed: {exc}") from exc
+            features.extend(body.get("features", []))
+            # pgstac pages a POST search with a POST next link whose body is
+            # the whole request plus a token, so it is sent as given.
+            nxt = next((link for link in body.get("links") or []
+                        if link.get("rel") == "next"
+                        and link.get("method", "GET").upper() == "POST"
+                        and link.get("body")), None)
+            if nxt is None:
+                break
+            url, payload = nxt.get("href") or url, nxt["body"]
 
         return [g for g in (granule_from_stac_item(f, self.name)
-                            for f in body.get("features", []))
+                            for f in features)
                 if g is not None]
+
+    def cache_path(self, granule: Granule) -> Path:
+        """Namespaced further than other sources: a day's NRT and REA
+        granules share a filename, and so does every algorithm version of
+        either, so the bare name would hand back the wrong file."""
+        path = super().cache_path(granule)
+        version = granule.extra.get("version")
+        if version:
+            path = path.parent / f"v{version}" / path.name
+        if granule.mode:
+            path = path.parent / granule.mode / path.name
+        return path
 
     # -- route 2: workspace bucket ---------------------------------------
 
@@ -665,6 +740,7 @@ def granule_from_stac_item(item: Dict, source: str) -> Optional[Granule]:
             "job_id": props.get("mur:job_id"),
             "run_type": props.get("mur:run_type"),
             "collection": item.get("collection"),
+            "version": props.get("processing:version"),
         },
     )
 

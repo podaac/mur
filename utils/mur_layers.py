@@ -1,53 +1,52 @@
 #!/usr/bin/env python3
-"""List the MUR browse layers in the workspace and print viewer links.
+"""List the MUR browse layers MAAP has catalogued and print viewer links.
 
     python utils/mur_layers.py                 # every day found
     python utils/mur_layers.py --date 2026-09-28
     python utils/mur_layers.py --latest        # just the most recent day
+    python utils/mur_layers.py --version 2.0.18
     python utils/mur_layers.py --json          # machine-readable
 
-WHY THIS EXISTS
-    Mostly, it no longer has to. Discovery is self-service now: the cog
-    container writes a catalog.json that MAAP ingests, so the layers are
-    listed at dps-stac-browser.maap-project.org and tiled by
-    titiler-dps-stac.maap-project.org without anything running in a
-    workspace. Prefer that.
+WHERE THE LAYERS COME FROM
+    MAAP's DPS STAC, the same catalogue utils/mur_stac.py and the dataviewer
+    read. Every mur-cog job stages out a catalog.json and MAAP ingests it into
+    a <user>__mur-cog_<suffix>__<version> collection, one item per granule
+    (mur-cog-<YYYYMMDD>-1km, mur-cog-<YYYYMMDD>-25km).
 
-    This remains useful for two cases the catalogue cannot serve. First, a
-    raster written before the STAC emitter existed, or by a job whose
-    metadata step failed -- the file is in the bucket and nothing indexes it.
-    Second, checking a raster BEFORE it is published, where the point is to
-    look at the object rather than at the catalogue. Both address the object
-    by URL, which is why the titiler_viewer path is kept.
+    It used to read the sidecar items run_mur_maap.py wrote to the workspace
+    bucket, which meant the run had to wait for every cog job to finish and
+    copy its outputs in. Reading the catalogue instead is what let the run
+    stop waiting. It also means no credentials: dps-stac is read without
+    auth, and the tiler reads the workspace bucket with its own role.
 
-    It runs where the credentials are -- a workspace -- lists what the
-    pipeline has actually written, and prints links you open anywhere.
+    A layer appears once MAAP has ingested it, which happens on MAAP's own
+    schedule after the job finishes -- so the newest day can lag the run by
+    a while.
 
 WHAT IT PRINTS
-    One block per analysis day, with a titiler viewer URL per layer. The URLs
-    carry the rescale and colormap from the STAC item rather than letting
-    titiler stretch each tile to its own range -- without that, two days are
-    drawn on different colour scales and nothing on screen says so.
+    One block per analysis day and mode, with a titiler viewer URL per layer
+    addressing the COG directly. utils/mur_stac.py prints the per-item map
+    links instead; this is the flatter, one-day-at-a-glance view. The URLs
+    carry the rescale and colormap from the item rather than letting titiler
+    stretch each tile to its own range -- without that, two days are drawn on
+    different colour scales and nothing on screen says so.
 """
 import argparse
-import datetime
 import json
+import pathlib
 import sys
 
-# Importable when run as a script from anywhere, matching job_logs.py and
-# deploy_algorithms.py. Without it `python utils/run_cog.py` fails with
-# ModuleNotFoundError: No module named 'mur_maap' -- the repo root is not on
-# sys.path when the script lives in a subdirectory.
-import pathlib
+# Importable when run as a script from anywhere, and when imported by path
+# from a test. utils/ is not a package, so mur_stac is a sibling script.
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "utils"))
 
+import mur_stac                                                # noqa: E402
 
-def build_client(config_path=None):
-    """A client good enough to list S3. Nothing here submits anything."""
-    from mur_maap.client import MaapPyClient
-    from mur_maap.version import ALGORITHM_VERSION
-    return MaapPyClient(queue="__read_only__", version=ALGORITHM_VERSION)
+#: The item id's resolution suffix -> the layer-name prefix this tool has
+#: always printed, so existing habits and scripts keep their names.
+PREFIX = {"1km": "browse", "25km": "browse25"}
 
 
 def viewer_url(cog_href: str, render: dict) -> str:
@@ -62,86 +61,114 @@ def viewer_url(cog_href: str, render: dict) -> str:
     return titiler_viewer(cog_href, **render)
 
 
-def _read(client, s3_uri: str) -> bytes:
-    """Fetch one small object. The client has no reader of its own -- it
-    writes manifests and lists keys -- so this uses the same session."""
-    from mur_maap.workspace import split_s3_uri
-    bucket, key = split_s3_uri(s3_uri)
-    return client.workspace.s3().get_object(Bucket=bucket, Key=key)["Body"].read()
+def cog_collections(collections, version=None):
+    """The mur-cog collections to read: the one named by `version`, else the
+    newest. One version only, because every version re-catalogues the same
+    days and listing them all repeats each day once per version."""
+    cogs = [c for c in collections if c["module"] == "mur-cog"]
+    if version:
+        return [c for c in cogs if c["version"] == version]
+    # mur_collections sorts newest version first.
+    newest = cogs[0]["version"] if cogs else None
+    return [c for c in cogs if c["version"] == newest]
 
 
-def items_for(client, year=None):
-    """Every STAC item the pipeline has written, newest first.
+def days_from_items(items):
+    """Group cog items into one record per (analysis day, mode), newest first.
 
-    The items are the index rather than the COGs themselves: an item knows
-    which rasters belong to a day AND how each should be drawn, while a bare
-    listing of .tif files knows neither.
+    A day's 1 km and MUR25 rasters are separate items; merging them is what
+    makes this one block per day.
     """
-    from mur_maap import paths
-    root = client.workspace.path().uri.rstrip("/")
-    prefix = f"{root}/{paths.MUR_ROOT}/stac/items/"
-    if year:
-        prefix += f"{year}/"
-    keys = [k for k in client.list_objects(prefix) if k.endswith(".json")]
-    return sorted(keys, reverse=True)
+    days = {}
+    for item in items:
+        props = item.get("properties") or {}
+        stamp = props.get("datetime") or ""
+        mode = props.get("mur:mode") or ""
+        resolution = str(item.get("id", "")).rsplit("-", 1)[-1]
+        prefix = PREFIX.get(resolution, resolution)
+
+        day = days.setdefault((stamp[:10], mode), {
+            "id": f"mur-l4-{stamp[:10].replace('-', '')}-{mode}",
+            "datetime": stamp,
+            "mode": mode,
+            "analysis_level": props.get("mur:analysis_level"),
+            "layers": {},
+        })
+        for key, asset in sorted((item.get("assets") or {}).items()):
+            render = mur_stac.render_for(key, asset)
+            if render is None:
+                continue
+            day["layers"][f"{prefix}_{key}"] = viewer_url(asset["href"], render)
+    return [days[k] for k in sorted(days, reverse=True)]
+
+
+def _username_from_config(path):
+    """The MAAP username from a pipeline config's maap.workspace_root, or None.
+
+    Optional: without it every user's MUR collections are listed.
+    """
+    try:
+        config = json.loads(pathlib.Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    root = str((config.get("maap") or {}).get("workspace_root") or "")
+    root = root.rstrip("/")
+    if not root.startswith("s3://") or root.count("/") < 3 or "<" in root:
+        return None
+    return root.rsplit("/", 1)[-1]
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--config", default="config.maap.json")
+    ap.add_argument("--config", default="config.maap.json",
+                    help="read the MAAP username from its maap.workspace_root "
+                         "(optional; --user wins)")
+    ap.add_argument("--user", help="MAAP username; default from --config, "
+                                   "else every user's")
+    ap.add_argument("--version", help="algorithm version; default the newest")
     ap.add_argument("--date", help="YYYY-MM-DD; default is every day found")
     ap.add_argument("--latest", action="store_true", help="only the newest day")
     ap.add_argument("--json", action="store_true", dest="as_json")
     args = ap.parse_args(argv)
 
-    client = build_client(args.config)
-    keys = items_for(client)
-    if not keys:
-        print("No STAC items found. Nothing has completed a run yet, or the")
-        print("workspace_root in your config does not match where it wrote.")
+    user = args.user or _username_from_config(args.config)
+    try:
+        collections = cog_collections(mur_stac.mur_collections(user),
+                                      args.version)
+        items = [i for c in collections for i in mur_stac.items(c["id"])]
+    except Exception as exc:                               # noqa: BLE001
+        print(f"could not read {mur_stac.stac.DPS_STAC}: {exc}", file=sys.stderr)
         return 1
 
+    if not collections:
+        print("No mur-cog collection catalogued"
+              + (f" for version {args.version}" if args.version else "")
+              + (f" for {user}" if user else "") + ".")
+        print("A collection appears once a cog job stages out its catalog.json")
+        print("and MAAP ingests it; `python utils/mur_stac.py` lists what is.")
+        return 1
+
+    out = days_from_items(items)
     if args.date:
-        day = datetime.date.fromisoformat(args.date)
-        doy = day.timetuple().tm_yday
-        keys = [k for k in keys if f"/{day.year}/{doy:03d}" in k]
-        if not keys:
-            print(f"No STAC item for {args.date}.")
+        out = [d for d in out if d["datetime"].startswith(args.date)]
+        if not out:
+            print(f"No browse layers catalogued for {args.date}.")
             return 1
     if args.latest:
-        keys = keys[:1]
-
-    out = []
-    for key in keys:
-        try:
-            item = json.loads(_read(client, key))
-        except Exception as exc:                           # noqa: BLE001
-            print(f"  could not read {key}: {exc}", file=sys.stderr)
-            continue
-
-        day = {"id": item["id"],
-               "datetime": item["properties"].get("datetime"),
-               "analysis_level": item["properties"].get("mur:analysis_level"),
-               "layers": {}}
-        for name, asset in item["assets"].items():
-            if "visual" not in asset.get("roles", []):
-                continue
-            day["layers"][name] = viewer_url(asset["href"],
-                                             asset.get("mur:render", {}))
-        out.append(day)
+        out = out[:1]
 
     if args.as_json:
         print(json.dumps(out, indent=2))
         return 0
 
+    print("\n".join(c["id"] for c in collections))
     for day in out:
         lvl = day.get("analysis_level")
         tag = "" if lvl in (None, 11) else f"   [L={lvl}, SMOOTHER than production]"
         print(f"\n{day['id']}   {day['datetime']}{tag}")
         if not day["layers"]:
-            # Stage 10b is non-fatal, so a granule can exist with no rasters.
-            print("  (no browse layers -- the granule exists, the COGs do not)")
+            print("  (no drawable layers in the catalogued items)")
         for name, url in sorted(day["layers"].items()):
             print(f"  {name:16} {url}")
     print()

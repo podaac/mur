@@ -87,36 +87,43 @@ def items(collection_id, limit=500):
                   reverse=True)
 
 
-def layers(collection_id, item):
-    """Every drawable asset of an item, as links that show it.
+def render_for(key, asset):
+    """How to draw one asset, or None if it is not drawable.
 
-    Render parameters are the item's own `mur:render` block OVERLAID with the
-    current table in mur_maap.stac. The stored block is a snapshot of what
-    the container knew when it ran, and a wrong one draws an unreadable
-    layer: items written before the scale/offset fix carry kelvin rescale
-    values against raw integer pixels, which clamps the whole globe to two
-    bands. Preferring current knowledge means this tool draws them correctly
-    today instead of after a rebuild and a re-run.
+    The item's own `mur:render` block OVERLAID with the current table in
+    mur_maap.stac. The stored block is a snapshot of what the container knew
+    when it ran, and a wrong one draws an unreadable layer: items written
+    before the scale/offset fix carry kelvin rescale values against raw
+    integer pixels, which clamps the whole globe to two bands. Preferring
+    current knowledge draws them correctly today instead of after a rebuild
+    and a re-run.
 
     An unrecognised field keeps whatever it stored, which is the only thing
-    available for it.
+    available for it. Shared with utils/mur_layers.py, so the two tools
+    cannot draw the same raster two ways.
     """
+    render = asset.get("mur:render")
+    if not render or not asset.get("href"):
+        return None
+    if asset.get("mur:units"):
+        # The raster holds real units, so the current table applies: it has
+        # the right ranges and, importantly, no unscale.
+        return dict(render, **stac.RENDER.get(key, {}))
+    # Written before the COG step converted units, so the file holds GHRSST's
+    # packed integers and titiler has to be told to apply the band's scale
+    # and offset. Its own stored block is otherwise right for it -- the
+    # ranges are in kelvin, matching the data -- and overlaying today's
+    # celsius ranges would break it.
+    return dict(render, unscale="true")
+
+
+def layers(collection_id, item):
+    """Every drawable asset of an item, as links that show it."""
     out = {}
     for key, asset in sorted(item.get("assets", {}).items()):
-        render = asset.get("mur:render")
-        if not render or not asset.get("href"):
+        render = render_for(key, asset)
+        if render is None:
             continue
-        if asset.get("mur:units"):
-            # The raster holds real units, so the current table applies: it
-            # has the right ranges and, importantly, no unscale.
-            render = dict(render, **stac.RENDER.get(key, {}))
-        else:
-            # Written before the COG step converted units, so the file holds
-            # GHRSST's packed integers and titiler has to be told to apply
-            # the band's scale and offset. Its own stored block is otherwise
-            # right for it -- the ranges are in kelvin, matching the data --
-            # and overlaying today's celsius ranges would break it.
-            render = dict(render, unscale="true")
         out[key] = {
             "map": stac.dps_map_url(collection_id, item["id"], key, **render),
             "image": stac.dps_preview_url(collection_id, item["id"], key,

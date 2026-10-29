@@ -336,23 +336,44 @@ class _FakeResponse:
         return self._payload
 
 
-class _FakeRequests:
-    """Stands in for the `requests` module inside MaapStacCatalog."""
+MRVA_COLLECTION = "jleach_jpl__mur-mrva_1756__2.0.19"
 
-    def __init__(self, payload, status=200):
+
+class _FakeRequests:
+    """Stands in for the `requests` module inside MaapStacCatalog.
+
+    GET answers the collection listing; POST answers /search, one payload per
+    call when given a list (pages), else the same payload every time.
+    """
+
+    def __init__(self, payload, status=200, collections=None):
+        self.pages = payload if isinstance(payload, list) else None
         self.payload = payload
         self.status = status
+        self.collections = ([{"id": MRVA_COLLECTION}] if collections is None
+                            else [{"id": c} for c in collections])
         self.calls = []
 
+    @property
+    def posts(self):
+        return [c for c in self.calls if c["method"] == "POST"]
+
+    def get(self, url, headers=None, timeout=None):
+        self.calls.append({"method": "GET", "url": url, "headers": headers})
+        return _FakeResponse({"collections": self.collections}, self.status)
+
     def post(self, url, json=None, headers=None, timeout=None):
-        self.calls.append({"url": url, "json": json, "headers": headers})
-        return _FakeResponse(self.payload, self.status)
+        self.calls.append({"method": "POST", "url": url, "json": json,
+                           "headers": headers})
+        payload = (self.pages[len(self.posts) - 1] if self.pages is not None
+                   else self.payload)
+        return _FakeResponse(payload, self.status)
 
 
 @pytest.fixture
 def fake_requests(monkeypatch):
-    def install(payload, status=200):
-        fake = _FakeRequests(payload, status)
+    def install(payload, status=200, collections=None):
+        fake = _FakeRequests(payload, status, collections)
         monkeypatch.setitem(sys.modules, "requests", fake)
         return fake
     return install
@@ -373,6 +394,8 @@ def test_stac_api_search_returns_granules(fake_requests):
                                            datetime.date(2026, 3, 31))
 
     assert [g.id for g in found] == ["mur-l4-20260303-rea"]
+    # A pinned collection is searched as given, with no listing first.
+    assert [c["method"] for c in fake.calls] == ["POST"]
     call = fake.calls[0]
     assert call["url"] == "https://stac.example/search"
     assert call["json"]["collections"] == ["mur-l4-sst"]
@@ -387,7 +410,8 @@ def test_stac_api_search_sends_the_bearer_token(fake_requests):
     MaapStacCatalog(config).search(datetime.date(2026, 3, 1),
                                    datetime.date(2026, 3, 1))
 
-    assert fake.calls[0]["headers"]["Authorization"] == "Bearer ticket"
+    assert all(c["headers"]["Authorization"] == "Bearer ticket"
+               for c in fake.calls)
 
 
 def test_no_token_means_no_authorization_header(fake_requests):
@@ -395,7 +419,7 @@ def test_no_token_means_no_authorization_header(fake_requests):
     config = ViewerConfig(maap_stac_url="https://stac.example")
     MaapStacCatalog(config).search(datetime.date(2026, 3, 1),
                                    datetime.date(2026, 3, 1))
-    assert "Authorization" not in fake.calls[0]["headers"]
+    assert all("Authorization" not in c["headers"] for c in fake.calls)
 
 
 def test_results_are_newest_first(fake_requests):
@@ -437,7 +461,7 @@ def test_stac_api_failure_surfaces_when_there_is_no_fallback(fake_requests):
     fake_requests({}, status=503)
     config = ViewerConfig(maap_stac_url="https://stac.example",
                           maap_workspace_root="")
-    with pytest.raises(sources.CatalogError, match="STAC search"):
+    with pytest.raises(sources.CatalogError, match="STAC"):
         MaapStacCatalog(config).search(datetime.date(2026, 3, 1),
                                        datetime.date(2026, 3, 1))
 
@@ -470,13 +494,112 @@ def test_the_shipped_example_config_is_valid():
     assert config.run_source == "local"
     assert config.reference_source == "public"
     assert config.public_collection == "MUR-JPL-L4-GLOB-v4.1"
-    assert config.maap_collection == "mur-l4-sst"
+    assert config.maap_collection == ""
 
 
-def test_the_example_config_agrees_with_the_stac_module():
-    """The collection the viewer searches must be the one the pipeline
-    publishes into."""
-    from mur_maap.stac import DEFAULT_COLLECTION
+def test_the_viewer_searches_the_stac_the_pipeline_publishes_into():
+    """The viewer must read the same catalogue as utils/mur_stac.py: MAAP's
+    DPS STAC, where mur-mrva's staged-out catalog.json is ingested. It once
+    defaulted to stac.maap-project.org and a collection nothing writes to,
+    and only ever found granules through the sidecar fallback."""
+    from mur_maap.stac import DPS_STAC
     example = Path(__file__).resolve().parents[1] / "viewer.example.json"
     assert load_config(config_path=str(example),
-                       env={}).maap_collection == DEFAULT_COLLECTION
+                       env={}).maap_stac_url == DPS_STAC
+    assert ViewerConfig().maap_stac_url == DPS_STAC
+
+
+def test_blank_collection_discovers_every_mrva_collection(fake_requests):
+    fake = fake_requests(_stac_response(), collections=[
+        "jleach_jpl__mur-mrva_1756__2.0.18",
+        "jleach_jpl__mur-mrva_1756__2.0.19",
+        "jleach_jpl__mur-cog_1756__2.0.19",       # browse rasters, not L4
+        "someone__mur-mrva_1756__2.0.19",
+        "unrelated-collection",
+    ])
+    config = ViewerConfig(maap_stac_url="https://stac.example",
+                          maap_collection="")
+
+    MaapStacCatalog(config).search(datetime.date(2026, 3, 1),
+                                   datetime.date(2026, 3, 1))
+
+    assert fake.calls[0]["url"] == "https://stac.example/collections?limit=500"
+    assert fake.posts[0]["json"]["collections"] == [
+        "jleach_jpl__mur-mrva_1756__2.0.18",
+        "jleach_jpl__mur-mrva_1756__2.0.19",
+        "someone__mur-mrva_1756__2.0.19",
+    ]
+
+
+def test_the_workspace_root_narrows_discovery_to_its_user(fake_requests):
+    fake = fake_requests(_stac_response(), collections=[
+        "jleach_jpl__mur-mrva_1756__2.0.19",
+        "someone__mur-mrva_1756__2.0.19",
+    ])
+    config = ViewerConfig(maap_stac_url="https://stac.example",
+                          maap_workspace_root="s3://maap-ops-workspace/jleach_jpl")
+
+    MaapStacCatalog(config).search(datetime.date(2026, 3, 1),
+                                   datetime.date(2026, 3, 1))
+
+    assert fake.posts[0]["json"]["collections"] == [
+        "jleach_jpl__mur-mrva_1756__2.0.19"]
+
+
+def test_no_mrva_collections_means_no_search(fake_requests):
+    fake = fake_requests(_stac_response(), collections=[])
+    config = ViewerConfig(maap_stac_url="https://stac.example")
+    found = MaapStacCatalog(config).search(datetime.date(2026, 3, 1),
+                                           datetime.date(2026, 3, 1))
+    assert found == []
+    assert fake.posts == []
+
+
+def test_search_follows_pgstac_post_next_links(fake_requests):
+    """dps-stac pages a POST search with a POST next link carrying the whole
+    request body plus a token; stopping at page one silently drops days."""
+    first = build_l4_item(
+        "s3://b/20260305090000-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-v02.0-fv04.1.nc",
+        datetime.date(2026, 3, 5), "nrt")
+    second = build_l4_item(
+        "s3://b/20260301090000-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-v02.0-fv04.1.nc",
+        datetime.date(2026, 3, 1), "rea")
+    next_body = {"collections": [MRVA_COLLECTION], "limit": 500,
+                 "token": "next:abc"}
+    page1 = dict(_stac_response(first), links=[{
+        "rel": "next", "method": "POST",
+        "href": "https://stac.example/search", "body": next_body}])
+    fake = fake_requests([page1, _stac_response(second)])
+    config = ViewerConfig(maap_stac_url="https://stac.example")
+
+    found = MaapStacCatalog(config).search(datetime.date(2026, 3, 1),
+                                           datetime.date(2026, 3, 31))
+
+    assert [g.id for g in found] == ["mur-l4-20260305-nrt",
+                                     "mur-l4-20260301-rea"]
+    assert fake.posts[1]["json"] == next_body
+
+
+def _maap_granule(mode, version):
+    return Granule(id=f"mur-l4-20260303-{mode}", name=L4_NAME,
+                   href=f"s3://b/{version}/{L4_NAME}", source="maap",
+                   date=datetime.date(2026, 3, 3), mode=mode,
+                   extra={"version": version})
+
+
+def test_nrt_rea_and_versions_of_one_day_do_not_share_a_cache_file():
+    """All of them carry the identical L4 filename. Keyed on the name alone,
+    opening the REA granule after the NRT one silently showed the NRT file."""
+    catalog = MaapStacCatalog(ViewerConfig())
+    paths = {catalog.cache_path(_maap_granule(m, v))
+             for m in ("nrt", "rea") for v in ("2.0.18", "2.0.19")}
+    assert len(paths) == 4
+    assert all(p.name == L4_NAME for p in paths)
+
+
+def test_the_version_is_read_from_the_item_and_shown_in_the_label():
+    item = build_l4_item(f"s3://b/{L4_NAME}", datetime.date(2026, 3, 3), "nrt")
+    item["properties"]["processing:version"] = "2.0.19"
+    granule = granule_from_stac_item(item, "maap")
+    assert granule.extra["version"] == "2.0.19"
+    assert "v2.0.19" in granule.label()

@@ -44,13 +44,18 @@ from typing import Any, Dict, Optional
 # arbitrary files that happened to be on disk.
 DEFAULT_PUBLIC_COLLECTION = "MUR-JPL-L4-GLOB-v4.1"
 
-# MAAP's STAC API. Configurable because MUR's own collection may end up on a
-# project-specific endpoint rather than the shared one.
-DEFAULT_MAAP_STAC_URL = "https://stac.maap-project.org"
+# MAAP's DPS STAC: where the catalog.json a DPS job stages out is ingested, and
+# so where mur-mrva's L4 Items actually live. Not stac.maap-project.org, which
+# is curated and holds nothing a DPS job writes. Same value as
+# mur_maap/stac.py's DPS_STAC, repeated because the viewer does not import
+# mur_maap.
+DEFAULT_MAAP_STAC_URL = "https://dps-stac.maap-project.org"
 
-# Matches mur_maap/stac.py's DEFAULT_COLLECTION -- the collection this
-# pipeline publishes its L4 Items into.
-DEFAULT_MAAP_COLLECTION = "mur-l4-sst"
+# Blank means discover: search every <user>__mur-mrva_<suffix>__<version>
+# collection the API lists. The id cannot be written down ahead of time --
+# MAAP suffixes the registered algorithm name, and every algorithm version is
+# a collection of its own. Set it (comma-separated) only to pin versions.
+DEFAULT_MAAP_COLLECTION = ""
 
 RUN_SOURCES = ("local", "maap")
 REFERENCE_SOURCES = ("public", "local", "maap")
@@ -89,10 +94,10 @@ class ViewerConfig:
     maap_stac_url: str = DEFAULT_MAAP_STAC_URL
     maap_collection: str = DEFAULT_MAAP_COLLECTION
     #: "s3://bucket/prefix" -- the workspace root run_mur_maap.py writes to.
-    #: When set, the viewer can fall back to reading the deterministic STAC
-    #: item keys (mur_maap/paths.stac_item_key) directly out of the bucket,
-    #: which is what this pipeline actually writes today even where no STAC
-    #: API is reachable.
+    #: Its last segment is the MAAP username, which narrows collection
+    #: discovery to this user's runs. When set, the viewer can also fall back
+    #: to the sidecar items run_mur_maap.py writes (mur_maap/paths.stac_item_key)
+    #: for a day MAAP has not ingested yet.
     maap_workspace_root: str = ""
     maap_stac_token: str = ""
 

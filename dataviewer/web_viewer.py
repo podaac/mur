@@ -3155,14 +3155,18 @@ def render_source_controls(config: ViewerConfig) -> ViewerConfig:
             collection = st.text_input(
                 "MAAP collection:", value=config.maap_collection,
                 key='_maap_collection',
+                help="Blank searches every mur-mrva collection MAAP has "
+                     "ingested, narrowed to your own when the workspace root "
+                     "is set. Comma-separate ids to pin versions.",
             )
             workspace = st.text_input(
                 "Workspace root (s3://…):",
                 value=config.maap_workspace_root,
                 key='_maap_workspace_root',
-                help="Fallback discovery: reads the STAC items the pipeline "
-                     "writes to mur/stac/items/<year>/ when no STAC API is "
-                     "reachable.",
+                help="Narrows discovery to your own collections. Also a "
+                     "fallback: when the STAC search finds nothing, reads the "
+                     "sidecar items run_mur_maap.py writes to "
+                     "mur/stac/items/<year>/.",
             )
             config = config.with_overrides(
                 maap_stac_url=stac_url,
