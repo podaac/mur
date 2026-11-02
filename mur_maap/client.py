@@ -173,6 +173,7 @@ class MaapPyClient(MAAPClient):
         granule_workdir=None,
         collection_filter: Optional[str] = None,
         granule_staging: str = "workspace",
+        data_root: Optional[str] = None,
     ):
         if maap is None:                       # imported lazily on purpose
             from maap.maap import MAAP
@@ -206,6 +207,19 @@ class MaapPyClient(MAAPClient):
                 "fail in localize_all_inputs. Use workspace mode unless testing "
                 "whether that has changed.")
         self.collection_filter = collection_filter
+        # Where write_manifest() puts things: the config's maap.workspace_root,
+        # which may be a team bucket (s3://mur-sst) rather than this account's
+        # own prefix. None keeps the personal prefix.
+        self.data_root = data_root.rstrip("/") if data_root else None
+
+    @property
+    def username(self) -> str:
+        """This account's MAAP username: its personal workspace prefix.
+
+        Asked of the credentials, not read off the data root, because with
+        the data in a team bucket the root no longer contains it.
+        """
+        return self.workspace.path().prefix.strip("/")
 
     # -- algorithms ---------------------------------------------------------
 
@@ -304,8 +318,11 @@ class MaapPyClient(MAAPClient):
         return found
 
     def write_manifest(self, prefix: str, manifest: Dict) -> str:
-        bucket = self.workspace.path().bucket
-        key = self.workspace.path().key(prefix)
+        if self.data_root:
+            bucket, key = split_s3_uri(f"{self.data_root}/{prefix.lstrip('/')}")
+        else:
+            bucket = self.workspace.path().bucket
+            key = self.workspace.path().key(prefix)
         self.workspace.s3().put_object(
             Bucket=bucket, Key=key,
             Body=json.dumps(manifest, sort_keys=True, indent=2).encode(),

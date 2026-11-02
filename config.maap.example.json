@@ -2,12 +2,15 @@
   "_comment": [
     "MAAP/DPS configuration for run_mur_maap.py. Paths here are s3:// hrefs,",
     "not local directories -- bucket mounts do not exist inside a DPS job.",
-    "Fill workspace_root and static_resources_dir from:",
+    "Fill workspace_root and username from:",
     "    python utils/upload_static_resources.py --check",
     "which prints both, discovered from workspace_bucket_credentials()."
   ],
   "maap": {
     "workspace_root": "s3://maap-ops-workspace/<username>",
+    "_workspace_root_note": "Where every cached input, L4, manifest, STAC sidecar and (under mur/static-resources) static resource lives. It is the ONE setting to change to move all of that, e.g. to a team bucket such as s3://mur-sst once that admits MAAP's credentials (on 2026-10-29 it was listed as authorized but denied every request; `upload_static_resources.py --check` probes it). Copy mur/ across first. DPS stages job outputs in your personal workspace's dps_output/ wherever this points; promotion copies them here.",
+    "username": "<username>",
+    "_username_note": "Your MAAP username, the prefix of your personal workspace. MAAP files every published collection as <username>__<algorithm>__<version>, so links to them need it. Kept separate from workspace_root so the root can move to a bucket that does not contain it. Optional while the root is your personal workspace.",
     "queue": "<queue name from MAAP ops>",
     "granule_staging": "direct",
     "_granule_staging_note": "direct = pass PO.DAAC's own s3:// hrefs to the job; the container fetches them itself, minting DAAC credentials from MAAP_PGT via common/bin/maap_credentials.py. This is the only behaviour now. 'workspace' is still accepted, for configs written when granules were copied into the workspace bucket first, and does the same thing.",
@@ -20,7 +23,7 @@
     "_algorithm_version_note": "null = use the version this checkout builds (mur_maap/version.py), which is almost always what you want. Set it only to run packages deployed from a different revision -- a rollback, say. MAAP keeps every version ever registered, so naming an old one here succeeds silently and runs old code."
   },
   "landice": {
-    "static_resources_dir": "s3://maap-ops-workspace/<username>/mur/static-resources"
+    "_static_resources_dir_note": "Unset = <maap.workspace_root>/mur/static-resources, as for mrva. Set static_resources_dir only to keep them somewhere else."
   },
   "iquam": {
     "buoy_dayrange": 3,
@@ -94,7 +97,6 @@
     }
   },
   "mrva": {
-    "static_resources_dir": "s3://maap-ops-workspace/<username>/mur/static-resources",
     "active_sensors": [
       "IQUAM0",
       "AMSR2R",

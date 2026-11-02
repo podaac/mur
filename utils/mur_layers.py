@@ -103,26 +103,25 @@ def days_from_items(items):
 
 
 def _username_from_config(path):
-    """The MAAP username from a pipeline config's maap.workspace_root, or None.
+    """The MAAP username a pipeline config names, or None.
 
-    Optional: without it every user's MUR collections are listed.
+    maap.username, else a personal workspace root's last segment; see
+    mur_maap.paths.username_from_config. Optional: without it every user's
+    MUR collections are listed.
     """
+    from mur_maap.paths import username_from_config
     try:
         config = json.loads(pathlib.Path(path).read_text())
     except (OSError, ValueError):
         return None
-    root = str((config.get("maap") or {}).get("workspace_root") or "")
-    root = root.rstrip("/")
-    if not root.startswith("s3://") or root.count("/") < 3 or "<" in root:
-        return None
-    return root.rsplit("/", 1)[-1]
+    return username_from_config(config)
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default="config.maap.json",
-                    help="read the MAAP username from its maap.workspace_root "
+                    help="read the MAAP username from its maap.username "
                          "(optional; --user wins)")
     ap.add_argument("--user", help="MAAP username; default from --config, "
                                    "else every user's")

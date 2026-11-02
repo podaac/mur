@@ -546,6 +546,32 @@ def test_the_workspace_root_narrows_discovery_to_its_user(fake_requests):
         "jleach_jpl__mur-mrva_1756__2.0.19"]
 
 
+def test_a_team_bucket_root_needs_the_username_set(fake_requests):
+    """s3://mur-sst names no user, so the username comes from maap_username;
+    the root's last segment is never mistaken for one."""
+    collections = ["jleach_jpl__mur-mrva_1756__2.0.19",
+                   "someone__mur-mrva_1756__2.0.19"]
+    fake = fake_requests(_stac_response(), collections=collections)
+    config = ViewerConfig(maap_stac_url="https://stac.example",
+                          maap_workspace_root="s3://mur-sst",
+                          maap_username="jleach_jpl")
+    MaapStacCatalog(config).search(datetime.date(2026, 3, 1),
+                                   datetime.date(2026, 3, 1))
+    assert fake.posts[0]["json"]["collections"] == [
+        "jleach_jpl__mur-mrva_1756__2.0.19"]
+
+    assert MaapStacCatalog(ViewerConfig(
+        maap_workspace_root="s3://mur-sst/maap"))._username() == ""
+
+
+def test_a_pipeline_config_supplies_the_username(tmp_path):
+    cfg = tmp_path / "config.maap.json"
+    cfg.write_text(json.dumps({"maap": {"workspace_root": "s3://mur-sst",
+                                        "username": "jleach_jpl"}}))
+    config = load_config(config_path=str(cfg), env={})
+    assert config.maap_username == "jleach_jpl"
+
+
 def test_no_mrva_collections_means_no_search(fake_requests):
     fake = fake_requests(_stac_response(), collections=[])
     config = ViewerConfig(maap_stac_url="https://stac.example")

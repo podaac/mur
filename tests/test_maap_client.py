@@ -71,6 +71,7 @@ class FakeS3:
     def __init__(self, keys=()):
         self.keys = list(keys)
         self.put = []
+        self.put_buckets = []
         self.copied = []
     def get_paginator(self, name):
         keys = self.keys
@@ -86,6 +87,7 @@ class FakeS3:
         return {"ContentLength": 1}
     def put_object(self, Bucket, Key, Body, ContentType=None):
         self.put.append((Key, json.loads(Body)))
+        self.put_buckets.append(Bucket)
         self.keys.append(Key)
     def copy_object(self, Bucket, Key, CopySource):
         self.copied.append((CopySource["Key"], Key))
@@ -98,11 +100,12 @@ class FakeWorkspace:
     def path(self): return WorkspacePath(BUCKET, USER)
 
 
-def make_client(keys=(), statuses=None):
+def make_client(keys=(), statuses=None, data_root=None):
     s3 = FakeS3(keys)
     maap = FakeMaapPy(statuses)
     c = MaapPyClient(maap, queue="q", version="2.0.0",
-                     workspace=FakeWorkspace(s3), poll_interval=0)
+                     workspace=FakeWorkspace(s3), poll_interval=0,
+                     data_root=data_root)
     return c, maap, s3
 
 
@@ -249,6 +252,21 @@ def test_write_manifest_returns_a_full_uri_under_the_workspace_prefix():
     href = c.write_manifest("mur/manifests/mrva/2026/218.json", {"files": []})
     assert href == f"s3://{BUCKET}/{USER}/mur/manifests/mrva/2026/218.json"
     assert s3.put[0][1] == {"files": []}
+
+
+def test_write_manifest_follows_a_team_bucket_root():
+    """With maap.workspace_root in the team bucket, manifests and STAC
+    sidecars go there too, not to the personal prefix beside dps_output."""
+    c, _, s3 = make_client(data_root="s3://mur-sst/")
+    href = c.write_manifest("mur/manifests/mrva/2026/218.json", {"files": []})
+    assert href == "s3://mur-sst/mur/manifests/mrva/2026/218.json"
+    assert s3.put_buckets == ["mur-sst"]
+    assert s3.put[0][0] == "mur/manifests/mrva/2026/218.json"
+
+
+def test_username_is_the_personal_prefix_whatever_the_data_root():
+    c, _, _ = make_client(data_root="s3://mur-sst")
+    assert c.username == USER
 
 
 def test_copy_object_promotes_between_keys():

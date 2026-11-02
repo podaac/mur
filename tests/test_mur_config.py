@@ -112,3 +112,28 @@ def test_load_config_normalizes_from_disk(tmp_path):
     path.write_text(json.dumps(MAAP_SPELLING))
     cfg = mur_config.load_config(path)
     assert cfg["iquam"]["stable_latency"] == 2
+
+
+def test_static_resources_follow_the_maap_root():
+    """Moving the MAAP data is one edit to workspace_root, not three."""
+    cfg = mur_config.normalize_config(
+        {"maap": {"workspace_root": "s3://mur-sst/"}, "landice": {}})
+    assert cfg["landice"]["static_resources_dir"] == "s3://mur-sst/mur/static-resources"
+    assert cfg["mrva"]["static_resources_dir"] == "s3://mur-sst/mur/static-resources"
+
+
+def test_an_explicit_static_resources_dir_wins_over_the_root():
+    cfg = mur_config.normalize_config({
+        "maap": {"workspace_root": "s3://mur-sst"},
+        "landice": {"static_resources_dir": "s3://elsewhere/static"},
+        "mrva": {"static_resources_root": "s3://elsewhere/static"},
+    })
+    assert cfg["landice"]["static_resources_dir"] == "s3://elsewhere/static"
+    assert cfg["mrva"]["static_resources_dir"] == "s3://elsewhere/static"
+
+
+def test_a_config_without_a_maap_root_is_left_alone():
+    assert "landice" not in mur_config.normalize_config({"mrva": {"x": 1}})
+    cfg = mur_config.normalize_config(
+        {"maap": {"workspace_root": "./local"}, "landice": {}})
+    assert "static_resources_dir" not in cfg["landice"]

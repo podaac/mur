@@ -1302,6 +1302,30 @@ def test_a_learned_module_gets_a_real_collection_url(orchestrator, caplog):
             in caplog.text)
 
 
+def test_a_team_bucket_root_takes_the_username_from_the_config(orchestrator):
+    """With the data in s3://mur-sst the root's last segment names nobody;
+    the collection id needs the person who submitted the jobs."""
+    orchestrator.config.setdefault("maap", {}).update({
+        "workspace_root": "s3://mur-sst",
+        "username": "jleach_jpl",
+        "algorithm_version": "2.0.18",
+        "registration_suffix": "_1756",
+    })
+    args = orchestrator._cog_args("s3://b/g.nc", "nrt")
+    assert args["stac_collection"] == "jleach_jpl__mur-cog_1756__2.0.18"
+
+
+def test_a_team_bucket_root_falls_back_to_the_clients_username(orchestrator):
+    orchestrator.config.setdefault("maap", {})["workspace_root"] = "s3://mur-sst"
+    orchestrator.client.username = "jleach_jpl"
+    assert orchestrator.username == "jleach_jpl"
+
+
+def test_a_team_bucket_root_never_becomes_the_username(orchestrator):
+    orchestrator.config.setdefault("maap", {})["workspace_root"] = "s3://mur-sst"
+    assert orchestrator.username == ""
+
+
 def test_an_unknown_collection_is_omitted_rather_than_sent_empty(orchestrator):
     """MAAP rejects a submission whose inputs do not match the declared ones,
     so every key sent has to exist in the registered CWL. A blank one buys

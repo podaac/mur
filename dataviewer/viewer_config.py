@@ -94,11 +94,15 @@ class ViewerConfig:
     maap_stac_url: str = DEFAULT_MAAP_STAC_URL
     maap_collection: str = DEFAULT_MAAP_COLLECTION
     #: "s3://bucket/prefix" -- the workspace root run_mur_maap.py writes to.
-    #: Its last segment is the MAAP username, which narrows collection
-    #: discovery to this user's runs. When set, the viewer can also fall back
-    #: to the sidecar items run_mur_maap.py writes (mur_maap/paths.stac_item_key)
-    #: for a day MAAP has not ingested yet.
+    #: When set, the viewer can also fall back to the sidecar items
+    #: run_mur_maap.py writes (mur_maap/paths.stac_item_key) for a day MAAP
+    #: has not ingested yet.
     maap_workspace_root: str = ""
+    #: The MAAP username, which narrows collection discovery to this user's
+    #: runs. Unset, it is the last segment of a personal
+    #: s3://maap-ops-workspace/<username> root; a team-bucket root names
+    #: nobody, so set it explicitly there.
+    maap_username: str = ""
     maap_stac_token: str = ""
 
     # --- cache ----------------------------------------------------------
@@ -156,6 +160,7 @@ def _read_config_file(path: Path) -> Dict[str, Any]:
     if isinstance(maap_block, dict):
         for src, dst in (
             ("workspace_root", "maap_workspace_root"),
+            ("username", "maap_username"),
             ("stac_url", "maap_stac_url"),
             ("stac_collection", "maap_collection"),
         ):
@@ -168,7 +173,7 @@ def _read_config_file(path: Path) -> Dict[str, Any]:
         "run_source", "base_dir", "reference_source",
         "public_collection", "public_use_s3",
         "maap_stac_url", "maap_collection", "maap_workspace_root",
-        "maap_stac_token", "cache_dir", "max_download_mb",
+        "maap_username", "maap_stac_token", "cache_dir", "max_download_mb",
     ):
         if key in flat and flat[key] not in (None, ""):
             settings[key] = flat[key]
@@ -185,6 +190,7 @@ _ENV_KEYS = {
     "MUR_VIEWER_MAAP_STAC_URL": "maap_stac_url",
     "MUR_VIEWER_MAAP_COLLECTION": "maap_collection",
     "MUR_VIEWER_MAAP_WORKSPACE_ROOT": "maap_workspace_root",
+    "MUR_VIEWER_MAAP_USERNAME": "maap_username",
     "MUR_VIEWER_MAAP_STAC_TOKEN": "maap_stac_token",
     "MUR_VIEWER_CACHE_DIR": "cache_dir",
     "MUR_VIEWER_MAX_DOWNLOAD_MB": "max_download_mb",

@@ -197,3 +197,20 @@ def test_the_granule_name_is_generated_not_copied():
     name = paths.l4_filename(datetime.date(2026, 10, 6), "nrt", "1km")
     assert "fv04" not in name
     assert name.endswith("-nrt.nc")
+
+
+# --- username --------------------------------------------------------------
+
+@pytest.mark.parametrize("maap,expected", [
+    ({"workspace_root": "s3://maap-ops-workspace/jleach_jpl/"}, "jleach_jpl"),
+    # A team bucket's root names a bucket or folder, never a person.
+    ({"workspace_root": "s3://mur-sst"}, None),
+    ({"workspace_root": "s3://mur-sst/maap"}, None),
+    ({"workspace_root": "s3://mur-sst", "username": "jleach_jpl"}, "jleach_jpl"),
+    ({"workspace_root": "s3://maap-ops-workspace/a", "username": "b"}, "b"),
+    ({"workspace_root": "s3://maap-ops-workspace/<username>"}, None),
+    ({"workspace_root": "s3://mur-sst", "username": "<username>"}, None),
+    ({}, None),
+])
+def test_username_from_config(maap, expected):
+    assert paths.username_from_config({"maap": maap}) == expected

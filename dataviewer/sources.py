@@ -512,9 +512,13 @@ class MaapStacCatalog(Catalog):
     # -- route 1: STAC API ------------------------------------------------
 
     def _username(self) -> str:
-        """The MAAP username: the last segment of the workspace root."""
+        """The MAAP username: maap_username, else the last segment of a
+        personal workspace root. A team-bucket root (s3://mur-sst) names
+        nobody, so it yields "" -- every user's collections -- not a guess."""
+        if self.config.maap_username:
+            return self.config.maap_username
         root = self.config.maap_workspace_root.rstrip("/")
-        if not root.startswith("s3://") or root.count("/") < 3:
+        if not root.startswith("s3://maap-ops-workspace/"):
             return ""
         return root.rsplit("/", 1)[-1]
 

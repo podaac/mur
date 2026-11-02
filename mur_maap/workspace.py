@@ -66,6 +66,13 @@ def split_s3_uri(uri: str) -> Tuple[str, str]:
     return bucket, key
 
 
+def _to_path(entry: Dict) -> WorkspacePath:
+    """One authorized_s3_paths entry as a WorkspacePath."""
+    if entry.get("bucket") and entry.get("prefix") is not None:
+        return WorkspacePath(entry["bucket"], entry["prefix"])
+    return WorkspacePath(*split_s3_uri(entry["uri"]))
+
+
 class WorkspaceBucket:
     """A refreshing boto3 S3 client plus the paths the account may use."""
 
@@ -107,24 +114,30 @@ class WorkspaceBucket:
     def path(self) -> WorkspacePath:
         """This account's own workspace prefix.
 
-        Always the first entry in authorized_s3_paths; any further entries
-        are organization-shared buckets.
+        The entry typed "workspace"; failing that, the first entry, which is
+        where it has always been. DPS stages job outputs here whatever the
+        config says, so this stays the place to look for dps_output/.
         """
         if self._path is None:
-            if self._authorized is None:
-                self._fetch()
-            entries = self._authorized or []
+            entries = self.authorized_paths()
             if not entries:
                 raise RuntimeError(
                     "credentials carried no authorized_s3_paths, so the workspace "
                     "prefix cannot be discovered; set maap.workspace_root in the config")
-            first = entries[0]
-            if first.get("bucket") and first.get("prefix") is not None:
-                self._path = WorkspacePath(first["bucket"], first["prefix"])
-            else:
-                bucket, prefix = split_s3_uri(first["uri"])
-                self._path = WorkspacePath(bucket, prefix)
+            typed = [e for e in entries if e.get("type") == "workspace"]
+            self._path = _to_path((typed or entries)[0])
         return self._path
+
+    def org_path(self) -> Optional[WorkspacePath]:
+        """The organization (team) bucket this account may write, or None.
+
+        MAAP lists it in authorized_s3_paths with type "org", e.g.
+        s3://mur-sst for the MUR team. The first one if there are several.
+        """
+        for entry in self.authorized_paths():
+            if entry.get("type") == "org":
+                return _to_path(entry)
+        return None
 
     def authorized_paths(self) -> List[Dict]:
         if self._authorized is None:

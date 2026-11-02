@@ -361,9 +361,11 @@ class MAAPOrchestrator:
     def workspace_root(self) -> str:
         """S3 root this run reads cached intermediates from and writes to.
 
-        e.g. "s3://maap-ops-workspace/<username>". Discovered at runtime from
-        maap.aws.workspace_bucket_credentials()["authorized_s3_paths"][0]["uri"]
-        rather than hardcoded; the config key is the override.
+        e.g. "s3://mur-sst", the team bucket, or a personal
+        "s3://maap-ops-workspace/<username>". --init-config discovers it from
+        maap.aws.workspace_bucket_credentials()["authorized_s3_paths"]: the
+        entry typed "org" if there is one. DPS job outputs land in the
+        personal workspace regardless; promotion copies them here.
         """
         return self.config.get("maap", {}).get("workspace_root", "")
 
@@ -563,15 +565,24 @@ class MAAPOrchestrator:
 
     @property
     def username(self) -> str:
-        """The MAAP username, taken from the workspace root.
+        """The MAAP username. Needed because MAAP's STAC ingest names every
+        collection <username>__<algorithm>__<version>, so the collection id
+        cannot be known without it.
 
-        `s3://maap-ops-workspace/<username>` -- the last segment. Needed
-        because MAAP's STAC ingest names every collection
-        <username>__<algorithm>__<version>, so the collection id cannot be
-        known without it.
+        maap.username, else the last segment of a personal
+        s3://maap-ops-workspace/<username> root, else the credentials' own
+        workspace prefix. The root is no longer always personal: with it in
+        the team bucket (s3://mur-sst) its last segment names nobody.
         """
-        root = (self.workspace_root or "").rstrip("/")
-        return root.rsplit("/", 1)[-1] if "/" in root else ""
+        configured = paths.username_from_config(self.config)
+        if configured:
+            return configured
+        try:
+            return str(getattr(self.client, "username", "") or "")
+        except Exception as exc:                          # noqa: BLE001
+            logger.warning("    could not discover the MAAP username (%s); "
+                           "set maap.username", exc)
+            return ""
 
     def _note_registered(self, href: Optional[str]) -> None:
         """Learn a module's registered algorithm name from a DPS href.
@@ -1530,6 +1541,7 @@ def build_client(config: Dict, args):
         collection_filter=args.collection,
         poll_interval=args.poll_interval,
         dedup=args.dedup,
+        data_root=root,
     )
 
 
@@ -1775,11 +1787,13 @@ def init_config(dest: str) -> int:
         from mur_maap.workspace import WorkspaceBucket
         from maap.maap import MAAP
 
+        # The personal workspace, not a team bucket the account may also be
+        # listed for: a listing is not access (see config.maap.example.json's
+        # _workspace_root_note). Moving later is a one-line workspace_root
+        # edit; static_resources_dir follows it (mur_config).
         path = WorkspaceBucket(MAAP()).path()
         config.setdefault("maap", {})["workspace_root"] = path.uri
-        static_root = f"{path.uri}/mur/static-resources"
-        config["landice"]["static_resources_dir"] = static_root
-        config["mrva"]["static_resources_dir"] = static_root
+        config["maap"]["username"] = path.prefix.strip("/")
         discovered = path.uri
     except Exception as exc:                              # noqa: BLE001
         discovered = None

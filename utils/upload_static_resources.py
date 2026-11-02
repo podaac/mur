@@ -531,14 +531,40 @@ def check_environment(args) -> int:
         print(f"                     FAILED: {exc}")
         ok = False
 
+    # 6b. The team (org) bucket, probed the same way but only reported: the
+    #     cron's pre-flight runs this check, and a team bucket that is listed
+    #     but not yet writable must not stop the daily run. That is not
+    #     hypothetical -- on 2026-10-29 MAAP listed s3://mur-sst as
+    #     read_write, and every request to it was denied.
+    root = resp["authorized_s3_paths"][0]["uri"].rstrip("/")
+    for org in [p for p in resp["authorized_s3_paths"] if p.get("type") == "org"]:
+        org_bucket, org_prefix = split_s3_uri(org["uri"])
+        org_key = f"{org_prefix}/mur/.upload-probe" if org_prefix else "mur/.upload-probe"
+        print(f"\n  team bucket probe  s3://{org_bucket}/{org_key}  (informational)")
+        try:
+            s3.put_object(Bucket=org_bucket, Key=org_key, Body=b"mur upload probe\n")
+            s3.get_object(Bucket=org_bucket, Key=org_key)["Body"].read()
+            s3.delete_object(Bucket=org_bucket, Key=org_key)
+            print("                     OK (wrote, read back, deleted)")
+            root = org["uri"].rstrip("/")
+        except Exception as exc:                          # noqa: BLE001
+            print(f"                     DENIED: {exc}")
+            print("                     Listed as authorized, but the bucket does not")
+            print("                     admit these credentials. Its owner, or MAAP ops,")
+            print("                     has to grant access before maap.workspace_root")
+            print("                     can point at it.")
+
     # 7. What to do next, with the values just discovered rather than
     #    placeholders to substitute by hand.
     print("\n  next")
     print("    Put this in your MAAP config so the orchestrator and the")
     print("    containers resolve the same layout:")
-    print(f'      "maap":    {{ "workspace_root": "{resp["authorized_s3_paths"][0]["uri"]}" }}')
-    print(f'      "landice": {{ "static_resources_dir": "{dest}" }}')
-    print(f'      "mrva":    {{ "static_resources_dir": "{dest}" }}')
+    personal = resp["authorized_s3_paths"][0]
+    print(f'      "maap":    {{ "workspace_root": "{root}",')
+    print(f'                   "username": "{str(personal.get("prefix") or "").strip("/")}" }}')
+    static = args.dest or f"{root}/{DEFAULT_SUBPREFIX}"
+    print(f'      "landice": {{ "static_resources_dir": "{static}" }}')
+    print(f'      "mrva":    {{ "static_resources_dir": "{static}" }}')
     print("\n    Then, from the host holding the static data:")
     print("      # tree already assembled under one root (the usual case):")
     print("      python utils/upload_static_resources.py \\")
@@ -555,6 +581,8 @@ def default_destination(maap) -> str:
     """The workspace root, discovered rather than hardcoded.
 
     authorized_s3_paths[0] is documented as always being the workspace path.
+    A team bucket is deliberately not the default: --check gates the cron
+    on a write here. Pass --dest to upload into one.
     """
     _, resp = _credentials_payload(maap)
     paths = resp.get("authorized_s3_paths")

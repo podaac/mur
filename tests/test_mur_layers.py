@@ -97,3 +97,12 @@ def test_a_placeholder_or_missing_config_names_no_user(tmp_path):
         {"maap": {"workspace_root": "s3://maap-ops-workspace/<username>"}}))
     assert mur_layers._username_from_config(placeholder) is None
     assert mur_layers._username_from_config(tmp_path / "absent.json") is None
+
+
+def test_a_team_bucket_config_names_its_user_explicitly(tmp_path):
+    config = tmp_path / "c.json"
+    config.write_text(json.dumps({"maap": {"workspace_root": "s3://mur-sst"}}))
+    assert mur_layers._username_from_config(config) is None
+    config.write_text(json.dumps(
+        {"maap": {"workspace_root": "s3://mur-sst", "username": "jleach_jpl"}}))
+    assert mur_layers._username_from_config(config) == "jleach_jpl"

@@ -85,5 +85,5 @@ def test_a_full_day_plans_against_this_config(config):
 def test_placeholders_are_obvious(config):
     """Whoever fills this in must not be able to miss what needs replacing."""
     raw = json.loads(EXAMPLE.read_text())
-    assert "<username>" in raw["maap"]["workspace_root"]
+    assert "<username>" in raw["maap"]["username"]
     assert "<queue name" in raw["maap"]["queue"]

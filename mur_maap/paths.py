@@ -18,7 +18,7 @@ Two vocabularies, kept deliberately distinct:
         because the containers' localize.sh hands it straight to `aws s3 cp`.
 """
 import datetime
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 MUR_ROOT = "mur"
 
@@ -30,6 +30,30 @@ def _doy(day: datetime.date) -> int:
 def href(workspace_root: str, key: str) -> str:
     """Join a workspace root ("s3://bucket/prefix") and a bucket-relative key."""
     return f"{workspace_root.rstrip('/')}/{key.lstrip('/')}"
+
+
+# The bucket MAAP gives every account a personal prefix in. Only a root in
+# this bucket has a username as its last segment; an org bucket such as
+# s3://mur-sst names a team, not a person.
+PERSONAL_WORKSPACE_BUCKET = "maap-ops-workspace"
+
+
+def username_from_config(config: Dict) -> Optional[str]:
+    """The MAAP username a config names, or None if it names none.
+
+    maap.username wins. Otherwise the last segment of maap.workspace_root,
+    but only when that root is a personal prefix in maap-ops-workspace:
+    with the root in a team bucket, its last segment is a bucket or folder
+    name, and MAAP would never have filed a collection under it.
+    """
+    maap = config.get("maap") or {}
+    explicit = str(maap.get("username") or "").strip()
+    if explicit and "<" not in explicit:
+        return explicit
+    root = str(maap.get("workspace_root") or "").rstrip("/")
+    if not root.startswith(f"s3://{PERSONAL_WORKSPACE_BUCKET}/") or "<" in root:
+        return None
+    return root.rsplit("/", 1)[-1] or None
 
 
 def split_href(uri: str) -> Tuple[str, str]:

@@ -257,14 +257,14 @@ def main(argv=None):
     config = json.loads(config_path.read_text())
     args.config = str(config_path)
 
-    # Same derivation as MAAPOrchestrator.username: the last segment of
-    # s3://maap-ops-workspace/<username>.
-    workspace_root = (config.get("maap") or {}).get("workspace_root") or ""
-    username = workspace_root.rstrip("/").rsplit("/", 1)[-1]
-    if not username or username.startswith("<"):
-        ap.error("maap.workspace_root in the config has no real username; "
-                 "run `python utils/upload_static_resources.py --check` to "
-                 "discover it")
+    # Same derivation as MAAPOrchestrator.username, less the credentials
+    # fallback: maap.username, else a personal workspace root's last segment.
+    from mur_maap.paths import username_from_config
+    username = username_from_config(config)
+    if not username:
+        ap.error("the config names no MAAP username. Set maap.username (with "
+                 "maap.workspace_root in a team bucket such as s3://mur-sst, "
+                 "the root no longer contains it)")
 
     print(f"today          {today}")
     print(f"range          {start} .. {end}")

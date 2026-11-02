@@ -194,7 +194,7 @@ def fetch_remote(host: str, ssh_opts: List[str], script: str) -> str:
 class Maap:
     """Read-only S3 access to this account's MAAP workspace."""
 
-    def __init__(self):
+    def __init__(self, data_root: Optional[str] = None):
         from mur_maap import auth
         from mur_maap.client import MaapPyClient
         from mur_maap.version import ALGORITHM_VERSION
@@ -205,6 +205,10 @@ class Maap:
         self.s3 = client.workspace.s3()
         self.ws = client.workspace.path()
         self.bucket = self.ws.bucket
+        # Where the pipeline's own files (manifests, landice, iquam) live:
+        # maap.workspace_root, e.g. the team bucket s3://mur-sst. Job outputs
+        # stay under dps_output/ in the personal workspace either way.
+        self.data_root = (data_root or self.ws.uri).rstrip("/")
         self._dps_root = None
 
     def _list(self, prefix: str, delimiter: Optional[str] = None):
@@ -243,21 +247,31 @@ class Maap:
               f"{len({f.job for f in found})} job(s) under {', '.join(algos) or '(none)'}")
         return found
 
+    def _locate(self, key: str):
+        """(bucket, key) for a workspace key or a full s3:// URI."""
+        if key.startswith("s3://"):
+            bucket, _, rest = key[len("s3://"):].partition("/")
+            return bucket, rest
+        return self.bucket, key
+
     def text(self, key: str) -> Optional[str]:
+        bucket, key = self._locate(key)
         try:
-            body = self.s3.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+            body = self.s3.get_object(Bucket=bucket, Key=key)["Body"].read()
         except self.s3.exceptions.NoSuchKey:
             return None
         return body.decode("utf-8", errors="replace")
 
     def size(self, key: str) -> Optional[int]:
         try:
-            return self.s3.head_object(Bucket=self.bucket, Key=key)["ContentLength"]
+            bucket, key = self._locate(key)
+            return self.s3.head_object(Bucket=bucket, Key=key)["ContentLength"]
         except Exception:                                  # noqa: BLE001
             return None
 
     def workspace_key(self, key: str) -> str:
-        return self.ws.key(key)
+        """The s3:// URI of a pipeline file under the data root."""
+        return f"{self.data_root}/{key.lstrip('/')}"
 
 
 def find_params(node, wanted=MRVA_PARAMS, depth=0) -> Dict:
@@ -547,6 +561,9 @@ def parse_args(argv=None):
     ap.add_argument("--out", type=pathlib.Path,
                     help="where raw files and report.json go "
                          "(default: ./maap_vs_prod_<YYYY>_<DDD>)")
+    ap.add_argument("--config", type=pathlib.Path, default=REPO / "config.maap.json",
+                    help="pipeline config; its maap.workspace_root is where "
+                         "manifests, landice and iquam are read from")
     ap.add_argument("--max-names", type=int, default=15,
                     help="granule names to print per difference (all go to JSON)")
     args = ap.parse_args(argv)
@@ -595,7 +612,11 @@ def main(argv=None) -> int:
             save(out / "prod", path.lstrip("/"), text)
 
     print(f"Listing MAAP DPS outputs for {day} ({year}/{doy:03d})")
-    maap = Maap()
+    data_root = None
+    if args.config.exists():
+        data_root = (json.loads(args.config.read_text()).get("maap") or {}).get(
+            "workspace_root")
+    maap = Maap(data_root)
     report: Dict = {"date": str(day), "year": year, "doy": doy,
                     "host": None if args.skip_remote else args.host}
 
@@ -752,7 +773,7 @@ def main(argv=None) -> int:
     ice = diff_names(file_names(prod_ice or ""), file_names(maap_ice or ""))
     ice.update(prod_file=prod_ice_path, maap_key=ice_key)
     print(f"  prod: {prod_ice_path or 'MISSING (tried ' + ', '.join(remote_icefiles) + ')'}")
-    print(f"  maap: s3://{maap.bucket}/{ice_key}" + ("" if maap_ice else "  MISSING"))
+    print(f"  maap: {ice_key}" + ("" if maap_ice else "  MISSING"))
     print(f"  {ice['prod']} prod / {ice['maap']} maap / {ice['common']} common")
     for side in ("only_prod", "only_maap"):
         for name in ice[side]:
