@@ -128,15 +128,21 @@ class WorkspaceBucket:
             self._path = _to_path((typed or entries)[0])
         return self._path
 
-    def org_path(self) -> Optional[WorkspacePath]:
-        """The organization (team) bucket this account may write, or None.
+    def org_path(self, match: Optional[str] = None) -> Optional[WorkspacePath]:
+        """An organization (team) bucket this account may use, or None.
 
-        MAAP lists it in authorized_s3_paths with type "org", e.g.
-        s3://mur-sst for the MUR team. The first one if there are several.
+        MAAP lists team buckets in authorized_s3_paths with type "org". With
+        `match`, the first whose URI contains it (case-insensitive), so a
+        bucket is found by what it is for rather than by a name written down
+        in this repo; without, the first one listed.
         """
+        needle = (match or "").lower()
         for entry in self.authorized_paths():
-            if entry.get("type") == "org":
-                return _to_path(entry)
+            if entry.get("type") != "org":
+                continue
+            path = _to_path(entry)
+            if needle in path.uri.lower():
+                return path
         return None
 
     def authorized_paths(self) -> List[Dict]:

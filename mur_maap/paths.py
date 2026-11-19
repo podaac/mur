@@ -56,6 +56,33 @@ def username_from_config(config: Dict) -> Optional[str]:
     return root.rsplit("/", 1)[-1] or None
 
 
+# What to look for among the account's team (org) buckets when the config
+# does not say. The project's own name, so that nothing here names a bucket.
+TEAM_BUCKET_MATCH = MUR_ROOT
+
+
+def team_bucket_setting(config: Dict) -> Tuple[Optional[str], Optional[str]]:
+    """How maap.team_bucket says to find the team bucket: (root, match).
+
+    The setting is one of
+      absent           search the account's team buckets for TEAM_BUCKET_MATCH
+      "s3://bucket/p"  use exactly this root; nothing is searched
+      "text"           search for a team bucket whose name contains "text"
+      false / ""       no team bucket; granules are not shared
+    Exactly one of the pair is set, or neither when sharing is off. The
+    search itself needs credentials, so it is the caller's (see
+    WorkspaceBucket.org_path).
+    """
+    maap = config.get("maap") or {}
+    value = maap.get("team_bucket", TEAM_BUCKET_MATCH)
+    if not value or "<" in str(value):
+        return None, None
+    value = str(value).strip()
+    if value.startswith("s3://"):
+        return value.rstrip("/"), None
+    return None, value
+
+
 def split_href(uri: str) -> Tuple[str, str]:
     """Split "s3://bucket/key" into (bucket, key)."""
     if not uri.startswith("s3://"):

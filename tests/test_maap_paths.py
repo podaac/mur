@@ -214,3 +214,18 @@ def test_the_granule_name_is_generated_not_copied():
 ])
 def test_username_from_config(maap, expected):
     assert paths.username_from_config({"maap": maap}) == expected
+
+
+# --- team bucket -----------------------------------------------------------
+
+@pytest.mark.parametrize("maap,expected", [
+    ({}, (None, "mur")),                                   # search by default
+    ({"team_bucket": "sst"}, (None, "sst")),
+    ({"team_bucket": "s3://some-bucket/shared/"}, ("s3://some-bucket/shared", None)),
+    ({"team_bucket": False}, (None, None)),
+    ({"team_bucket": ""}, (None, None)),
+    ({"team_bucket": None}, (None, None)),
+    ({"team_bucket": "s3://<team bucket>"}, (None, None)),  # unfilled template
+])
+def test_team_bucket_setting(maap, expected):
+    assert paths.team_bucket_setting({"maap": maap}) == expected

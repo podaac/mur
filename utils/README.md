@@ -318,3 +318,18 @@ python utils/l4_delta_anim.py --pair maap.nc ops.nc --labels MAAP ops --vmax 0.5
 Inside a MAAP workspace, `--root /projects/my-private-bucket` reads the
 granules through the bucket mount instead of downloading them, which matters
 for 1 km (~750 MB each).
+
+### share_l4.py
+
+Copies promoted L4 netCDFs from the data root to the team bucket, so
+teammates (who cannot read your personal workspace) can download them.
+`run_mur_maap.py` does this for each granule as it is made; this catches up
+the ones made earlier or whose copy failed. Reports by default, `--copy` to
+act. The destination is whatever `maap.team_bucket` resolves to (see
+`config.maap.example.json`), so no bucket name is needed on the command line.
+
+```bash
+python utils/share_l4.py --config config.maap.json            # what would be copied
+python utils/share_l4.py --config config.maap.json --copy
+python utils/share_l4.py --config config.maap.json --copy --only '*/25km/2026/*'
+```

@@ -191,6 +191,14 @@ class MAAPClient:
         """
         raise NotImplementedError("MAAPClient.copy_object: wire up boto3 copy_object")
 
+    def team_root(self, match: Optional[str] = None) -> Optional[str]:
+        """s3:// root of a team (org) bucket this account may write, or None.
+
+        `match` narrows the search to a bucket whose name contains it. None
+        here, so a client that cannot discover one simply shares nothing.
+        """
+        return None
+
     def submit_job(self, process_id: str, args: Dict[str, Any],
                    *, tag: Optional[str] = None) -> str:
         """Submit an OGC API Processes execute request for `process_id`.
@@ -332,6 +340,9 @@ class MAAPOrchestrator:
         # you test one mechanism without paying for 23 jobs.
         self.stages = validate_stages(stages)
         self._warned_no_iquam = False
+        # Resolved on first use; see team_root.
+        self._team_root: Optional[str] = None
+        self._team_root_resolved = False
         self._today_fn = today_fn or mur_date.today
         # Registered algorithm name per module, learned from the DPS output
         # hrefs this run already fetches. MAAP suffixes the name it registers
@@ -368,6 +379,67 @@ class MAAPOrchestrator:
         personal workspace regardless; promotion copies them here.
         """
         return self.config.get("maap", {}).get("workspace_root", "")
+
+    @property
+    def team_root(self) -> Optional[str]:
+        """Where finished granules are copied for the rest of the team, or None.
+
+        A teammate cannot read the runner's personal workspace, so a granule
+        that lives only there can be discovered (STAC) but not downloaded.
+        maap.team_bucket says where the shared copy goes: an s3:// root, or
+        text to look for among the team buckets MAAP authorizes this account
+        for (paths.team_bucket_setting). Looked up once per run.
+
+        None when sharing is off, no team bucket matches, or the data root is
+        already there -- the promoted granule is then the shared one.
+        """
+        if not self._team_root_resolved:
+            self._team_root_resolved = True
+            root, match = paths.team_bucket_setting(self.config)
+            if root is None and match is not None:
+                try:
+                    root = self.client.team_root(match)
+                except Exception as exc:                  # noqa: BLE001
+                    logger.warning("could not look up a team bucket: %s", exc)
+                if root is None:
+                    logger.info("no team bucket matching %r is authorized for "
+                                "this account; granules stay in the workspace "
+                                "only", match)
+            if root and root.rstrip("/") == self.workspace_root.rstrip("/"):
+                root = None
+            if root:
+                logger.info("sharing L4 granules to the team bucket: %s", root)
+            self._team_root = root.rstrip("/") if root else None
+        return self._team_root
+
+    def _share_l4(self, src: Optional[str], process_date: datetime.date,
+                  mode: str, resolution: str, *,
+                  only_if_missing: bool = False) -> Optional[str]:
+        """Copy a promoted granule to the same key in the team bucket.
+
+        The same key, so there is one layout to learn, and so that pointing
+        maap.workspace_root at the team bucket later finds every granule
+        already in place. Only the netCDF goes: browse rasters are served
+        from where the cog job staged them and need no second copy.
+
+        Never fails the day. The granule is already safe in the workspace,
+        and utils/share_l4.py copies whatever this missed.
+        """
+        if not src or not self.team_root:
+            return None
+        dest = paths.l4_href(self.team_root, process_date, mode, resolution)
+        try:
+            if only_if_missing and self.client.object_exists(dest):
+                return dest
+            self.client.copy_object(src, dest)
+        except Exception as exc:                          # noqa: BLE001
+            logger.warning("    could not share %s to the team bucket (%s); "
+                           "utils/share_l4.py --copy will retry it",
+                           paths.l4_filename(process_date, mode, resolution),
+                           exc)
+            return None
+        logger.info("    shared %s", dest)
+        return dest
 
     def _find_cached_bic(
         self,
@@ -780,7 +852,9 @@ class MAAPOrchestrator:
         self._note_registered(src)
         dest = paths.l4_href(self.workspace_root, process_date, mode,
                              resolution)
-        return self.client.copy_object(src, dest)
+        promoted = self.client.copy_object(src, dest)
+        self._share_l4(promoted, process_date, mode, resolution)
+        return promoted
 
     def _promote_csp(self, process_date: datetime.date, job: str) -> Optional[str]:
         """Copy MRVA's coefficient output to the canonical key, for tomorrow.
@@ -930,6 +1004,9 @@ class MAAPOrchestrator:
             if self.client.object_exists(final):
                 logger.info("    %s: Final granule already exists; keeping it "
                             "(--rerun-final to redo)", process_date)
+                # A Final made before sharing existed, or whose copy failed.
+                self._share_l4(final, process_date, mode, "1km",
+                               only_if_missing=True)
                 return DayResult(process_date=process_date, mode=mode,
                                  mrva_job_id=None, netcdf_href=final)
 

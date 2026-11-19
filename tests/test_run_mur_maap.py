@@ -1604,3 +1604,98 @@ def test_an_nrt_granule_does_not_count_as_final():
     client.existing_objects.add(paths.l4_href(WORKSPACE_ROOT, day, "nrt"))
     orch.run_day(day, mode="rea")
     assert "mur-mrva" in [p for p, _ in client.submitted]
+
+
+# --- sharing L4 granules to the team bucket --------------------------------
+
+TEAM_ROOT = "s3://team-bucket"
+
+
+def _sharing_orchestrator(team_bucket=None, discovered=TEAM_ROOT):
+    """An orchestrator whose client 'discovers' `discovered` as the team bucket."""
+    client = FakeMAAPClient()
+    client.team_matches = []
+
+    def team_root(match=None):
+        client.team_matches.append(match)
+        return discovered
+    client.team_root = team_root
+    config = dict(CONFIG, maap=dict(CONFIG["maap"]))
+    if team_bucket is not None:
+        config["maap"]["team_bucket"] = team_bucket
+    orch = MAAPOrchestrator(config, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    return orch, client
+
+
+def test_each_promoted_granule_is_also_copied_to_the_team_bucket():
+    from mur_maap import paths
+    orch, client = _sharing_orchestrator()
+    day = datetime.date(2026, 8, 6)
+    orch.run_day(day, mode="nrt")
+
+    # Searched for by the project's name, and only once for the whole run.
+    assert client.team_matches == ["mur"]
+    for res in ("1km", "25km"):
+        promoted = paths.l4_href(WORKSPACE_ROOT, day, "nrt", res)
+        assert (promoted, paths.l4_href(TEAM_ROOT, day, "nrt", res)) in client.copied
+    # Nothing but L4 netCDFs goes there.
+    shared = [d for _s, d in client.copied if d.startswith(TEAM_ROOT)]
+    assert len(shared) == 2 and all(d.endswith(".nc") for d in shared)
+
+
+def test_an_explicit_team_bucket_root_is_used_without_searching():
+    orch, client = _sharing_orchestrator(team_bucket="s3://elsewhere/shared/")
+    assert orch.team_root == "s3://elsewhere/shared"
+    assert client.team_matches == []
+
+
+def test_the_search_text_comes_from_the_config():
+    orch, client = _sharing_orchestrator(team_bucket="sst")
+    assert orch.team_root == TEAM_ROOT
+    assert client.team_matches == ["sst"]
+
+
+@pytest.mark.parametrize("team_bucket,discovered", [
+    (False, TEAM_ROOT),        # switched off
+    ("", TEAM_ROOT),
+    (None, None),              # the account has no matching team bucket
+    (None, WORKSPACE_ROOT),    # the data root is already the team bucket
+])
+def test_nothing_is_shared_without_a_separate_team_bucket(team_bucket, discovered):
+    orch, client = _sharing_orchestrator(team_bucket, discovered)
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert orch.team_root is None
+    assert all(d.startswith(WORKSPACE_ROOT) for _s, d in client.copied)
+
+
+def test_a_failed_share_does_not_fail_the_day(caplog):
+    orch, client = _sharing_orchestrator()
+    plain_copy = client.copy_object
+
+    def copy(src, dest):
+        if dest.startswith(TEAM_ROOT):
+            raise RuntimeError("AccessDenied")
+        return plain_copy(src, dest)
+    client.copy_object = copy
+
+    with caplog.at_level("WARNING"):
+        result = orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert result.netcdf_href.startswith(WORKSPACE_ROOT)
+    assert len(client.published) == 1
+    assert "share_l4.py" in caplog.text
+
+
+def test_a_kept_final_day_is_shared_if_the_team_bucket_lacks_it():
+    from mur_maap import paths
+    orch, client = _sharing_orchestrator()
+    day = datetime.date(2026, 8, 3)
+    final = paths.l4_href(WORKSPACE_ROOT, day, "rea")
+    client.existing_objects.add(final)
+
+    orch.run_day(day, mode="rea")
+    assert client.submitted == []
+    assert client.copied == [(final, paths.l4_href(TEAM_ROOT, day, "rea"))]
+
+    orch.run_day(day, mode="rea")              # now there: not copied again
+    assert len(client.copied) == 1

@@ -221,6 +221,15 @@ class MaapPyClient(MAAPClient):
         """
         return self.workspace.path().prefix.strip("/")
 
+    def team_root(self, match: Optional[str] = None) -> Optional[str]:
+        """s3:// root of a team bucket this account is authorized for, or None.
+
+        Found among the credentials' authorized paths (see
+        WorkspaceBucket.org_path), so no bucket name lives in the repo.
+        """
+        path = self.workspace.org_path(match)
+        return path.uri if path else None
+
     # -- algorithms ---------------------------------------------------------
 
     def resolve_algorithms(self, names: Iterable[str]) -> Dict[str, int]:

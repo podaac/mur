@@ -49,3 +49,15 @@ def test_org_path_is_the_team_bucket():
 
 def test_org_path_is_none_without_a_team_bucket():
     assert WorkspaceBucket(FakeMaap(AUTHORIZED[:2])).org_path() is None
+
+
+def test_org_path_can_be_searched_for_by_name():
+    entries = AUTHORIZED + [
+        {"access": "read_write", "bucket": "Other-Team-Data", "prefix": "",
+         "type": "org", "uri": "s3://Other-Team-Data"}]
+    bucket = WorkspaceBucket(FakeMaap(entries))
+    assert bucket.org_path("mur").bucket == "mur-sst"
+    assert bucket.org_path("other").bucket == "Other-Team-Data"
+    assert bucket.org_path("nothing-like-it") is None
+    # Only team buckets are searched: the personal workspace also says "maap".
+    assert bucket.org_path("maap-ops") is None
