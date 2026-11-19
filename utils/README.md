@@ -298,3 +298,23 @@ is needed. To watch the running miss-rate:
 ```bash
 cat "$MUR_LOG_DIR"/l2p_orphan_summary_$(date +%Y%m%d).log
 ```
+
+### l4_delta_anim.py
+
+Difference images between MUR L4 granules. By default it makes a 14-frame GIF
+of how each day's 25 km SST changed from the day before, read from the
+promoted granules under `<workspace_root>/mur/l4/`. The lag, resolution,
+field, NRT/REA choice and colour scale are all options; `--pair A B` instead
+differences any two granules (e.g. MAAP against ops) as one PNG.
+
+```bash
+python utils/l4_delta_anim.py                                  # 25 km, lag 1, last 14 days
+python utils/l4_delta_anim.py --lag 3 --fps 1
+python utils/l4_delta_anim.py --lag 0 --mode rea --base-mode nrt   # what reanalysis changed
+python utils/l4_delta_anim.py --resolution 1km --stride 10     # 1 km, every 10th cell
+python utils/l4_delta_anim.py --pair maap.nc ops.nc --labels MAAP ops --vmax 0.5
+```
+
+Inside a MAAP workspace, `--root /projects/my-private-bucket` reads the
+granules through the bucket mount instead of downloading them, which matters
+for 1 km (~750 MB each).
