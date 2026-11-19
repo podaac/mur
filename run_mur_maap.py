@@ -28,16 +28,26 @@ is real and covered by tests/test_run_mur_maap.py against a fake client.
 """
 import datetime
 import logging
+import os
+import pathlib
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+import mur_certs
 import mur_config
 import mur_date
 import mur_window
 from iquam_date_flags import format_iquam_reference_date
 from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
 from mrva_static_files import MRVA_STATIC_RELATIVE_PATHS, seasonal_relative_path
-from mur_maap import paths
+from mur_maap import auth, paths, stac
+from mur_maap import tags
+
+# mur_maap.stac reads MAAP's STAC over urllib, which carries no CA store of
+# its own. Without this, link decoration fails with CERTIFICATE_VERIFY_FAILED
+# on an interpreter whose default verify paths were never populated.
+mur_certs.configure()
+from mur_maap.version import ALGORITHM_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +61,35 @@ def resolve_landice_static_hrefs(static_resources_root: str) -> Dict[str, str]:
     }
 
 
+def access_kind_for(href: str) -> str:
+    """Which accessor the container should use for this source.
+
+    The orchestrator knows where a href came from, so it says so rather than
+    leaving the container to infer it from a bucket name. localize.sh still
+    infers when the field is absent, so older manifests keep working.
+    """
+    if not href.startswith("s3://"):
+        return "http" if href.startswith(("http://", "https://")) else "local"
+    bucket = href[len("s3://"):].split("/", 1)[0]
+    if "podaac" in bucket or bucket.endswith(("-protected", "-cumulus-protected")):
+        return "podaac"
+    return "s3"
+
+
 def build_l2p_manifest_from_hrefs(granule_hrefs: List[str]) -> Dict:
-    """Build the granules manifest (docs/input-contract.html
-    section 3) for L2P from stac_search()'s already-s3://-href granule list
-    -- no path rewriting needed here, unlike the local-mode equivalent in
-    run_mur_pipeline.py's build_l2p_granules_manifest, since these hrefs are
-    already directly readable by the container via localize.sh."""
-    return {"files": [{"path": href} for href in granule_hrefs]}
+    """Build the granules manifest (docs/input-contract.html section 3).
+
+    Entries carry an `access` kind so the container knows how to read each
+    one -- a DAAC bucket needs credentials its own role does not have, a
+    public bucket does not, and a mounted file needs no fetch at all. The
+    orchestrator decides WHAT to fetch; localize.sh decides HOW.
+    """
+    return {
+        "files": [
+            {"path": href, "access": access_kind_for(href)}
+            for href in granule_hrefs
+        ]
+    }
 
 
 def resolve_mrva_static_hrefs(static_resources_root: str, doy: int) -> Dict[str, str]:
@@ -78,8 +110,9 @@ def resolve_mrva_static_hrefs(static_resources_root: str, doy: int) -> Dict[str,
 class DayResult:
     process_date: datetime.date
     mode: str
-    mrva_job_id: str
-    netcdf_href: str
+    # None when --execute excluded mrva: the day ran, but produced no L4.
+    mrva_job_id: Optional[str]
+    netcdf_href: Optional[str]
 
 
 class MAAPClient:
@@ -109,6 +142,25 @@ class MAAPClient:
         """
         raise NotImplementedError("MAAPClient.object_exists: wire up boto3 HEAD")
 
+    def object_modified(self, s3_uri: str) -> Optional[datetime.datetime]:
+        """When `s3_uri` was last written, or None if it does not exist.
+
+        Separate from object_exists because the answer is used for a different
+        question: not "is there a cached BIC" but "was it built before its own
+        data had finished arriving". A HEAD already returns LastModified, so
+        this costs nothing extra -- object_exists simply discards it.
+        """
+        raise NotImplementedError(
+            "MAAPClient.object_modified: wire up boto3 HEAD")
+
+    def object_size(self, s3_uri: str) -> Optional[int]:
+        """Size in bytes of `s3_uri`, or None if it does not exist.
+
+        A buoy file that exists can still hold nothing: see
+        IQUAM_EMPTY_BII_BYTES.
+        """
+        raise NotImplementedError("MAAPClient.object_size: wire up boto3 HEAD")
+
     def list_objects(self, prefix: str) -> List[str]:
         """List S3 hrefs under a prefix, for fan-in inputs (plan section 9).
 
@@ -126,7 +178,29 @@ class MAAPClient:
         """
         raise NotImplementedError("MAAPClient.write_manifest: wire up boto3 put_object")
 
-    def submit_job(self, process_id: str, args: Dict[str, Any]) -> str:
+    def copy_object(self, src_uri: str, dest_uri: str) -> str:
+        """Server-side copy within S3; returns `dest_uri`.
+
+        Used to promote a job's output from the DPS-chosen path to a
+        deterministic workspace key (mur_maap/paths.py). DPS decides where a
+        job's outputs land and that path is not reconstructable, so without
+        this a later run has no way to find yesterday's BIC or coefficient
+        except by re-finding the job that produced it.
+
+        TODO: boto3 s3.copy_object (or copy() for objects over 5 GB).
+        """
+        raise NotImplementedError("MAAPClient.copy_object: wire up boto3 copy_object")
+
+    def team_root(self, match: Optional[str] = None) -> Optional[str]:
+        """s3:// root of a team (org) bucket this account may write, or None.
+
+        `match` narrows the search to a bucket whose name contains it. None
+        here, so a client that cannot discover one simply shares nothing.
+        """
+        return None
+
+    def submit_job(self, process_id: str, args: Dict[str, Any],
+                   *, tag: Optional[str] = None) -> str:
         """Submit an OGC API Processes execute request for `process_id`.
 
         `args` keys match the container entrypoints' named-arg flags
@@ -134,11 +208,15 @@ class MAAPClient:
         landice/iquam/l2p/mrva bin/entrypoint.sh) so the CWL wiring layer can
         map them 1:1 to inputBinding prefixes (plan section 8.2).
 
+        `tag` names the MAAP Console batch the job is listed under -- see
+        mur_maap/tags.py.
+
         TODO: maap-py OGC job submission (plan section 8, 9).
         """
         raise NotImplementedError("MAAPClient.submit_job: wire up maap-py OGC execute")
 
-    def wait_all(self, job_ids: List[str]) -> None:
+    def wait_all(self, job_ids: List[str], *,
+                 raise_on_failure: bool = True) -> Dict[str, str]:
         """Block until every job in `job_ids` reaches a terminal state.
 
         TODO: maap-py job polling (plan section 9).
@@ -157,12 +235,62 @@ class MAAPClient:
         netcdf_href: str,
         process_date: datetime.date,
         mode: str,
+        *,
+        extra_assets: Optional[Dict[str, str]] = None,
+        analysis_level: Optional[int] = None,
     ) -> None:
         """Publish a STAC Item for the MRVA output granule (plan section 6.2).
 
         TODO: STAC Transaction API / maap-py STAC publish.
         """
         raise NotImplementedError("MAAPClient.publish_stac_item: wire up STAC publish")
+
+
+# cog is last and derives from mrva's granule rather than feeding anything,
+# so a run that omits it is a complete scientific run missing only its
+# pictures -- which is why nothing downstream treats its absence as an error.
+ALL_STAGES = ("landice", "iquam", "l2p", "mrva", "cog")
+
+# A .bii holding zero observations. writeiquambii.m writes two Fortran
+# records: the header (4-byte marker, int32 N, int16 year, int16 doy, 4-byte
+# marker = 16 bytes) and the data, which for N=0 is just its two markers
+# (8 bytes). makedailyiquam writes one of these when the source has nothing
+# for the day yet -- which is every day an NRT run reaches before iQUAM has
+# published it. Every MAAP buoy file from 2026/282 on was exactly this, and
+# because any existing object counted as cached, none was ever rebuilt: MRVA
+# ran with no buoys at all.
+IQUAM_EMPTY_BII_BYTES = 24
+
+
+def validate_stages(stages: Optional[Iterable[str]]) -> set:
+    """Normalize a stage selection, rejecting one that cannot run.
+
+    MRVA consumes landice's three outputs and every sensor's BIC. It used to
+    read them from THIS run's job results, so excluding landice or l2p was not
+    a smaller run but a crash partway through -- and that was rejected here.
+
+    Promotion changed it. Those outputs now live at canonical workspace keys,
+    so MRVA can be run alone against what is already in the bucket. That is
+    worth allowing, because MRVA is the expensive stage and the one most
+    likely to need another attempt: re-running it should not mean re-running
+    twenty L2P jobs that already succeeded.
+
+    What is NOT allowed is submitting MRVA with nothing to analyse. run_day
+    checks the assembled manifest and refuses an empty one, which is a cheaper
+    and clearer failure than a job that starts, stages nothing, and dies in
+    MATLAB.
+    """
+    if stages is None:
+        return set(ALL_STAGES)
+    wanted = {s.strip().lower() for s in stages if s and s.strip()}
+    unknown = wanted - set(ALL_STAGES)
+    if unknown:
+        raise SystemExit(
+            f"--execute: unknown stage(s) {sorted(unknown)}. "
+            f"Choose from: {', '.join(ALL_STAGES)}")
+    if not wanted:
+        raise SystemExit("--execute: no stages selected.")
+    return wanted
 
 
 class MAAPOrchestrator:
@@ -183,12 +311,47 @@ class MAAPOrchestrator:
         config: Dict,
         client: MAAPClient,
         force_nrt: bool = False,
+        rebuild_stale_bics: bool = True,
         today_fn: Optional[Callable[[], datetime.date]] = None,
+        stages: Optional[Iterable[str]] = None,
+        rerun_final: bool = False,
     ):
         self.config = mur_config.normalize_config(config)
         self.client = client
         self.force_nrt = force_nrt
+        # On by default. With it off, a BIC's LAST build was at 06Z the day
+        # after its data day -- six hours after the day ended -- and it was
+        # frozen from then on. Whatever PO.DAAC had not yet ingested was lost
+        # for good: MODISA 2026/293 kept 113 of prod's 322 granules. Requiring
+        # the BIC to have been written `stable` days after its day moves the
+        # last build one run later, once, and costs one extra L2P job per
+        # sensor-day. Off (--trust-cached-bics) reuses any BIC that exists.
+        self.rebuild_stale_bics = rebuild_stale_bics
+        # A REA ("Final") day whose granule already exists is skipped, as
+        # nrtMRVA.py's KEEPING OLD does; this redoes it anyway.
+        self.rerun_final = rerun_final
+        # What this run has already built, so that a day reached from several
+        # analysis days in one sweep is built once, not once per window it
+        # falls in. nrtMRVA.py gets the same from its makebiccmd_* files,
+        # which it deletes at the start of each run ("just written").
+        self._built_bics: Dict[Tuple[str, datetime.date], str] = {}
+        self._built_iquam: Dict[datetime.date, Optional[str]] = {}
+        # Which of the four container stages to submit. Narrowing this is how
+        # you test one mechanism without paying for 23 jobs.
+        self.stages = validate_stages(stages)
+        self._warned_no_iquam = False
+        # Resolved on first use; see team_root.
+        self._team_root: Optional[str] = None
+        self._team_root_resolved = False
         self._today_fn = today_fn or mur_date.today
+        # Registered algorithm name per module, learned from the DPS output
+        # hrefs this run already fetches. MAAP suffixes the name it registers
+        # (mur-mrva_1756), the suffix appears nowhere in this repo, and it is
+        # part of the STAC collection id -- so it is read off a path rather
+        # than guessed, and rather than costing an API call on the run path.
+        self._registered: Dict[str, str] = {}
+        # The registration suffix, shared by every module in a deployment.
+        self._suffix = ""
 
     def get_reference_today(self) -> datetime.date:
         return self._today_fn()
@@ -209,18 +372,87 @@ class MAAPOrchestrator:
     def workspace_root(self) -> str:
         """S3 root this run reads cached intermediates from and writes to.
 
-        e.g. "s3://maap-ops-workspace/<username>". Discovered at runtime from
-        maap.aws.workspace_bucket_credentials()["authorized_s3_paths"][0]["uri"]
-        rather than hardcoded; the config key is the override.
+        e.g. "s3://mur-sst", the team bucket, or a personal
+        "s3://maap-ops-workspace/<username>". --init-config discovers it from
+        maap.aws.workspace_bucket_credentials()["authorized_s3_paths"]: the
+        entry typed "org" if there is one. DPS job outputs land in the
+        personal workspace regardless; promotion copies them here.
         """
         return self.config.get("maap", {}).get("workspace_root", "")
+
+    @property
+    def team_root(self) -> Optional[str]:
+        """Where finished granules are copied for the rest of the team, or None.
+
+        A teammate cannot read the runner's personal workspace, so a granule
+        that lives only there can be discovered (STAC) but not downloaded.
+        maap.team_bucket says where the shared copy goes: an s3:// root, or
+        text to look for among the team buckets MAAP authorizes this account
+        for (paths.team_bucket_setting). Looked up once per run.
+
+        None when sharing is off, no team bucket matches, or the data root is
+        already there -- the promoted granule is then the shared one.
+        """
+        if not self._team_root_resolved:
+            self._team_root_resolved = True
+            root, match = paths.team_bucket_setting(self.config)
+            if root is None and match is not None:
+                try:
+                    root = self.client.team_root(match)
+                except Exception as exc:                  # noqa: BLE001
+                    logger.warning("could not look up a team bucket: %s", exc)
+                if root is None:
+                    logger.info("no team bucket matching %r is authorized for "
+                                "this account; granules stay in the workspace "
+                                "only", match)
+            if root and root.rstrip("/") == self.workspace_root.rstrip("/"):
+                root = None
+            if root:
+                logger.info("sharing L4 granules to the team bucket: %s", root)
+            self._team_root = root.rstrip("/") if root else None
+        return self._team_root
+
+    def _share_l4(self, src: Optional[str], process_date: datetime.date,
+                  mode: str, resolution: str, *,
+                  only_if_missing: bool = False) -> Optional[str]:
+        """Copy a promoted granule to the same key in the team bucket.
+
+        The same key, so there is one layout to learn, and so that pointing
+        maap.workspace_root at the team bucket later finds every granule
+        already in place. Only the netCDF goes: browse rasters are served
+        from where the cog job staged them and need no second copy.
+
+        Never fails the day. The granule is already safe in the workspace,
+        and utils/share_l4.py copies whatever this missed.
+        """
+        if not src or not self.team_root:
+            return None
+        dest = paths.l4_href(self.team_root, process_date, mode, resolution)
+        try:
+            if only_if_missing and self.client.object_exists(dest):
+                return dest
+            self.client.copy_object(src, dest)
+        except Exception as exc:                          # noqa: BLE001
+            logger.warning("    could not share %s to the team bucket (%s); "
+                           "utils/share_l4.py --copy will retry it",
+                           paths.l4_filename(process_date, mode, resolution),
+                           exc)
+            return None
+        logger.info("    shared %s", dest)
+        return dest
 
     def _find_cached_bic(
         self,
         sensor: str,
         data_day: datetime.date,
+        *,
+        min_age_days: Optional[int] = None,
     ) -> Optional[str]:
         """Href of an already-produced BIC for this sensor/day, or None.
+
+        `min_age_days` rejects a BIC written fewer than that many days after
+        the day it describes -- see _bic_is_stale. None (the default) keeps the
+        historic behaviour of trusting any BIC that exists.
 
         Probes compressed then plain: l2p's writebic.m emits an uncompressed
         `.bic`, while production archives are `.bic.gz` and makebiq.m accepts
@@ -230,15 +462,448 @@ class MAAPOrchestrator:
         would be missed by mrva4com_container.m's per-sensor scan.
         """
         for candidate in paths.bic_candidate_hrefs(self.workspace_root, sensor, data_day):
-            if self.client.object_exists(candidate):
-                return candidate
+            if not self.client.object_exists(candidate):
+                continue
+            if min_age_days and self._bic_is_stale(
+                    candidate, data_day, min_age_days):
+                logger.info(
+                    "    %s %s: cached BIC was written before its granules "
+                    "had settled; rebuilding", sensor, data_day)
+                return None
+            return candidate
         return None
+
+    def _bic_is_stale(
+        self,
+        href: str,
+        data_day: datetime.date,
+        min_age_days: int,
+    ) -> bool:
+        """Whether this BIC was built before its own day's data had settled.
+
+        A BIC produced by an NRT run was built from the granules that had
+        arrived within a day or so of the swath. More keep arriving for
+        `stable` days afterwards. is_rewrite() covers that for a day that is
+        still young NOW, but it cannot see a day that was young WHEN THE BIC
+        WAS WRITTEN -- which is every day of a backfill. The file's own
+        LastModified is what carries that, and a HEAD already returns it.
+
+        Unknown mtime means not stale: an existence check that silently became
+        a rebuild-everything would be a far worse failure than a reused BIC.
+        """
+        modified = self.client.object_modified(href)
+        if modified is None:
+            return False
+        written = modified.date() if hasattr(modified, "date") else modified
+        return (written - data_day).days < min_age_days
+
+    def _promote_bic(self, sensor: str, data_day: datetime.date, job: str) -> str:
+        """Copy a fresh BIC from its DPS output path to the canonical key.
+
+        This is what makes the cache in _find_cached_bic real rather than
+        decorative. DPS chooses where a job's outputs land and that path is
+        not reconstructable from a naming convention, so a BIC left where DPS
+        put it is invisible to tomorrow's run -- which would then resubmit a
+        job to regenerate a file that already exists.
+
+        Promoting also makes the manifest href durable: it keeps resolving if
+        MRVA is resubmitted for this day later, whereas a DPS path is only
+        meaningful while you still hold the job id.
+        """
+        src = self.client.get_job_output(job, "bic")
+        dest = paths.href(
+            self.workspace_root,
+            paths.bic_key(sensor, data_day, compressed=src.endswith(".gz")),
+        )
+        return self.client.copy_object(src, dest)
+
+    def _find_cached_landice(
+        self, process_date: datetime.date
+    ) -> Optional[Dict[str, str]]:
+        """Canonical hrefs for a day's landice outputs, or None if incomplete.
+
+        All three or nothing: MRVA needs every one, and a partial set would
+        skip the job and then fail on a missing input, which is a worse
+        failure than simply re-running landice.
+        """
+        found = {}
+        for output_name in paths.LANDICE_OUTPUTS:
+            for candidate in paths.landice_candidate_hrefs(
+                    self.workspace_root, output_name, process_date):
+                if self.client.object_exists(candidate):
+                    found[output_name] = candidate
+                    break
+            else:
+                return None
+        return found
+
+    def _promote_landice(
+        self, process_date: datetime.date, job: str
+    ) -> Dict[str, str]:
+        """Copy a fresh landice job's outputs to canonical keys.
+
+        Same reason as _promote_bic: DPS chooses where a job's outputs land,
+        that path is not reconstructable, and it is only meaningful while you
+        still hold the job id. Left where DPS put them, today's ice fields are
+        invisible to tomorrow's run -- so landice was resubmitted on every
+        single run, which is exactly the job MAAP's dedup then swallowed.
+        """
+        promoted = {}
+        for output_name in paths.LANDICE_OUTPUTS:
+            src = self.client.get_job_output(job, output_name)
+            dest = paths.href(
+                self.workspace_root,
+                paths.landice_key(
+                    output_name, process_date,
+                    paths.landice_filename(output_name, process_date,
+                                           compressed=src.endswith(".gz"))))
+            promoted[output_name] = self.client.copy_object(src, dest)
+        return promoted
+
+    def _iquam_window_days(
+        self, process_date: datetime.date, reference_today: datetime.date
+    ) -> List[datetime.date]:
+        """The days one iquam job covers -- the same window the manifest reads.
+
+        Taken from the mrva section, not iquam's own buoy_dayrange, because
+        what matters for reuse is which files the manifest will ask for.
+        """
+        sensors_config = self.config.get("mrva", {}).get("sensors", {})
+        day_range = sensors_config.get("IQUAM0", {}).get("day_range", 2)
+        return list(mur_window.day_range_dates(
+            process_date, day_range, reference_today=reference_today))
+
+    def _find_cached_iquam(
+        self,
+        data_day: datetime.date,
+        reference_today: Optional[datetime.date] = None,
+    ) -> Optional[str]:
+        """Canonical href of a usable buoy file for this day, or None.
+
+        Three ways a file that exists is still not reusable:
+
+          * this run already rebuilt it -- then that answer stands;
+          * the day is younger than iquam.stable_latency (nrtMRVA.py's
+            buoystablat), so iQUAM may still be adding to it. Production
+            rebuilds it on every run until then;
+          * it holds no observations (IQUAM_EMPTY_BII_BYTES). A header-only
+            file is what a too-early run leaves behind, and trusting it
+            forever is how MRVA came to run with no buoys.
+        """
+        if data_day in self._built_iquam:
+            return self._built_iquam[data_day]
+        reference_today = reference_today or self.get_reference_today()
+        stable = self.config.get("iquam", {}).get("stable_latency", 2)
+        if mur_window.is_rewrite(reference_today, data_day, stable):
+            return None
+        candidate = paths.iquam_href(self.workspace_root, data_day)
+        size = self.client.object_size(candidate)
+        if size is None:
+            return None
+        if size <= IQUAM_EMPTY_BII_BYTES:
+            logger.info("    IQUAM0 %s: cached file has no observations "
+                        "(%d bytes); rebuilding", data_day, size)
+            return None
+        return candidate
+
+    def _promote_iquam(self, data_day: datetime.date, job: str) -> Optional[str]:
+        """Copy one day's buoy file out of a job that wrote its whole window.
+
+        An empty result is not promoted: it would overwrite a file that may
+        hold data with one that does not, and the manifest gains nothing from
+        an entry MRVA logs as "no content". None leaves the day out.
+        """
+        src = self.client.get_job_output(
+            job, "output",
+            year=data_day.year,
+            doy=f"{data_day.timetuple().tm_yday:03d}",
+        )
+        dest = paths.iquam_href(self.workspace_root, data_day)
+        size = self.client.object_size(src)
+        if size is not None and size <= IQUAM_EMPTY_BII_BYTES:
+            existing = self.client.object_size(dest)
+            if existing is not None and existing > IQUAM_EMPTY_BII_BYTES:
+                logger.warning("    IQUAM0 %s: rebuilt file is empty; keeping "
+                               "the earlier one (%d bytes)", data_day, existing)
+                self._built_iquam[data_day] = dest
+                return dest
+            logger.warning("    IQUAM0 %s: no observations yet; left out of "
+                           "the manifest", data_day)
+            self._built_iquam[data_day] = None
+            return None
+        promoted = self.client.copy_object(src, dest)
+        self._built_iquam[data_day] = promoted
+        return promoted
+
+    @property
+    def username(self) -> str:
+        """The MAAP username. Needed because MAAP's STAC ingest names every
+        collection <username>__<algorithm>__<version>, so the collection id
+        cannot be known without it.
+
+        maap.username, else the last segment of a personal
+        s3://maap-ops-workspace/<username> root, else the credentials' own
+        workspace prefix. The root is no longer always personal: with it in
+        the team bucket (s3://mur-sst) its last segment names nobody.
+        """
+        configured = paths.username_from_config(self.config)
+        if configured:
+            return configured
+        try:
+            return str(getattr(self.client, "username", "") or "")
+        except Exception as exc:                          # noqa: BLE001
+            logger.warning("    could not discover the MAAP username (%s); "
+                           "set maap.username", exc)
+            return ""
+
+    def _note_registered(self, href: Optional[str]) -> None:
+        """Learn a module's registered algorithm name from a DPS href.
+
+        One module teaches all of them: MAAP allocates one registration
+        suffix per deployment and applies it to every algorithm, so seeing
+        mur-mrva_1756 is enough to name mur-cog_1756 too.
+        """
+        if not href:
+            return
+        name = stac.registered_algorithm(href)
+        if not name:
+            return
+        self._registered[stac.module_of(name)] = name
+        suffix = stac.registration_suffix(name)
+        if suffix and suffix != self._suffix:
+            self._suffix = suffix
+            # Logged so it can be pinned in the config. A run that submits
+            # only cog never sees an mrva output path and so never learns
+            # this, which is why its items came out with no viewer links.
+            logger.info("    MAAP registration suffix is %s; set "
+                        "maap.registration_suffix to keep cog-only runs "
+                        "from losing their viewer links", suffix)
+
+    def _published_collection(self, module: str) -> str:
+        """The collection id MAAP will assign to `module`, or "" if unknown.
+
+        Empty is a real answer and the caller must treat it as one: a link
+        built from a guessed suffix looks right and 404s, which is worse than
+        no link at all.
+        """
+        user = self.username
+        if not user:
+            return ""
+        registered = self._registered.get(module)
+        if not registered:
+            suffix = self._suffix or str(
+                self.config.get("maap", {}).get("registration_suffix") or "")
+            if not suffix:
+                return ""
+            registered = f"{module}{suffix}"
+        version = str(self.config.get("maap", {}).get("algorithm_version")
+                      or ALGORITHM_VERSION)
+        return stac.dps_collection_id(user, registered, version)
+
+    def _cog_args(self, granule_href: str, mode: str) -> Dict[str, str]:
+        """Inputs for one mur-cog job.
+
+        stac-collection is omitted rather than sent empty when the collection
+        id is unknown. MAAP matches submissions against the declared inputs
+        and rejects the whole thing on a mismatch, so every key sent is a key
+        that has to exist in the registered CWL; sending a blank one buys
+        nothing and adds a way to fail.
+        """
+        args = {"granule": granule_href, "mode": mode}
+        collection = self._published_collection("mur-cog")
+        if collection:
+            args["stac_collection"] = collection
+        return args
+
+    def _report_stac(self, process_date: datetime.date, mode: str) -> None:
+        """Print where this day's products are, or will be, in MAAP's STAC.
+
+        The collection id is ASKED FOR, not constructed. MAAP suffixes the
+        registered algorithm name (`mur-mrva_1756`), the suffix is assigned at
+        registration and appears nowhere in this repo, and the first version
+        of this method built ids without it -- printing plausible URLs that
+        all 404'd.
+
+        A collection that is not found is reported as pending rather than as
+        an error. Ingestion runs after stage-out on MAAP's own schedule, so a
+        job that just finished legitimately has no collection yet, and
+        nothing here is allowed to make a successful run look failed.
+        """
+        user = self.username
+        if not user:
+            return
+        version = str(self.config.get("maap", {}).get("algorithm_version")
+                      or ALGORITHM_VERSION)
+        day = f"{process_date:%Y%m%d}"
+
+        wanted = [("granules", "mur-mrva", f"mur-l4-{day}-{mode}", None)]
+        if "cog" in self.stages:
+            wanted += [
+                ("browse 1 km", "mur-cog", f"mur-cog-{day}-1km", "sst"),
+                ("browse 25 km", "mur-cog", f"mur-cog-{day}-25km", "sst"),
+            ]
+
+        logger.info("    MAAP STAC (%s):", stac.DPS_STAC)
+        for label, module, item, field in wanted:
+            collection = self._published_collection(module)
+            if not collection:
+                # Nothing this run has seen names the registration suffix, so
+                # the id is unknown. Saying so beats printing a URL built
+                # from a guess, which looks right and 404s.
+                logger.info("      %-12s unknown collection (no DPS output "
+                            "seen this run)", label)
+                continue
+            if field:
+                logger.info("      %-12s %s", label, stac.dps_map_url(
+                    collection, item, field, **stac.RENDER[field]))
+            else:
+                logger.info("      %-12s %s", label,
+                            stac.dps_item_url(collection, item))
+        # Last, and version-independent: every collection this user has
+        # published, which keeps working across the version bumps that fork a
+        # new collection each time.
+        logger.info("      %-12s %s", "all of yours",
+                    stac.dps_user_catalog_browser(user))
+        logger.info("      ingestion runs after stage-out on MAAP's "
+                    "schedule, so a link can 404 for a while; `python "
+                    "utils/mur_stac.py` confirms what is live")
+
+    def _browse_from_promoted(self, process_date: datetime.date,
+                              mode: str) -> Dict[str, str]:
+        """Regenerate browse rasters for a day already in the bucket.
+
+        Reached when cog is requested without mrva. It looks the granules up
+        at their canonical keys rather than at a DPS result path, which is why
+        the promotion in _promote_l4 had to come first: a result path embeds
+        the job id and cannot be derived from a date.
+
+        Returns the promoted granules it submitted cog jobs for, empty if
+        there is nothing to work from -- which is a legitimate state for a day
+        that has not been analysed, not an error.
+        """
+        found = {}
+        for asset_prefix, resolution, key in (
+            ("browse", "1km", "data"), ("browse25", "25km", "mur25"),
+        ):
+            href = paths.l4_href(self.workspace_root, process_date, mode,
+                                 resolution)
+            if not self.client.object_exists(href):
+                continue
+            found[key] = href
+            self._submit_browse(process_date, mode, asset_prefix, href)
+
+        if not found:
+            logger.info(
+                "    no promoted granule for %s (%s). Nothing to make browse "
+                "rasters from -- run mrva for this day first, or check "
+                "%s", process_date, mode,
+                paths.l4_key(process_date, mode, "1km"))
+            return {}
+
+        self._report_stac(process_date, mode)
+        return found
+
+    def _submit_browse(self, process_date: datetime.date, mode: str,
+                       asset_prefix: str, granule_href: str) -> Optional[str]:
+        """Submit one cog job and return its id without waiting for it.
+
+        Its result reaches the catalogue through the catalog.json the job
+        stages out, so there is nothing here to collect. A failure, then or
+        later, only costs pictures -- a day with a granule must not be
+        reported as failed for them -- so it is logged with the job id that
+        utils/job_logs.py needs, and swallowed.
+        """
+        try:
+            job = self.client.submit_job(
+                # --mode is passed because the granule filename cannot carry
+                # it: mode lives in the directory (.../279nrt/...), and cog's
+                # STAC item would otherwise record the day with no indication
+                # of whether it is the interim or the final analysis.
+                "mur-cog", self._cog_args(granule_href, mode),
+                tag=tags.batch("cog"))
+        except Exception as exc:                          # noqa: BLE001
+            logger.warning("    browse rasters for %s not submitted (%s); "
+                           "the granule is unaffected", asset_prefix, exc)
+            return None
+        logger.info("    %s rasters submitted as %s, not waited on; check "
+                    "with utils/job_logs.py %s", asset_prefix, job, job)
+        return job
+
+    def _promote_l4(self, process_date: datetime.date, mode: str, job: str,
+                    output_name: str, resolution: str) -> Optional[str]:
+        """Copy a granule to its canonical key, so it can be found by date.
+
+        The DPS path embeds the job id -- .../2026/10/08/18/10/20/964098/... --
+        and cannot be derived from a date, so an unpromoted granule is findable
+        only by the run that produced it. That is why regenerating browse
+        rasters for an existing day was impossible: --execute cog had nothing
+        to look up.
+
+        Absence is not an error. MUR25 is skipped when its grid file is, and a
+        failed Stage 9 leaves no 1 km granule while the rest of the run stands.
+        """
+        try:
+            src = self.client.get_job_output(job, output_name)
+        except Exception as exc:                          # noqa: BLE001
+            logger.debug("no %s from %s: %s", output_name, process_date, exc)
+            return None
+        # The one place a raw mrva DPS path is in hand. Its prefix carries
+        # the registered algorithm name, which the STAC collection id needs.
+        self._note_registered(src)
+        dest = paths.l4_href(self.workspace_root, process_date, mode,
+                             resolution)
+        promoted = self.client.copy_object(src, dest)
+        self._share_l4(promoted, process_date, mode, resolution)
+        return promoted
+
+    def _promote_csp(self, process_date: datetime.date, job: str) -> Optional[str]:
+        """Copy MRVA's coefficient output to the canonical key, for tomorrow.
+
+        Returns None when the job produced no coefficient, which is not an
+        error -- absence just means tomorrow bootstraps.
+        """
+        # c06 specifically, because that is the level makeref reads it at:
+        # Stage 3 runs Lref0..Lref, and Lref0 is 6 in NRT.
+        #
+        # Only a REA run produces one. REA has L0=2, so Stage 6 saves c02..c11
+        # and c06 is among them; an NRT run sets L0 = Lref = 7 and saves
+        # c07..c10. That is why the first successful job (2026-10-06, nrt)
+        # staged out c07..c10 and no c06 -- not a fault, just NRT having
+        # nothing to promote.
+        #
+        # Absence is handled: the container warns and builds the reference
+        # from scratch, which is also what a fresh start or a reprocess
+        # without a prior day needs.
+        try:
+            src = self.client.get_job_output(job, "csp06")
+        except Exception as exc:                          # noqa: BLE001
+            logger.info("    no c06 from %s (%s mode writes c07 upward); "
+                        "tomorrow bootstraps its reference field",
+                        process_date, "nrt" if "found 0" in str(exc) else "this")
+            logger.debug("csp06 lookup: %s", exc)
+            return None
+        dest = paths.href(self.workspace_root, paths.csp_key(process_date))
+        return self.client.copy_object(src, dest)
+
+    def _find_prior_csp(self, process_date: datetime.date, mode: str) -> Optional[str]:
+        """Yesterday's coefficient, so MRVA chains instead of bootstrapping.
+
+        NRT only: REA mode never used a prior coefficient (see
+        run_mur_pipeline.py's resolve_mrva_prior_csp). Returning None is a
+        valid, meaningful state -- mrva4com_container.m bootstraps when
+        --prior-csp-file is absent -- so this never guesses a path it has not
+        confirmed.
+        """
+        if mode != "nrt":
+            return None
+        candidate = paths.prior_csp_href(self.workspace_root, process_date)
+        return candidate if self.client.object_exists(candidate) else None
 
     def _build_sensor_inputs_manifest(
         self,
         process_date: datetime.date,
         bic_results: Dict,
-        iquam_job: str,
+        iquam_hrefs: Dict[datetime.date, str],
         reference_today: datetime.date,
     ) -> List[Dict]:
         """MRVA's unified BIC + IQUAM0 fan-in manifest.
@@ -263,25 +928,45 @@ class MAAPOrchestrator:
                 process_date, day_range, reference_today=reference_today
             ):
                 if sensor == "IQUAM0":
-                    # iquam writes its whole +/- window in one job, so every
-                    # day resolves against that job's single output directory.
-                    entry_href = (
-                        f"{self.client.get_job_output(iquam_job, 'output').rstrip('/')}"
-                        f"/{data_day.year}/{paths.iquam_filename(data_day)}"
-                    )
+                    # Resolved before this point, either from the bucket or by
+                    # promoting a fresh iquam job's output. Keyed by day
+                    # because one job writes its whole +/- window -- five .bii
+                    # files for a day_range of 2 -- and the manifest needs one
+                    # named entry per day, not whichever the glob happened to
+                    # match ("expected 1 match ... found 5").
+                    entry_href = iquam_hrefs.get(data_day)
+                    if entry_href is None:
+                        if not iquam_hrefs:
+                            # Nothing at all: iquam did not run and nothing is
+                            # cached. A scientifically degraded analysis, not a
+                            # configuration detail, so it is said once and
+                            # loudly rather than logged at debug and forgotten.
+                            if not self._warned_no_iquam:
+                                self._warned_no_iquam = True
+                                logger.warning(
+                                    "  MRVA will run with NO in-situ buoy "
+                                    "observations: no IQUAM0 file is available "
+                                    "for any day of this analysis. The L4 "
+                                    "product will differ from one built with "
+                                    "buoys.")
+                        else:
+                            logger.warning(
+                                "No IQUAM0 file for %s -- omitting from MRVA "
+                                "manifest", data_day)
+                        continue
                     files.append({
                         "path": entry_href,
                         "sensor": sensor,
+                        "access": access_kind_for(entry_href),
                         "relative_path": paths.iquam_relative_path(data_day),
                     })
                     continue
 
-                cached_href, job = bic_results.get((sensor, data_day), (None, None))
-                if job is not None:
-                    entry_href = self.client.get_job_output(job, "bic")
-                elif cached_href is not None:
-                    entry_href = cached_href
-                else:
+                # Every entry in bic_results is already a canonical href by
+                # this point -- either it came from the cache, or run_day
+                # promoted it after the job succeeded.
+                entry_href, _job = bic_results.get((sensor, data_day), (None, None))
+                if entry_href is None:
                     # MRVA's window reaches a day this run's L2P window didn't
                     # cover; fall back to whatever is already in the bucket.
                     entry_href = self._find_cached_bic(sensor, data_day)
@@ -295,6 +980,7 @@ class MAAPOrchestrator:
                 files.append({
                     "path": entry_href,
                     "sensor": sensor,
+                    "access": access_kind_for(entry_href),
                     "relative_path": paths.bic_relative_path(
                         sensor, data_day, entry_href.rsplit("/", 1)[-1]
                     ),
@@ -306,26 +992,73 @@ class MAAPOrchestrator:
         year = process_date.year
         doy = process_date.timetuple().tm_yday
 
-        landice_hrefs = resolve_landice_static_hrefs(self.config["landice"]["static_resources_dir"])
-        landice_job = self.client.submit_job("mur-landice", {
-            "year": year,
-            "doy": doy,
-            "landmask_p011_file": landice_hrefs["landmask_p011"],
-            "gridindex_north_p011_file": landice_hrefs["gridindex_north_p011"],
-            "gridindex_south_p011_file": landice_hrefs["gridindex_south_p011"],
-            "landmask_p01_file": landice_hrefs["landmask_p01"],
-            "gridindex_north_p01_file": landice_hrefs["gridindex_north_p01"],
-            "gridindex_south_p01_file": landice_hrefs["gridindex_south_p01"],
-        })
-        iquam_config = self.config["iquam"]
-        iquam_job = self.client.submit_job("mur-iquam", {
-            "year": year,
-            "doy": doy,
-            "mode": mode,
-            "reference_date": format_iquam_reference_date(self.get_reference_today()),
-            "buoy_day_range": iquam_config["buoy_dayrange"],
-            "stability_latency": iquam_config["stable_latency"],
-        })
+        reference_today = self.get_reference_today()
+
+        # nrtMRVA.py's KEEPING OLD: a Final day is analysed once. The daily
+        # sweep reaches T-9..T-4 every run, so without this each of those
+        # days would be re-analysed six times over. Its inputs need nothing
+        # either: every young BIC and buoy file its window reaches is also
+        # in a later NRT day's window, which the same sweep processes next.
+        if mode == "rea" and "mrva" in self.stages and not self.rerun_final:
+            final = paths.l4_href(self.workspace_root, process_date, "rea")
+            if self.client.object_exists(final):
+                logger.info("    %s: Final granule already exists; keeping it "
+                            "(--rerun-final to redo)", process_date)
+                # A Final made before sharing existed, or whose copy failed.
+                self._share_l4(final, process_date, mode, "1km",
+                               only_if_missing=True)
+                return DayResult(process_date=process_date, mode=mode,
+                                 mrva_job_id=None, netcdf_href=final)
+
+        # Reuse before resubmitting. DPS puts a job's outputs at an
+        # unreconstructable path, so an output that is not promoted to a
+        # canonical key is lost the moment the run ends -- which is why
+        # landice and iquam were resubmitted every single run while L2P was
+        # not. MAAP's dedup was the wrong answer to that: it skips the work
+        # AND discards the handle on the earlier result. Checking the bucket
+        # is the right one, because the object's existence IS the record.
+        landice_job = None
+        landice_cached = self._find_cached_landice(process_date)
+        if landice_cached is not None:
+            logger.info("    landice %s already in the bucket; not resubmitting",
+                        process_date)
+        elif "landice" in self.stages:
+            landice_hrefs = resolve_landice_static_hrefs(
+                self.config["landice"]["static_resources_dir"])
+            landice_job = self.client.submit_job("mur-landice", {
+                "year": year,
+                "doy": doy,
+                "landmask_p011_file": landice_hrefs["landmask_p011"],
+                "gridindex_north_p011_file": landice_hrefs["gridindex_north_p011"],
+                "gridindex_south_p011_file": landice_hrefs["gridindex_south_p011"],
+                "landmask_p01_file": landice_hrefs["landmask_p01"],
+                "gridindex_north_p01_file": landice_hrefs["gridindex_north_p01"],
+                "gridindex_south_p01_file": landice_hrefs["gridindex_south_p01"],
+            }, tag=tags.batch("landice"))
+
+        iquam_job = None
+        iquam_days = self._iquam_window_days(process_date, reference_today)
+        iquam_cached = {d: h for d in iquam_days
+                        if (h := self._find_cached_iquam(d, reference_today))
+                        is not None}
+        # A day this run already rebuilt is settled for the rest of the run,
+        # even when the answer was "nothing yet" -- resubmitting the job for
+        # every analysis day that reaches it would only get the same answer.
+        iquam_settled = set(iquam_cached) | (set(iquam_days) & set(self._built_iquam))
+        if iquam_days and len(iquam_settled) == len(iquam_days):
+            logger.info("    iquam %s: all %d day(s) already in the bucket; "
+                        "not resubmitting", process_date, len(iquam_days))
+        elif "iquam" in self.stages:
+            iquam_config = self.config["iquam"]
+            iquam_job = self.client.submit_job("mur-iquam", {
+                "year": year,
+                "doy": doy,
+                "mode": mode,
+                "reference_date": format_iquam_reference_date(
+                    self.get_reference_today()),
+                "buoy_day_range": iquam_config["buoy_dayrange"],
+                "stability_latency": iquam_config["stable_latency"],
+            }, tag=tags.batch("iquam"))
 
         l2p_jobs = []
         # Maps (sensor, data_day) -> (cached_href_or_None, job_or_None) for
@@ -339,9 +1072,8 @@ class MAAPOrchestrator:
         # L2P's production window (l2p.sensors[X].day_range) and has to look
         # entries up by day rather than consume them in submission order.
         bic_results = {}
-        reference_today = self.get_reference_today()
         l2p_config = self.config["l2p"]
-        for sensor in l2p_config["active_sensors"]:
+        for sensor in (l2p_config["active_sensors"] if "l2p" in self.stages else []):
             sensor_config = l2p_config["sensors"][sensor]
             stable = sensor_config.get("stable", 2)
             # skip_future matters: a T-1 analysis day with a forward range of
@@ -353,9 +1085,15 @@ class MAAPOrchestrator:
             ):
                 rewrite = mur_window.is_rewrite(reference_today, data_day, stable)
 
+                if (built := self._built_bics.get((sensor, data_day))):
+                    bic_results[(sensor, data_day)] = (built, None)
+                    continue
+
                 cached_href = None
                 if not rewrite:
-                    cached_href = self._find_cached_bic(sensor, data_day)
+                    cached_href = self._find_cached_bic(
+                        sensor, data_day,
+                        min_age_days=stable if self.rebuild_stale_bics else None)
                 if cached_href is not None:
                     bic_results[(sensor, data_day)] = (cached_href, None)
                     continue
@@ -365,6 +1103,18 @@ class MAAPOrchestrator:
                     start=data_day,
                     end=data_day,
                 )
+                if not granules:
+                    # A day with no granules is a real answer, not a failure:
+                    # the current day is still accumulating, and a sensor can
+                    # simply have no coverage. Submitting anyway would write
+                    # an empty manifest, run L2P over nothing, and leave MRVA's
+                    # manifest pointing at a BIC that was never produced --
+                    # which surfaces much later as an unresolvable output.
+                    logger.info(
+                        "    no granules for %s %s; not submitting L2P",
+                        sensor, data_day)
+                    continue
+
                 # A variable-count input can't be a repeated flag or a CWL
                 # array (docs/input-contract.html section 3, and arrays
                 # are unconfirmed in MAAP's app-package generator) -- write the
@@ -375,41 +1125,159 @@ class MAAPOrchestrator:
                     paths.l2p_manifest_key(sensor, data_day),
                     build_l2p_manifest_from_hrefs(granules),
                 )
-                job = self.client.submit_job("mur-l2p", {
+                l2p_args = {
                     "sensor": sensor,
                     "region": sensor_config["region"],
                     "year": data_day.year,
                     "doy": data_day.timetuple().tm_yday,
                     "rewrite": 1 if rewrite else 0,
                     "granules_manifest": granules_manifest_href,
-                })
+                }
+                # The container mints its own PO.DAAC credentials from this;
+                # a worker's own role gets 403 on a DAAC bucket. The CWL turns
+                # it into the MAAP_PGT environment variable rather than a
+                # flag, so it never appears in the container's argv.
+                if maap_token := os.environ.get("MAAP_PGT"):
+                    l2p_args["maap_token"] = maap_token
+                elif any(g.startswith("s3://podaac") for g in granules):
+                    logger.warning(
+                        "    MAAP_PGT is not set, so %s %s cannot obtain DAAC "
+                        "credentials and its granule fetches will fail",
+                        sensor, data_day)
+
+                # Every L2P job shares the MUR-L2P batch; which sensor and
+                # data day a row is shows in its inputs (sensor, year, doy).
+                # A rewrite must defeat dedup. The manifest lives at a
+                # stable key -- manifests/l2p/<sensor>/<year>/<doy>.json -- so
+                # reprocessing a day with late-arriving granules rewrites the
+                # CONTENT while every input VALUE stays identical. MAAP dedups
+                # on the values, refuses to run, and the reprocess silently
+                # does not happen: the whole point of the stability window,
+                # quietly defeated. Dedup is now off by default for a second
+                # and larger reason -- a deduped job has no readable output at
+                # all -- but this stays, so that --dedup cannot resurrect the
+                # first bug.
+                job = self.client.submit_job(
+                    "mur-l2p", l2p_args,
+                    tag=tags.batch("l2p"),
+                    dedup=False if rewrite else None)
                 l2p_jobs.append(job)
                 bic_results[(sensor, data_day)] = (None, job)
 
-        self.client.wait_all([landice_job, iquam_job, *l2p_jobs])
+        # Do not raise yet. A failure here used to abort the day before the
+        # promotion below, which threw away the output of every job that DID
+        # succeed: their BICs stayed at unpredictable DPS paths, where
+        # _find_cached_bic cannot see them, so the next run resubmitted all of
+        # them. One bad granule cost twenty jobs twice over.
+        failures = self.client.wait_all(
+            [j for j in (landice_job, iquam_job, *l2p_jobs) if j is not None],
+            raise_on_failure=False)
+
+        # Promote every BIC this run produced from its DPS path to the
+        # canonical workspace key, so tomorrow's run can find it with a HEAD
+        # instead of resubmitting the job that made it. Failed jobs have no
+        # output to promote and are dropped, so the manifest below cannot
+        # reference a BIC that was never written.
+        promoted = 0
+        for key, (cached_href, job) in list(bic_results.items()):
+            if job is None:
+                continue                       # already canonical: it came from the cache
+            if job in failures:
+                del bic_results[key]
+                continue
+            sensor, data_day = key
+            bic_results[key] = (self._promote_bic(sensor, data_day, job), job)
+            self._built_bics[key] = bic_results[key][0]
+            promoted += 1
+
+        # Landice and iquam get the same treatment for the same reason, and
+        # before the raise below, so a day that fails part way still banks
+        # what it finished.
+        if landice_job is not None and landice_job not in failures:
+            landice_cached = self._promote_landice(process_date, landice_job)
+        if iquam_job is not None and iquam_job not in failures:
+            for data_day in iquam_days:
+                if data_day in iquam_settled:
+                    continue
+                try:
+                    promoted_iquam = self._promote_iquam(data_day, iquam_job)
+                except LookupError as exc:
+                    # The mrva window can reach past what iquam's own
+                    # buoy_dayrange wrote. Not an error -- the manifest simply
+                    # omits that day.
+                    logger.warning("    no IQUAM0 output for %s: %s",
+                                   data_day, exc)
+                    continue
+                if promoted_iquam is not None:
+                    iquam_cached[data_day] = promoted_iquam
+
+        if failures:
+            if promoted:
+                logger.info(
+                    "  salvaged %d BIC(s) from this day's successful jobs; a "
+                    "re-run will reuse them rather than resubmit", promoted)
+            raise RuntimeError(
+                f"{len(failures)} job(s) failed:\n"
+                + "\n".join(f"  {jid}  [{status}]"
+                             for jid, status in failures.items())
+                + f"\n\nLogs:\n  python utils/job_logs.py "
+                + " ".join(list(failures)[:3])
+                + (" ..." if len(failures) > 3 else "")
+                + (f"\n\n{promoted} BIC(s) from this day were promoted and will "
+                   f"be reused;\nre-running submits only what is still missing."
+                   if promoted else ""))
 
         # Sensor-inputs manifest (BIC + IQUAM0 unified -- IQUAM0 has the
         # identical fan-in shape as the satellite sensors in
         # mrva4com_container.m's sensor table).
         sensor_manifest_files = self._build_sensor_inputs_manifest(
-            process_date, bic_results, iquam_job, reference_today
+            process_date, bic_results, iquam_cached, reference_today
         )
+        if "mrva" in self.stages and not sensor_manifest_files:
+            raise RuntimeError(
+                f"no sensor inputs for {process_date}: not one BIC or IQUAM0 "
+                f"file was found, in this run's outputs or already in the "
+                f"bucket. MRVA would stage nothing and fail in MATLAB, so it "
+                f"is not submitted. Run l2p (and iquam) for this day first.")
         sensor_inputs_manifest_href = self.client.write_manifest(
             paths.mrva_manifest_key(process_date), {"files": sensor_manifest_files}
         )
 
+        if "mrva" not in self.stages:
+            # cog derives from a granule rather than from this run, so it can
+            # still go ahead against one already promoted. That is the whole
+            # point of it being a separate process -- regenerating a browse
+            # raster should not require an hour of analysis -- and it did not
+            # work before the granules had canonical keys to be found at.
+            if "cog" in self.stages:
+                made = self._browse_from_promoted(process_date, mode)
+                if made:
+                    return DayResult(process_date=process_date, mode=mode,
+                                     mrva_job_id=None,
+                                     netcdf_href=made.get("data"))
+
+            logger.info("  mrva not in --execute; stopping after %d job(s)",
+                        len([j for j in (landice_job, iquam_job, *l2p_jobs)
+                             if j is not None]))
+            return DayResult(process_date=process_date, mode=mode,
+                             mrva_job_id=None, netcdf_href=None)
+
         mrva_static_hrefs = resolve_mrva_static_hrefs(
             self.config["mrva"]["static_resources_dir"], doy
         )
-        # Landice's own output naming isn't confirmed against a real
-        # registered algorithm yet (MAAPClient.get_job_output is still a
-        # stub); confirm all three names against one real landice job before
-        # relying on them. The files themselves are real -- icefiles_YYYY_DDD.txt
-        # is written by landice/src/readosisafice.m's write_file() -- but which
-        # output directory each lands in on DPS is not yet established.
-        landice_ice_p011_href = self.client.get_job_output(landice_job, "landice_ice_p011")
-        landice_grid_p01_href = self.client.get_job_output(landice_job, "landice_grid_p01")
-        landice_icefiles_p011_href = self.client.get_job_output(landice_job, "landice_icefiles_p011")
+        # Confirmed against a real mur-landice job (2026/164): DPS stages out
+        # p01/<year>/ and p011/<year>/ directly (the container's output/ wrapper
+        # is flattened), and all three files are present -- including
+        # icefiles_YYYY_DDD.txt, which earlier notes doubted was a real output.
+        # get_job_result returns a DIRECTORY prefix rather than named outputs,
+        # so mur_maap/outputs.py matches filenames within it.
+        if landice_cached is None:
+            raise RuntimeError(
+                f"no landice outputs for {process_date}: none in the bucket "
+                f"and no landice job ran. MRVA cannot be built without them.")
+        landice_ice_p011_href = landice_cached["landice_ice_p011"]
+        landice_grid_p01_href = landice_cached["landice_grid_p01"]
+        landice_icefiles_p011_href = landice_cached["landice_icefiles_p011"]
 
         mrva_args = {
             "year": year,
@@ -430,12 +1298,6 @@ class MAAPOrchestrator:
             # bootstrapping when no prior coefficient exists), so omitting it
             # is safe. Closing this needs an `aws s3 sync` branch in
             # localize_input for prefix-shaped values.
-            #
-            # --prior-csp-file is likewise omitted: its cross-run lookup needs
-            # the STAC intermediate-artifact cataloging that hasn't been built
-            # yet, so MRVA bootstraps each day rather than chaining from the
-            # previous one (matches the documented "absent -> bootstrap"
-            # behavior) rather than guessing a DPS-controlled path.
         }
         # Conditional exactly as the local executor does it: absent means
         # "skip MUR25 product generation", so only pass it when it's really there.
@@ -444,11 +1306,83 @@ class MAAPOrchestrator:
         if active_sensors := self.config.get("mrva", {}).get("active_sensors"):
             mrva_args["sensors"] = ",".join(active_sensors)
 
-        mrva_job = self.client.submit_job("mur-mrva", mrva_args)
+        # Passed only when the operator set it. The default lives in
+        # mrva4com_container.m, which treats an absent field as the full
+        # L=2..11, so sending nothing here is sending "do the real analysis"
+        # rather than relying on a default repeated in three places.
+        if (max_level := self.config.get("mrva", {}).get("max_level")) is not None:
+            mrva_args["max_level"] = str(max_level)
+            logger.warning(
+                "mrva capped at L=%s by mrva.max_level in the config. The "
+                "granule will be on the full grid but SMOOTHER than "
+                "production, which runs to L=11; it records the level it "
+                "used in the mrva_analysis_level attribute.", max_level)
+        # Chain from yesterday's coefficient when one was promoted to the
+        # canonical key. Absent is still valid -- MATLAB bootstraps -- so this
+        # confirms the object exists rather than guessing a path.
+        prior_csp = self._find_prior_csp(process_date, mode)
+        if prior_csp is not None:
+            mrva_args["prior_csp_file"] = prior_csp
+
+        mrva_job = self.client.submit_job(
+            "mur-mrva", mrva_args,
+            tag=tags.batch("mrva"))
         self.client.wait_all([mrva_job])
 
-        netcdf_href = self.client.get_job_output(mrva_job, "netcdf")
-        self.client.publish_stac_item(netcdf_href, process_date, mode)
+        # Promote this day's coefficient so tomorrow can chain from it.
+        self._promote_csp(process_date, mrva_job)
+
+        # Promoted to canonical keys, then used from there.
+        #
+        # Everything downstream addresses the granule by date rather than by
+        # job: regenerating browse rasters, re-publishing a STAC item,
+        # comparing two days. A DPS result path embeds the job id and cannot
+        # be reconstructed, so an unpromoted granule is reachable only from
+        # the run that made it -- the same reason landice, iquam and the BICs
+        # are promoted.
+        netcdf_href = (self._promote_l4(process_date, mode, mrva_job,
+                                        "netcdf", "1km")
+                       or self.client.get_job_output(mrva_job, "netcdf"))
+
+        # The MUR25 sibling, if Stage 10 produced one.
+        extras = {}
+        mur25 = self._promote_l4(process_date, mode, mrva_job,
+                                 "netcdf25", "25km")
+        if mur25:
+            extras["mur25"] = mur25
+
+        # Browse rasters, from a separate job per granule.
+        #
+        # mur-cog is its own process because the work shares nothing with the
+        # analysis but an input file, and the mrva image carries a MATLAB
+        # Runtime and takes an hour. Keeping them apart means rasters can be
+        # regenerated for any granule in the bucket without redoing the
+        # analysis, and a colormap change does not rebuild MATLAB.
+        #
+        # Submitted and not waited on, so the next day starts while these
+        # run. Nothing here needs their outputs: each cog job stages out its
+        # own catalog.json, MAAP ingests it, and every tool reads the browse
+        # layers from there (utils/mur_stac.py, utils/mur_layers.py).
+        if "cog" in self.stages:
+            for asset_prefix, granule_href in (
+                ("browse", netcdf_href), ("browse25", extras.get("mur25")),
+            ):
+                if granule_href:
+                    self._submit_browse(process_date, mode, asset_prefix,
+                                        granule_href)
+
+        if extras:
+            logger.info("    catalogued %d extra asset(s): %s",
+                        len(extras), ", ".join(sorted(extras)))
+
+        self.client.publish_stac_item(
+            netcdf_href, process_date, mode,
+            extra_assets=extras or None,
+            # Absent in the config means the full L=11; record the effective
+            # level either way so the item never has to be read as "unknown".
+            analysis_level=int(self.config.get("mrva", {}).get("max_level", 11)))
+
+        self._report_stac(process_date, mode)
 
         return DayResult(
             process_date=process_date,
@@ -470,3 +1404,732 @@ class MAAPOrchestrator:
             results.append(self.run_day(process_date, mode))
 
         return results
+
+
+# ---------------------------------------------------------------------------
+# CLI
+#
+# Designed to run INSIDE a MAAP workspace: authentication is ambient there,
+# the workspace bucket is reachable, and Earthdata credentials for granule
+# staging are already in place. It is not a remote driver -- there is no
+# mechanism here for talking to MAAP from outside a workspace.
+# ---------------------------------------------------------------------------
+
+# nrtMRVA.py's daily window: T-SCAN_LATENCY .. T-NRT_LATENCY, i.e. -9:-1.
+DEFAULT_PROCESS_DAYS = (f"-{mur_window.SCAN_LATENCY}:"
+                        f"-{mur_window.NRT_LATENCY}")
+
+
+def parse_process_days(value: str) -> List[int]:
+    """Offsets from the run day: "-1", or a range like "-9:-1"."""
+    if ":" in value:
+        lo, hi = (int(x) for x in value.split(":", 1))
+        if lo > hi:
+            lo, hi = hi, lo
+        return list(range(lo, hi + 1))
+    return [int(value)]
+
+
+def _is_placeholder(value) -> bool:
+    """Whether a config value is still an unfilled <angle-bracket> template.
+
+    config.maap.example.json ships these deliberately, and they are truthy, so
+    a plain falsiness check lets them through to fail as something obscure
+    much later.
+    """
+    return isinstance(value, str) and "<" in value and ">" in value
+
+
+def _print_job_plan(config: Dict, days, reference_today, args) -> None:
+    """How many jobs this will submit, and roughly how much data it moves.
+
+    Worth seeing before committing: a full five-sensor window is a great deal
+    more than a single-sensor test, and the containers fetch every granule.
+
+    This must agree with what run_day actually submits -- a plan that ignored
+    --execute would report 23 jobs for a run that submits 4, or worse, the
+    reverse.
+    """
+    l2p = config.get("l2p", {})
+    stages = validate_stages(args.execute.split(",") if args.execute else None)
+    sensors = l2p.get("active_sensors", []) if "l2p" in stages else []
+
+    total_units = 0
+    print("\njobs")
+    if stages != set(ALL_STAGES):
+        print(f"  (--execute {','.join(sorted(stages))}: "
+              f"{', '.join(sorted(set(ALL_STAGES) - stages))} skipped)")
+    for sensor in sensors:
+        cfg = (l2p.get("sensors") or {}).get(sensor, {})
+        units = 0
+        for day in days:
+            units += sum(1 for _ in mur_window.day_range_dates(
+                day, cfg.get("day_range", [2, 2]),
+                reference_today=reference_today))
+        total_units += units
+        print(f"  mur-l2p    {sensor:<8} {units:>3} sensor-day(s)")
+
+    per_day = len(days)
+    singles = 0
+    for stage in ("landice", "iquam", "mrva"):
+        if stage in stages:
+            singles += per_day
+            print(f"  mur-{stage:<7}{'':<9}{per_day:>3}")
+    print(f"  {'total':<20}{total_units + singles:>3} job(s)")
+
+    if total_units:
+        # Nothing is copied through this process any more -- the container
+        # fetches each granule from PO.DAAC itself -- but the bytes still move,
+        # and knowing roughly how many explains a long-running L2P job. A MODIS
+        # day was ~350 granules at ~20 MB; other sensors are smaller, so this
+        # is an upper bound rather than a forecast.
+        gb = total_units * 350 * 20 / 1024
+        print()
+        print(f"  granule volume: up to ~{gb:,.0f} GB fetched by the containers")
+        print(f"  (a MODIS day is ~350 granules at ~20 MB; other sensors are")
+        print(f"   smaller. Nothing passes through this process or the")
+        print(f"   workspace bucket.)")
+
+
+# Empirically broken pools, mapped to what is wrong with them. Proven by A/B
+# on 2026-09-22: an unmodified mur-landice job that had just succeeded on a
+# small queue failed on 32vcpu-64gb with "permission denied ...
+# /var/run/docker.sock" -- same image, same CWL, same inputs, same version.
+# cwltool cannot reach the Docker daemon there, so no MUR job can run on it at
+# all. Nothing in MAAP's docs mentions Docker access varying by pool, so this
+# is knowledge that exists only here until ops confirms it.
+BROKEN_QUEUES = {
+    "maap-dps-worker-32vcpu-64gb":
+        "its workers cannot reach /var/run/docker.sock, so cwltool fails to "
+        "pull the image and every job dies before the container starts",
+    # 2026-09-25, job at 23:23Z: an unmodified mur-mrva 2.0.6 submitted with
+    # --queue maap-dps-worker-64gb failed with the same docker.sock permission
+    # denied, at the same point -- before the image was pulled. The same image
+    # and CWL had run for over an hour on maap-dps-worker-32gb minutes earlier,
+    # reaching L=10.
+    #
+    # Weaker evidence than the entry above, which was established by A/B: this
+    # is ONE observation, and the previous single-sample verdict on this pool
+    # (a MAAP API connection refused) turned out to be transient. Confirm with
+    # a cheap job -- --execute iquam --queue maap-dps-worker-64gb on a day not
+    # already in the bucket -- and delete this entry if it passes.
+    #
+    # If it holds, MAAP has no working pool above 32 GB, which is a platform
+    # problem rather than a queue quirk, and the ops ticket becomes the
+    # critical path for reaching L=11 at all.
+    "maap-dps-worker-64gb":
+        "its workers appear to hit the same /var/run/docker.sock permission "
+        "denial as 32vcpu-64gb, so no MUR job gets as far as starting "
+        "(observed once, 2026-09-25 -- see the note in the source)",
+}
+
+
+def _warn_about_broken_queues(queue: str, queues: Optional[Dict[str, str]]) -> None:
+    """Say so at submit time rather than letting the job discover it.
+
+    A job sent here still takes minutes to fail, and fails with a Docker error
+    that looks like an image or registry problem rather than a queue problem --
+    which is exactly how it cost an afternoon the first time. This is a warning
+    and not a refusal because putting a known-good job on a suspect pool is a
+    legitimate diagnostic, and that experiment is how the entry above was
+    established in the first place.
+    """
+    targets = {"the default queue": queue}
+    targets.update({p: q for p, q in (queues or {}).items()})
+    for who, q in targets.items():
+        if q in BROKEN_QUEUES:
+            logger.warning(
+                "%s is %s, which is known to be broken: %s. Change it in your "
+                "config.maap.json (maap.queue / maap.queues) unless you are "
+                "deliberately testing this pool.",
+                who, q, BROKEN_QUEUES[q])
+
+
+def resolve_version(config: Dict) -> Tuple[str, bool]:
+    """The algorithm version jobs will run, and whether a config overrode it.
+
+    The version comes from the code, not from a config default. MAAP keeps
+    every registered version, so asking for an old one succeeds and runs an
+    old image -- a config that silently disagreed with the deployed packages
+    would be indistinguishable from a working one. An explicit override is
+    still allowed (rolling back, or testing a package deployed from another
+    checkout), but it has to be deliberate and it says so.
+
+    Shared with main() so that --dry-run can report the version without
+    building a client: resolving it only inside build_client() meant the plan
+    never named the version, and a plan that does not say which code it will
+    run cannot be checked before a long backfill.
+    """
+    override = (config.get("maap") or {}).get("algorithm_version")
+    if override and str(override) != ALGORITHM_VERSION:
+        return str(override), True
+    return ALGORITHM_VERSION, False
+
+
+def build_client(config: Dict, args):
+    """Construct the real client from config plus CLI overrides."""
+    from mur_maap.client import MaapPyClient
+
+    maap_cfg = config.get("maap", {})
+    queue = args.queue or maap_cfg.get("queue")
+    if not queue or _is_placeholder(queue):
+        raise SystemExit(
+            f"No usable DPS queue (got {queue!r}). Set maap.queue in the config "
+            f"or pass --queue. Ask MAAP ops which queues you may use; MRVA needs "
+            f"the large one.")
+
+    root = maap_cfg.get("workspace_root")
+    if root and _is_placeholder(root):
+        raise SystemExit(
+            f"maap.workspace_root is still a placeholder ({root!r}). Get the real "
+            f"value from:  python utils/upload_static_resources.py --check")
+
+    l2p = config.get("l2p", {})
+    sensor_collections = {
+        s: cfg.get("collection_name", [])
+        for s, cfg in (l2p.get("sensors") or {}).items()
+    }
+
+    version, _ = resolve_version(config)
+    if version != ALGORITHM_VERSION:
+        logger.warning(
+            "config pins algorithm_version %s, but this checkout builds %s. "
+            "Jobs will run the %s packages, which were deployed from a "
+            "different revision of this repo.",
+            version, ALGORITHM_VERSION, version)
+
+    queues = None if args.queue else maap_cfg.get("queues")
+    _warn_about_broken_queues(queue, queues)
+
+    return MaapPyClient(
+        queue=queue,
+        version=version,
+        sensor_collections=sensor_collections,
+        granule_workdir=args.granule_workdir,
+        # An explicit --queue wins outright, per-process overrides included.
+        # Without this it only replaced maap.queue, so maap.queues["mur-mrva"]
+        # still sent MRVA to its own pool -- and "run this stage on that queue"
+        # is the single reason anyone passes the flag. It is how you find out
+        # whether a failure belongs to the job or to the worker pool: put a
+        # small, known-good job on the suspect queue and see what happens.
+        queues=queues,
+        granule_staging=args.granule_staging or maap_cfg.get(
+            "granule_staging", "workspace"),
+        collection_filter=args.collection,
+        poll_interval=args.poll_interval,
+        dedup=args.dedup,
+        data_root=root,
+    )
+
+
+# Roughly what each module asks for, so a queue listing can be read against
+# something. From the ram_min/cores_min in maap/*/algorithm_config.yml.
+MODULE_NEEDS = {
+    "mur-iquam":   "4 GiB / 1 core",
+    "mur-landice": "6 GiB / 2 cores",
+    "mur-l2p":     "8 GiB / 2 cores",
+    "mur-mrva":    "31+ GiB / 16 cores (see the note below)",
+}
+
+
+# The queue-listing endpoint is admin-gated (401 "Insufficient permissions"
+# for an ordinary account), so these are the names shown in the Jobs UI's
+# Resource dropdown. Used only when the live listing is unavailable, and
+# they are a convenience rather than a source of truth -- the dropdown is.
+KNOWN_QUEUES = [
+    "maap-dps-sandbox",
+    "maap-dps-worker-8gb",
+    "maap-dps-worker-16gb",
+    "maap-dps-worker-32gb",
+    "maap-dps-worker-64gb",
+    "maap-dps-worker-32vcpu-64gb",
+]
+
+
+def fetch_queues(verbose: bool = False):
+    """Queue names for this account, or None if they cannot be read.
+
+    `verbose` reports WHY rather than falling back silently -- a 401 here is
+    expected for a non-admin account and worth saying out loud, since
+    otherwise it looks like the queues do not exist.
+    """
+    import requests
+
+    try:
+        from maap.maap import MAAP
+        maap = MAAP()
+    except Exception as exc:                              # noqa: BLE001
+        if verbose:
+            print(f"  cannot reach MAAP: {exc}")
+        return None
+
+    url = f"{maap.config.maap_api_root.rstrip('/')}/admin/job-queues"
+    try:
+        resp = requests.get(url, headers=maap._get_api_header(), timeout=30)
+        if resp.status_code != 200:
+            if verbose:
+                print(f"  {url}")
+                print(f"  HTTP {resp.status_code}: {resp.text.strip()[:200]}")
+                if resp.status_code in (401, 403):
+                    print("  (this endpoint is admin-only; using the known names)")
+            return None
+        body = resp.json()
+    except Exception as exc:                              # noqa: BLE001
+        if verbose:
+            print(f"  queue listing failed: {exc}")
+        return None
+
+    entries = body.get("queues", body) if isinstance(body, dict) else body
+    names = []
+    for q in entries or []:
+        name = q.get("queue_name") or q.get("name") or q.get("id") if isinstance(q, dict) else q
+        if name:
+            names.append(str(name))
+    return sorted(set(names)) or None
+
+
+def _choose(prompt, options, default=None):
+    """Numbered pick, or free text. Returns the default with no terminal.
+
+    The options are printed either way: run non-interactively, seeing what
+    was available is still the useful half.
+    """
+    import sys as _sys
+    for i, opt in enumerate(options, 1):
+        print(f"  {i:>2}. {opt}")
+    if not _sys.stdin.isatty():
+        print(f"{prompt}: (no terminal; leaving it unset)")
+        return None
+    suffix = f" [{default}]" if default else ""
+    raw = input(f"{prompt}{suffix}: ").strip()
+    if not raw:
+        return default
+    if raw.isdigit() and 1 <= int(raw) <= len(options):
+        return options[int(raw) - 1]
+    return raw                       # a name typed in full
+
+
+def list_queues() -> int:
+    """Print the DPS queues this account can submit to.
+
+    A queue picks a pool of VMs, not a container size. The distinction matters
+    for reading a memory failure. _docker_params.json shows two containers per
+    job on one machine, both mounting /run/user/1000/docker.sock as
+    /var/run/docker.sock: MAAP's DPS wrapper, which runs cwltool, and ours,
+    which cwltool starts BESIDE it through that socket rather than inside it.
+
+    So the number in a queue name is the VM's RAM, shared with MAAP's wrapper,
+    the HySDS agents and the OS -- on maap-dps-worker-32gb that left 29.3 of
+    31.0 GiB free before our container started. And cwltool passes no --memory
+    (it says so once per run), so there is no cgroup limit to hit: an exit 137
+    is the VM's kernel OOM killer, and the VM's physical RAM is the only
+    ceiling.
+
+    It is also why a job can fail with our image never downloaded. docker pull
+    is issued by the host daemon through that socket, so a worker whose socket
+    the wrapper cannot open fails before any of our code exists on it.
+
+    MRVA needs a large VM; landice, iquam and l2p do not.
+    """
+    import requests
+
+    try:
+        from maap.maap import MAAP
+        maap = MAAP()
+    except Exception as exc:                              # noqa: BLE001
+        raise SystemExit(
+            f"Could not reach MAAP ({exc}). Run this inside a MAAP workspace.")
+
+    url = f"{maap.config.maap_api_root.rstrip('/')}/admin/job-queues"
+    resp = requests.get(url, headers=maap._get_api_header())
+    print(f"{url}\nHTTP {resp.status_code}\n")
+
+    if resp.status_code != 200:
+        print(resp.text.strip()[:300])
+        if resp.status_code in (401, 403):
+            # Expected for a non-admin account, and there is no non-admin
+            # endpoint to fall back to. Checked against maap-api-nasa:
+            #
+            #   /admin/job-queues              admin only (this 401)
+            #   /organizations                 every org on the platform,
+            #                                  not the ones you belong to
+            #   /organizations/<id>/job_queues joins JobQueue and then
+            #                                  returns only {'org_id': ...},
+            #                                  no names; its docstring says
+            #                                  "Retrieve organization
+            #                                  members", so it looks like a
+            #                                  copy-paste bug
+            #
+            # A probe submission was tried here and removed: submit_job wants
+            # a numeric algorithm id, so getting the rejection that lists the
+            # queues means building a near-complete submission, and a bad one
+            # fails in MAAP's auth layer with a 500 that explains nothing.
+            # Too fragile to be worth more than pointing at the UI.
+            print("\nThat endpoint is admin-only, and MAAP has no non-admin")
+            print("one that lists your queues. The authoritative list is the")
+            print("Jobs UI: Launcher -> Submit Jobs -> Resource. It is already")
+            print("filtered to your organization, so what it shows is what you")
+            print("may use.")
+            print("\nNames seen there before (remembered, NOT authoritative):\n")
+            for q in KNOWN_QUEUES:
+                print(f"  {q}")
+            print("\nYou do not need to request a queue to find out whether")
+            print("you have it: MAAP refuses one you lack with HTTP 400 and")
+            print("names the valid ones in the message. A job that starts at")
+            print("all is a queue you already have.")
+            _print_sizing_note()
+            return 0
+        return 1
+
+    try:
+        body = resp.json()
+    except ValueError:
+        print(resp.text[:600])
+        return 1
+
+    queues = body.get("queues", body) if isinstance(body, dict) else body
+    if not queues:
+        print("No queues returned. Check the Jobs UI's Resource dropdown.")
+        return 1
+
+    import json as _json
+    print(_json.dumps(queues, indent=2)[:4000])
+    _print_sizing_note()
+    return 0
+
+
+def _print_sizing_note() -> None:
+    print()
+    for module, need in MODULE_NEEDS.items():
+        print(f"  {module:<14} needs ~{need}")
+    print()
+    print("Put one in the config as maap.queue, and MRVA's in maap.queues.")
+    print()
+    print("mrva's figure is measured, not estimated. Its cost is almost all")
+    print("in the finest level, L=11, where infoMatrix is 24.72 GiB and the")
+    print("whole working set is 28.75 GiB -- plus MATLAB, which stays")
+    print("resident while the Fortran runs. On 2026-09-29 that was killed on")
+    print("a worker reporting 31.0 GiB total and 29.3 GiB free at start.")
+    print("Levels up to L=10 need only 13.84 GiB and complete comfortably.")
+    print()
+    print("Note the units before trusting a queue name. That worker was")
+    print("maap-dps-worker-32gb, and 32gb meant 32 GB = 29.8 GiB, not 32 GiB.")
+    print("The 2.2 GiB difference is roughly the whole shortfall.")
+    print()
+    print("BOTH 64 GB pools are unusable as of 2026-09-25. Every job sent to")
+    print("maap-dps-worker-32vcpu-64gb or maap-dps-worker-64gb dies before our")
+    print("container starts: cwltool -- MAAP's, on the worker, not ours -- gets")
+    print("permission denied on /var/run/docker.sock for both the inspect and")
+    print("the pull, so our image is never even downloaded. The same package")
+    print("succeeds on the small queues minutes either side.")
+    print()
+    print("Two permissions, and only one of them is known good. Submitting is")
+    print("authorised: validate_or_get_queue refuses a queue you lack with")
+    print("HTTP 400 and creates no job, and these jobs got ids and reached a")
+    print("worker. What fails is the job process's permission ON that worker.")
+    print("Whether that is a broken pool or an account not fully provisioned")
+    print("on it is open, and worth asking as the latter.")
+    print()
+    print("A mechanism that fits: _docker_params.json shows a ROOTLESS socket,")
+    print("/run/user/1000/docker.sock, bind-mounted in as /var/run/docker.sock,")
+    print("with the job reporting uid 0. Root would normally bypass the check,")
+    print("so user-namespace remapping would explain it -- root inside mapping")
+    print("to an unprivileged uid outside, unable to open uid 1000's socket. If")
+    print("the small pools and the 64 GB pools differ there, that is a config")
+    print("difference ops can look up rather than reproduce.")
+    print()
+    print("So there is currently no pool that completes a full L=2..11 run.")
+    print("Up to L=10 works on maap-dps-worker-32gb.")
+
+
+def init_config(dest: str) -> int:
+    """Write a MAAP config, filling in what can be discovered.
+
+    The example ships <angle-bracket> placeholders for the two values that
+    vary per account. One of them -- the workspace root -- the credentials
+    call already knows, so asking a human to transcribe it is an invitation
+    to typo it. The queue genuinely has to come from MAAP ops.
+    """
+    import json
+    import shutil
+
+    target = pathlib.Path(dest)
+    if target.exists():
+        raise SystemExit(f"{target} already exists; not overwriting it.")
+
+    example = pathlib.Path(__file__).parent / "config.maap.example.json"
+    config = json.loads(example.read_text())
+
+    try:
+        from mur_maap.workspace import WorkspaceBucket
+        from maap.maap import MAAP
+
+        # The personal workspace, not a team bucket the account may also be
+        # listed for: a listing is not access (see config.maap.example.json's
+        # _workspace_root_note). Moving later is a one-line workspace_root
+        # edit; static_resources_dir follows it (mur_config).
+        path = WorkspaceBucket(MAAP()).path()
+        config.setdefault("maap", {})["workspace_root"] = path.uri
+        config["maap"]["username"] = path.prefix.strip("/")
+        discovered = path.uri
+    except Exception as exc:                              # noqa: BLE001
+        discovered = None
+        print(f"Could not reach MAAP to discover the workspace root ({exc}).")
+        print("Writing the template with placeholders instead.")
+
+    # Choosing a queue is the one value that cannot be discovered, so offer
+    # the list rather than leaving a placeholder to look up separately.
+    # Admin listing first; then the rejection probe, which is the only
+    # thing that works for an ordinary account; then the hard-coded
+    # names, which are a convenience and have been wrong before.
+    queues = fetch_queues(verbose=True) or KNOWN_QUEUES
+    if queues:
+        print("\nDPS queues available to you. A queue picks a VM pool; the\nnumber in the name is the machine's RAM, shared with MAAP's own\nagents on it:")
+        for module, need in MODULE_NEEDS.items():
+            print(f"    {module:<14} needs ~{need}")
+        print()
+        picked = _choose("Queue for landice, iquam and l2p", queues,
+                         default=queues[0])
+        if picked:
+            config.setdefault("maap", {})["queue"] = picked
+            print()
+            print("MRVA needs far more than the others. Choose its queue")
+            print("(Enter to reuse the same one):")
+            mrva = _choose("Queue for mrva", queues, default=picked)
+            if mrva and mrva != picked:
+                config["maap"].setdefault("queues", {})["mur-mrva"] = mrva
+
+    target.write_text(json.dumps(config, indent=2) + "\n")
+    print(f"\nwrote {target}")
+    if discovered:
+        print(f"  workspace_root       {discovered}")
+        print(f"  static_resources_dir {discovered}/mur/static-resources")
+    queue = config.get("maap", {}).get("queue")
+    if _is_placeholder(queue):
+        print()
+        print("Still to fill in:")
+        print("  maap.queue   run --list-queues, or see the Jobs UI's Resource")
+        print("               dropdown. MRVA needs 64 GiB and 16 cores.")
+    else:
+        print(f"  queue                {queue}")
+        override = config.get("maap", {}).get("queues", {}).get("mur-mrva")
+        if override:
+            print(f"  queue (mrva)         {override}")
+    return 0
+
+
+def _report_interrupt(client) -> None:
+    """On Ctrl-C, say what is still running and how to get back to it."""
+    jobs = getattr(client, "_job_process", {}) or {}
+    print()
+    print("Interrupted. The jobs below were submitted and are STILL RUNNING on")
+    print("DPS -- stopping this process does not stop them.")
+    if jobs:
+        print()
+        for job_id, process in jobs.items():
+            print(f"  {process:<12} {job_id}")
+    print()
+    print("To check on them:")
+    print("    maap.get_job_status('<job id>')")
+    print("To stop them:")
+    print("    maap.cancel_job('<job id>')")
+    print("To find them again after this terminal is gone, open the job's")
+    print("batch at https://console.maap-project.org/batches (MUR-L2P,")
+    print("MUR-MRVA, ...), or:")
+    print("    maap.list_jobs(tag='MUR-<STAGE>')")
+    print()
+    print("Re-running is safe: completed work is reused rather than redone,")
+    print("and dedup suppresses an identical resubmission.")
+
+
+def parse_args(argv=None):
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="run_mur_maap.py",
+        description="Run the MUR SST pipeline on MAAP DPS, from a MAAP workspace.",
+        epilog=(
+            "Run this inside a MAAP workspace. Authentication is ambient there, "
+            "and granule staging needs the Earthdata credentials that live in "
+            "the workspace.\n\n"
+            "  python run_mur_maap.py --config config.maap.json\n"
+            "  python run_mur_maap.py --config config.maap.json --dry-run\n"
+            "  python run_mur_maap.py --config config.maap.json -p -1\n"
+            "  python run_mur_maap.py --config config.maap.json -p -1 "
+            "--execute landice,iquam\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
+    )
+    # Not required for --list-queues, which needs no config at all.
+    parser.add_argument("--config", help="MAAP config JSON.")
+    parser.add_argument("--list-queues", action="store_true",
+                        help="List the DPS queues available to this account, then "
+                             "exit. A queue picks the pool of VMs a job runs on.")
+    parser.add_argument("--init-config", action="store_true",
+                        help="Write --config from the shipped example, filling in "
+                             "the workspace root from your MAAP credentials, then "
+                             "exit.")
+    parser.add_argument("--date", help="Treat this YYYY-MM-DD as the run day.")
+    parser.add_argument("-p", "--process-days", default=DEFAULT_PROCESS_DAYS,
+                        help="Offset(s) from the run day: -1, or a range. A range "
+                             "needs an equals sign -- -p=-9:-1 -- because argparse "
+                             "reads a bare -9:-1 as an option. The default is "
+                             "nrtMRVA.py's daily sweep: Final runs for T-9..T-4 "
+                             "(a day whose Final granule exists is kept), Interim "
+                             "runs for T-3..T-1 (default: %(default)s).")
+    parser.add_argument("--execute",
+                        help="Comma-separated stages to run: landice,iquam,l2p,mrva,cog. "
+                             "Default: all. MRVA needs l2p's outputs, so excluding "
+                             "l2p while including mrva will fail.")
+    parser.add_argument("--sensors", help="Comma-separated sensor subset.")
+    parser.add_argument("--collection", help="Only this PO.DAAC collection.")
+    parser.add_argument("--queue",
+                        help="Force every job onto this DPS queue, overriding "
+                             "both maap.queue and maap.queues. Mainly a "
+                             "diagnostic: it lets a known-good stage be run on "
+                             "a suspect worker pool.")
+    parser.add_argument("--granule-staging", choices=("workspace", "direct"),
+                        help="Obsolete; both values do the same thing. The "
+                             "container fetches PO.DAAC granules itself, minting "
+                             "DAAC credentials from MAAP_PGT, so nothing is "
+                             "copied into the workspace bucket. Kept so existing "
+                             "configs and scripts keep working.")
+    parser.add_argument("--granule-workdir",
+                        help="Obsolete; nothing is downloaded here any more.")
+    parser.add_argument("--poll-interval", type=float, default=30.0,
+                        help="Seconds between job status checks (default: %(default)s).")
+    parser.add_argument("--dedup", action="store_true",
+                        help="Let MAAP skip a job identical to an earlier one. "
+                             "Off by default: a deduped job returns a new id "
+                             "with no DPS output behind it, so its results "
+                             "cannot be read and the run fails on the next "
+                             "stage.")
+    parser.add_argument("--no-dedup", action="store_true",
+                        help=argparse.SUPPRESS)   # now the default; kept so
+                                                  # existing commands still run
+    parser.add_argument("--trust-cached-bics", action="store_true",
+                        help="Reuse any cached BIC once its day is past `stable`. "
+                             "By default a BIC written fewer than its sensor's "
+                             "`stable` days after the day it describes is "
+                             "rebuilt once: it was made from granules PO.DAAC "
+                             "was still ingesting.")
+    parser.add_argument("--rebuild-stale-bics", action="store_true",
+                        help=argparse.SUPPRESS)   # now the default; kept so
+                                                  # existing commands still run
+    parser.add_argument("--rerun-final", action="store_true",
+                        help="Re-analyse a Final (REA) day even when its granule "
+                             "already exists. Without it such a day is kept, as "
+                             "nrtMRVA.py keeps it.")
+    parser.add_argument("--force-nrt", action="store_true",
+                        help="Process every day in NRT mode.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print the plan and exit. Needs no credentials.")
+    parser.add_argument("--debug", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    if not args.config and not args.list_queues:
+        raise SystemExit("--config is required (except with --list-queues).")
+    logging.basicConfig(
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+        level=logging.DEBUG if args.debug else logging.INFO,
+    )
+
+    if args.list_queues:
+        return list_queues()
+
+    if args.init_config:
+        return init_config(args.config)
+
+    try:
+        config = mur_config.load_config(args.config)
+    except FileNotFoundError:
+        example = pathlib.Path(__file__).parent / "config.maap.example.json"
+        raise SystemExit(
+            f"{args.config} does not exist.\n\n"
+            f"  python run_mur_maap.py --config {args.config} --init-config\n\n"
+            f"writes one, discovering the workspace root from your MAAP\n"
+            f"credentials. It leaves maap.queue for you to fill in -- ask MAAP\n"
+            f"ops which queues you may use.\n\n"
+            f"Or copy {example.name} and edit it by hand.")
+    if args.date:
+        mur_date.set_simulated_date(datetime.date.fromisoformat(args.date))
+
+    offsets = parse_process_days(args.process_days)
+    reference_today = mur_date.today()
+    days = [reference_today + datetime.timedelta(days=o) for o in offsets]
+    _, day1, _ = mur_window.calculate_processing_window(reference_today)
+
+    if args.sensors:
+        wanted = [s.strip().upper() for s in args.sensors.split(",") if s.strip()]
+        config["l2p"]["active_sensors"] = [
+            s for s in config["l2p"]["active_sensors"] if s in wanted]
+
+    print(f"run day        {reference_today}")
+    print(f"analysis days  {', '.join(str(d) for d in days)}")
+    for d in days:
+        print(f"  {d}  {mur_window.mode_for(d, day1, force_nrt=args.force_nrt)}")
+    print(f"sensors        {', '.join(config['l2p']['active_sensors'])}")
+    version, pinned = resolve_version(config)
+    note = " (pinned by config)" if pinned else " (from this checkout)"
+    print(f"version        {version}{note}")
+
+    # Loaded here rather than at import so that --dry-run reports the
+    # provenance without needing a token, and a real run fails with the
+    # reason rather than an Unauthorized from deep inside maap-py.
+    token_source = auth.load(warn=logger.warning)
+    print(f"token          {token_source or 'NOT FOUND'}")
+
+    _print_job_plan(config, days, reference_today, args)
+
+    if args.dry_run:
+        # Deliberately offline: exercises the window maths, the config and the
+        # sensor selection without credentials or a single API call.
+        print("\ndry run: nothing submitted")
+        return 0
+
+    client = build_client(config, args)
+    orchestrator = MAAPOrchestrator(
+        config, client,
+        force_nrt=args.force_nrt,
+        rebuild_stale_bics=not args.trust_cached_bics,
+        today_fn=lambda: reference_today,     # frozen: a run must not drift
+        stages=args.execute.split(",") if args.execute else None,
+        rerun_final=args.rerun_final,
+    )
+
+    failed = []
+    try:
+        for day in days:
+            mode = mur_window.mode_for(day, day1, force_nrt=args.force_nrt)
+            logger.info("=== %s (%s) ===", day, mode)
+            try:
+                result = orchestrator.run_day(day, mode)
+                logger.info("    done: %s", result.netcdf_href)
+            except Exception as exc:                      # noqa: BLE001
+                logger.error("    %s FAILED: %s", day, exc)
+                if args.debug:
+                    logger.exception("full traceback")
+                failed.append((day, exc))
+    except KeyboardInterrupt:
+        # Interrupting stops the POLLING, not the jobs -- they run on DPS and
+        # keep going. Their ids live only in this process, so print them or
+        # they are lost and the work becomes untrackable.
+        _report_interrupt(client)
+        return 130
+
+    if failed:
+        print(f"\n{len(failed)} of {len(days)} day(s) failed:")
+        for day, exc in failed:
+            print(f"  {day}: {exc}")
+        return 1
+    print(f"\n{len(days)} day(s) complete")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

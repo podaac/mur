@@ -59,14 +59,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
 
-# Copy custom MATLAB Runtime installer from builder stage
-COPY --from=builder /tmp/runtime_installer/ /tmp/runtime_installer/
-
 # Install custom MATLAB Runtime
-RUN cd /tmp/runtime_installer && \
+# The installer is bind-mounted from the builder stage, not COPY'd: a COPY
+# leaves the ~640 MiB installer in its own layer of the final image, and a
+# later rm only hides it. rw lets the installer write beside itself; those
+# writes are discarded with the mount. Needs BuildKit (default since Docker 23).
+RUN --mount=type=bind,from=builder,source=/tmp/runtime_installer,target=/tmp/runtime_installer,rw \
+    cd /tmp/runtime_installer && \
     chmod +x landice_runtime.install && \
-    ./landice_runtime.install -mode silent -agreeToLicense yes -destinationFolder /opt/matlabruntime && \
-    rm -rf /tmp/runtime_installer
+    ./landice_runtime.install -mode silent -agreeToLicense yes -destinationFolder /opt/matlabruntime
 
 # Create application directory
 RUN mkdir -p /opt/landice/bin
@@ -111,6 +112,9 @@ WORKDIR /data
 # it has to persist into this final image rather than living only in the
 # builder stage.
 COPY common/bin/localize.sh /opt/common/bin/localize.sh
+# Mints DAAC credentials from a MAAP token, so the container can read
+# a bucket its own role cannot. stdlib only -- no new dependencies.
+COPY common/bin/maap_credentials.py /opt/common/bin/maap_credentials.py
 RUN chmod +x /opt/common/bin/localize.sh
 
 # Entrypoint wrapper script (source: landice/bin/entrypoint.sh).
@@ -135,6 +139,11 @@ ENTRYPOINT ["/opt/landice/bin/entrypoint.sh"]
 CMD []
 
 # Labels for metadata
+# org.opencontainers.image.source connects the pushed package to the
+# repository on GHCR. Images are pushed by hand (no CI can reach the JPL
+# licence servers), so without this label a package lands unlinked and has
+# to be connected through the web UI.
+LABEL org.opencontainers.image.source="https://github.com/podaac/mur"
 LABEL description="MUR LANDICE Processing Module - Container Wrapper"
 LABEL version="2.1"
 LABEL maintainer="MUR Team"

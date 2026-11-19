@@ -51,7 +51,30 @@ def normalize_config(raw: Dict[str, Any]) -> Dict[str, Any]:
             continue
         if canonical not in block and alias in block:
             block[canonical] = block[alias]
+    _default_static_resources(config)
     return config
+
+
+# Where static resources live relative to maap.workspace_root, unless a
+# section names its own static_resources_dir.
+STATIC_RESOURCES_SUBDIR = "mur/static-resources"
+
+
+def _default_static_resources(config: Dict[str, Any]) -> None:
+    """Fill landice/mrva static_resources_dir from maap.workspace_root.
+
+    So that moving the MAAP data -- personal workspace to a team bucket, or
+    back -- is one edit to workspace_root, not three that must agree. An
+    explicit static_resources_dir still wins; a config with no MAAP root
+    (the local pipeline's) is untouched.
+    """
+    root = str((config.get("maap") or {}).get("workspace_root") or "").rstrip("/")
+    if not root.startswith("s3://"):
+        return
+    for section in ("landice", "mrva"):
+        block = config.setdefault(section, {})
+        if isinstance(block, dict) and not block.get("static_resources_dir"):
+            block["static_resources_dir"] = f"{root}/{STATIC_RESOURCES_SUBDIR}"
 
 
 def get(config: Dict[str, Any], section: str, key: str, default: Any = None) -> Any:

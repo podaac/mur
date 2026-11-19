@@ -1,0 +1,723 @@
+"""The real MAAPClient, against maap-py and boto3.
+
+Every shape here was observed from a live job rather than inferred from
+documentation, because the documentation and maap-py's own docstrings
+disagree in several places. What was checked, and where it bit:
+
+  submit_job     returns {"jobID": "<uuid>", "processID": 65,
+                 "status": "accepted"}. OGC API Processes names it jobID;
+                 MAAP's examples show id. Reading the wrong one yields None
+                 and a 404 no-such-job much later.
+
+  process_id     is the NUMERIC processID from the catalogue, not the `id`
+                 field (the algorithm name) and not a tag-like name:version.
+                 Re-registering at a new version mints a new processID.
+
+  get_job_result returns a DIRECTORY prefix, not named outputs -- so a named
+                 output is found by listing and matching (mur_maap/outputs.py).
+                 Asking before the job is terminal returns HTTP 500 with
+                 "'NoneType' object has no attribute 'get'", so status is
+                 checked first.
+
+  the s3:// link is s3://<endpoint>:80/<bucket>/<key>, not
+                 s3://<bucket>/<key>.
+
+`import maap` happens inside __init__, never at module import, so this module
+and its tests load on a machine with no maap-py.
+"""
+import datetime
+import json
+import logging
+import time
+from typing import Any, Dict, Iterable, List, Optional
+
+from run_mur_maap import MAAPClient
+
+from . import outputs as _outputs
+from . import stac as _stac
+from . import tags
+from .workspace import WorkspaceBucket, split_s3_uri
+
+logger = logging.getLogger(__name__)
+
+
+class GranuleSensorUnknown(RuntimeError):
+    pass
+
+# "deduped" means MAAP refused to run the job because an identical
+# submission already exists -- so the work is done, by that earlier job. It is
+# terminal: it never becomes anything else. Observed on a real run, where it
+# matched none of these sets and wait_all polled it forever.
+DEDUPED = {"deduped", "job-deduped", "duplicate"}
+TERMINAL_OK = {"successful", "succeeded", "success", "completed", "done"} | DEDUPED
+TERMINAL_BAD = {"failed", "dismissed", "deleted", "cancelled", "revoked", "error"}
+# A job MAAP has accepted but not yet made visible on /ogc/jobs/<id>. The
+# submit returns a job id before the job is queryable, so the first few polls
+# can 404. That is a normal early state, not an error and not a status.
+
+def _result_failure_hint(status: str, detail: Optional[str]) -> str:
+    """What the operator should actually do about a failed result lookup."""
+    if status in DEDUPED:
+        return (
+            "This job was DEDUPED: MAAP matched it to an identical earlier "
+            "submission instead of running it, so it has no DPS output of "
+            "its own and never appears under 'View My Jobs'. Re-run with "
+            "--no-dedup.")
+    if detail and "NoneType" in detail:
+        return (
+            "MAAP crashed server-side looking this job up, which usually "
+            "means there is no DPS record behind the id -- check whether the "
+            "job appears under 'View My Jobs', and if it does not, re-run "
+            "with --no-dedup.")
+    return "The job itself may be fine -- this is the result lookup failing."
+
+
+UNINDEXED = "not-yet-indexed"
+
+ACTIVE = {"accepted", "queued", "running", "started", "offline", UNINDEXED}
+
+# How long a job may stay invisible before that stops being a timing artifact.
+UNINDEXED_GRACE_SECONDS = 900
+
+
+# requests.RequestException subclasses OSError, so one catch covers a DNS
+# failure, a refused connection, a read timeout and a dropped socket alike --
+# without importing requests here, which is maap-py's dependency, not ours.
+TRANSIENT_ERRORS = (OSError,)
+
+API_RETRIES = 4
+API_RETRY_DELAY = 5.0
+
+# The result fetch gets a longer budget than an ordinary call. It is
+# asked once per job, at the end of a wait that may have run half an
+# hour, and losing it throws away every job behind it -- so it is worth
+# waiting out an indexing lag or a server-side blip rather than giving
+# up in thirty seconds.
+RESULT_RETRIES = 6
+RESULT_RETRY_DELAY = 10.0
+
+
+def _retrying(what: str, call, *, retries: Optional[int] = None,
+              delay: Optional[float] = None):
+    """Run `call`, retrying a transient network failure.
+
+    A workspace's DNS is not perfectly reliable, and a run that polls twenty
+    jobs every thirty seconds for an hour makes thousands of API calls. One of
+    them failing must not end the run:
+
+        Failed to resolve 'api.maap-project.org'
+        ([Errno -3] Temporary failure in name resolution)
+
+    killed a real run that had eleven healthy jobs on DPS, which then carried
+    on with nothing watching them.
+    """
+    import time as _time
+
+    # Read the module values at CALL time, not as default arguments: a
+    # default is bound at import, so setting mur_maap.client.API_RETRY_DELAY
+    # -- which is the obvious way to make a test not sleep, or to slow
+    # retries down in the field -- would have no effect at all.
+    retries = API_RETRIES if retries is None else retries
+    delay = API_RETRY_DELAY if delay is None else delay
+
+    for attempt in range(1, retries + 1):
+        try:
+            return call()
+        except TRANSIENT_ERRORS as exc:
+            if attempt == retries:
+                raise
+            wait = delay * attempt
+            logger.warning("    %s failed (%s); retry %d/%d in %.0fs",
+                           what, type(exc).__name__, attempt, retries - 1, wait)
+            _time.sleep(wait)
+
+
+def normalize_status(raw: Any) -> str:
+    """Lowercase status from whatever shape the API returned.
+
+    An unrecognized value is reported as-is rather than coerced to a terminal
+    state -- treating an unknown as "failed" would abandon a running job, and
+    as "succeeded" would read results that do not exist.
+    """
+    if isinstance(raw, dict):
+        raw = raw.get("status", raw.get("state", ""))
+    return str(raw or "").strip().lower()
+
+
+class MaapPyClient(MAAPClient):
+    """MAAPClient over maap-py + boto3.
+
+    `algorithms` maps the process names run_mur_maap.py submits against
+    ("mur-landice") to numeric processIDs. Pass it explicitly, or let
+    resolve_algorithms() look them up.
+    """
+
+    def __init__(
+        self,
+        maap=None,
+        *,
+        algorithms: Optional[Dict[str, int]] = None,
+        queue: str,
+        queues: Optional[Dict[str, str]] = None,
+        version: str,
+        workspace=None,
+        # Off, and not a tuning knob. MAAP's dedup does not reuse the
+        # earlier job's OUTPUTS -- it returns a new id with status "deduped"
+        # that has no DPS record, is absent from "View My Jobs", and 500s on
+        # get_job_result. Every job this pipeline submits has its outputs read
+        # by a later stage, so a deduped job is indistinguishable from a lost
+        # one. See _job_listing.
+        dedup: bool = False,
+        poll_interval: float = 30.0,
+        sensor_collections: Optional[Dict[str, List[str]]] = None,
+        granule_workdir=None,
+        collection_filter: Optional[str] = None,
+        granule_staging: str = "workspace",
+        data_root: Optional[str] = None,
+    ):
+        if maap is None:                       # imported lazily on purpose
+            from maap.maap import MAAP
+            maap = MAAP()
+        self.maap = maap
+        self.queue = queue
+        # MRVA needs a 64 GiB queue; the other three fit on small ones. A
+        # single queue for all four either wastes a large worker on iquam or
+        # fails MRVA at the very end, after everything else has succeeded.
+        self.queues = dict(queues or {})
+        self.version = str(version)
+        self.dedup = dedup
+        self.poll_interval = poll_interval
+        self.workspace = workspace if workspace is not None else WorkspaceBucket(maap)
+        self.algorithms = dict(algorithms) if algorithms else {}
+        self._result_cache: Dict[str, List[str]] = {}
+        self._prefix_cache: Dict[str, str] = {}
+        self._job_process: Dict[str, str] = {}
+        # Staged granules are keyed by sensor, but run_day() only passes a
+        # collection list, so the mapping has to come from config.
+        self.sensor_collections = sensor_collections or {}
+        self.granule_workdir = granule_workdir
+        # "direct" hands L2P PO.DAAC's own s3:// hrefs -- no copy, but a real
+        # job showed the worker's role gets 403 Forbidden on
+        # podaac-ops-cumulus-protected. Kept for when that changes.
+        self.granule_staging = granule_staging
+        if granule_staging == "direct":
+            logger.warning(
+                "granule_staging=direct: a DPS worker reads S3 as its own role, "
+                "which was observed to get 403 Forbidden on PO.DAAC. L2P will "
+                "fail in localize_all_inputs. Use workspace mode unless testing "
+                "whether that has changed.")
+        self.collection_filter = collection_filter
+        # Where write_manifest() puts things: the config's maap.workspace_root,
+        # which may be a team bucket (s3://mur-sst) rather than this account's
+        # own prefix. None keeps the personal prefix.
+        self.data_root = data_root.rstrip("/") if data_root else None
+
+    @property
+    def username(self) -> str:
+        """This account's MAAP username: its personal workspace prefix.
+
+        Asked of the credentials, not read off the data root, because with
+        the data in a team bucket the root no longer contains it.
+        """
+        return self.workspace.path().prefix.strip("/")
+
+    def team_root(self, match: Optional[str] = None) -> Optional[str]:
+        """s3:// root of a team bucket this account is authorized for, or None.
+
+        Found among the credentials' authorized paths (see
+        WorkspaceBucket.org_path), so no bucket name lives in the repo.
+        """
+        path = self.workspace.org_path(match)
+        return path.uri if path else None
+
+    # -- algorithms ---------------------------------------------------------
+
+    def resolve_algorithms(self, names: Iterable[str]) -> Dict[str, int]:
+        """Look up numeric processIDs for "mur-landice" and friends.
+
+        Filters by version: several versions of one algorithm can be
+        registered simultaneously and each has its own processID, so an
+        unfiltered lookup could silently run last month's package.
+
+        The same name and version can ALSO be registered more than once --
+        deploying again after fixing a CWL does not replace the old
+        registration, it adds another, each with its own processID and its own
+        frozen copy of the CWL. Picking positionally out of the listing would
+        then run whichever MAAP happened to return first, which may be the
+        registration pointing at the old dockerPull. processIDs increment, so
+        the largest is the most recent deployment; say so when there is a
+        choice, because a stale duplicate is otherwise invisible.
+        """
+        for name in names:
+            resp = self.maap.list_algorithms()
+            body = resp.json() if resp.content else {}
+            # A bare list, not {"processes": [...]}: body.get would raise
+            # before the isinstance default is consulted -- that default only
+            # applies when body IS a dict lacking the key.
+            procs = body if isinstance(body, list) else body.get("processes", [])
+            match = [
+                p for p in procs
+                if p.get("id") == name and str(p.get("version")) == self.version
+            ]
+            if not match:
+                versions = sorted({str(p.get("version")) for p in procs
+                                   if p.get("id") == name})
+                raise LookupError(
+                    f"{name} v{self.version} is not registered"
+                    + (f"; registered versions: {versions}" if versions else ""))
+
+            ids = sorted(p["processID"] for p in match)
+            if len(ids) > 1:
+                logger.warning(
+                    "%s v%s is registered %d times (processIDs %s); using %s, "
+                    "the most recent. Older registrations keep their own copy "
+                    "of the CWL, so one of them may still point at a previous "
+                    "image.", name, self.version, len(ids), ids, ids[-1])
+            self.algorithms[name] = ids[-1]
+        return self.algorithms
+
+    def _process_id(self, name: str) -> int:
+        if name not in self.algorithms:
+            self.resolve_algorithms([name])
+        return self.algorithms[name]
+
+    # -- S3 -----------------------------------------------------------------
+
+    def object_exists(self, s3_uri: str) -> bool:
+        return self._head(s3_uri) is not None
+
+    def object_modified(self, s3_uri: str):
+        """LastModified for `s3_uri`, or None if it is not there."""
+        head = self._head(s3_uri)
+        return None if head is None else head.get("LastModified")
+
+    def object_size(self, s3_uri: str) -> Optional[int]:
+        """Size in bytes of `s3_uri`, or None if it is not there."""
+        head = self._head(s3_uri)
+        return None if head is None else head.get("ContentLength")
+
+    def _head(self, s3_uri: str):
+        """The HEAD response, or None for an absent/unreadable object.
+
+        One place, because object_exists() and object_modified() ask the same
+        question of S3 and differ only in what they keep. 403 counts as absent
+        deliberately: the workspace session policy scopes you to your own
+        prefix, so a denied HEAD means "not yours", which for a cache probe is
+        the same answer as "not there".
+        """
+        from botocore.exceptions import ClientError
+        bucket, key = split_s3_uri(s3_uri)
+        try:
+            return self.workspace.s3().head_object(Bucket=bucket, Key=key)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in ("404", "NoSuchKey", "403", "AccessDenied", "NotFound"):
+                return None
+            raise
+
+    def list_objects(self, prefix: str) -> List[str]:
+        bucket, key_prefix = (split_s3_uri(prefix) if prefix.startswith("s3://")
+                              else (self.workspace.path().bucket, prefix))
+        s3 = self.workspace.s3()
+        found = []
+        for page in s3.get_paginator("list_objects_v2").paginate(
+                Bucket=bucket, Prefix=key_prefix):
+            for obj in page.get("Contents", []):
+                found.append(f"s3://{bucket}/{obj['Key']}")
+        return found
+
+    def write_manifest(self, prefix: str, manifest: Dict) -> str:
+        if self.data_root:
+            bucket, key = split_s3_uri(f"{self.data_root}/{prefix.lstrip('/')}")
+        else:
+            bucket = self.workspace.path().bucket
+            key = self.workspace.path().key(prefix)
+        self.workspace.s3().put_object(
+            Bucket=bucket, Key=key,
+            Body=json.dumps(manifest, sort_keys=True, indent=2).encode(),
+            ContentType="application/json",
+        )
+        return f"s3://{bucket}/{key}"
+
+    def copy_object(self, src_uri: str, dest_uri: str) -> str:
+        src_bucket, src_key = split_s3_uri(src_uri)
+        dst_bucket, dst_key = split_s3_uri(dest_uri)
+        self.workspace.s3().copy_object(
+            Bucket=dst_bucket, Key=dst_key,
+            CopySource={"Bucket": src_bucket, "Key": src_key},
+        )
+        return dest_uri
+
+    # -- jobs ---------------------------------------------------------------
+
+    def submit_job(self, process_id: str, args: Dict[str, Any], *, tag=None,
+                   dedup: Optional[bool] = None) -> str:
+        pid = self._process_id(process_id)
+        # Two translations on the way out.
+        #
+        # Keys: the orchestrator uses Python-shaped names (landmask_p01_file)
+        # while the CWL declares the container's own flags
+        # (landmask-p01-file). MAAP matches on the declared name and rejects
+        # the submission outright -- "Parameter landmask-p01-file missing from
+        # inputs" -- rather than ignoring the unknown key. No MUR input name
+        # contains an underscore, so the mapping is total.
+        #
+        # Values: every input is declared `string` and becomes a command-line
+        # flag, so ints are stringified here rather than left to the server.
+        inputs = {
+            k.replace("_", "-"): ("" if v is None else str(v))
+            for k, v in args.items()
+        }
+
+        queue = self.queue_for(process_id)
+        resp = self.maap.submit_job(
+            process_id=pid,
+            inputs=inputs,
+            queue=queue,
+            dedup=self.dedup if dedup is None else dedup,
+            tag=tag or tags.batch(process_id),
+        )
+        body = resp.json() if resp.content else {}
+        job_id = next((body[k] for k in ("jobID", "jobId", "job_id", "id")
+                       if body.get(k)), None)
+        if not job_id:
+            raise RuntimeError(
+                f"{process_id}: no job id in the submit response "
+                f"(HTTP {resp.status_code}, keys {sorted(body)}): {body}")
+        self._job_process[job_id] = process_id
+        status = normalize_status(body)
+        # The queue is named on every submit, not just on failure. Which pool
+        # a job landed on is otherwise invisible in the log, and it is the
+        # first thing you need when a job dies for an environmental reason
+        # rather than a scientific one -- the 32vcpu-64gb workers cannot reach
+        # /var/run/docker.sock, so "which queue was that?" has been the opening
+        # question of every mrva post-mortem. It is also the one setting that
+        # lives in the operator's own config.maap.json rather than in this
+        # repo, so the log is the only place the two can be reconciled.
+        if status in DEDUPED:
+            logger.info(
+                "submitted %s -> %s on %s (deduped: MAAP matched an identical "
+                "earlier submission and did NOT run it; the job has no output "
+                "of its own)", process_id, job_id, queue)
+        else:
+            logger.info("submitted %s -> %s on %s", process_id, job_id, queue)
+        return job_id
+
+    def queue_for(self, process_id: str) -> str:
+        """The queue this process should run on, falling back to the default."""
+        return self.queues.get(process_id, self.queue)
+
+    def get_job_status(self, job_id: str) -> str:
+        def call():
+            resp = self.maap.get_job_status(job_id)
+
+            # The HTTP code carries meaning the body does not. A 404 body is
+            # {"status": 404, ...}, and parsing it as a job status produced
+            # the literal status "404" -- which matched no set, so wait_all
+            # polled it forever while warning that it did not recognize it.
+            # It is not a status at all; it means the job is not queryable
+            # yet, which is normal for the first polls after a submit.
+            code = getattr(resp, "status_code", 200)
+            if code == 404:
+                return UNINDEXED
+            if code >= 500:
+                # A server-side blip. Raise so _retrying backs off and tries
+                # again, rather than turning it into a bogus status string.
+                raise OSError(f"MAAP returned HTTP {code} for job {job_id}")
+
+            return normalize_status(resp.json() if resp.content else {})
+        return _retrying(f"status of {job_id}", call)
+
+    def wait_all(self, job_ids: List[str], *, timeout: Optional[float] = None,
+                 raise_on_failure: bool = True) -> Dict[str, str]:
+        """Block until every job is terminal. Returns {job_id: status} for the
+        ones that failed, and raises on any failure unless told not to.
+
+        raise_on_failure=False exists so a caller can salvage what succeeded
+        before deciding whether to go on. Raising immediately discarded the
+        outputs of every job that worked -- see run_day.
+
+        Kept for the existing run_day() flow. It does not survive an
+        interrupted process -- a resumable run needs the state machine, not
+        this.
+        """
+        pending = list(job_ids)
+        total = len(pending)
+        started = time.monotonic()
+        failures = {}
+        # Statuses that are neither terminal nor known-active. Each is warned
+        # about once: an unrecognized status is not treated as terminal (see
+        # normalize_status), so it keeps this loop polling -- forever, if the
+        # status never becomes one we know. Silently is the wrong way to do
+        # that, since from outside it is indistinguishable from a long job.
+        unknown_seen = set()
+        last_report = time.monotonic()
+
+        logger.info("  waiting on %d job(s)", total)
+        # Consecutive sweeps in which every single status check failed. One
+        # such sweep is a blip -- the next one is thirty seconds away, and the
+        # jobs are running on DPS regardless -- so the loop carries on. Only a
+        # sustained outage should end a run, and then it says so.
+        blind_sweeps = 0
+        # When each job was first seen as not-yet-indexed. A job that never
+        # becomes visible is a real failure -- a submission MAAP acknowledged
+        # and then lost -- and waiting forever for it is not better than
+        # saying so.
+        unindexed_since = {}
+        last_status = {}
+
+        while pending:
+            still = []
+            counts = {}
+            errors = 0
+            for jid in pending:
+                try:
+                    status = self.get_job_status(jid)
+                except TRANSIENT_ERRORS as exc:
+                    # Unknown, not failed: abandoning a running job because
+                    # the workspace could not resolve DNS would be a far
+                    # worse answer than looking again shortly.
+                    errors += 1
+                    still.append(jid)
+                    counts["<unreachable>"] = counts.get("<unreachable>", 0) + 1
+                    if errors == 1:
+                        logger.warning(
+                            "    could not reach MAAP for job status (%s); "
+                            "the jobs keep running and this will look again "
+                            "in %.0fs", type(exc).__name__, self.poll_interval)
+                    continue
+                counts[status or "<empty>"] = counts.get(status or "<empty>", 0) + 1
+                last_status[jid] = status
+
+                if status == UNINDEXED:
+                    first = unindexed_since.setdefault(jid, time.monotonic())
+                    waited = time.monotonic() - first
+                    if waited > UNINDEXED_GRACE_SECONDS:
+                        raise RuntimeError(
+                            f"job {jid} has not become visible to MAAP after "
+                            f"{waited / 60:.0f} minutes -- /ogc/jobs/{jid} is "
+                            f"still 404. The submission was accepted and the "
+                            f"job id issued, so this is not a client error; "
+                            f"check the job in the MAAP UI before resubmitting.")
+                else:
+                    unindexed_since.pop(jid, None)
+                if status in TERMINAL_BAD:
+                    failures[jid] = status
+                elif status not in TERMINAL_OK:
+                    still.append(jid)
+                    if status not in ACTIVE and status not in unknown_seen:
+                        unknown_seen.add(status)
+                        logger.warning(
+                            "    job %s reports status %r, which is neither "
+                            "terminal nor a known running state. Still polling; "
+                            "if every job reports this, the run will never "
+                            "finish and mur_maap.client.TERMINAL_OK/ACTIVE need "
+                            "this value.", jid, status)
+            if errors and errors == len(pending):
+                blind_sweeps += 1
+                if blind_sweeps >= 10:
+                    raise RuntimeError(
+                        f"MAAP has been unreachable for {blind_sweeps} "
+                        f"consecutive polls (~{blind_sweeps * self.poll_interval:.0f}s). "
+                        f"{len(pending)} job(s) are still running on DPS and "
+                        f"are NOT cancelled; re-running picks up whatever "
+                        f"finished. Pending: {pending[:5]}"
+                        + (" ..." if len(pending) > 5 else ""))
+            else:
+                blind_sweeps = 0
+
+            done = total - len(still)
+            pending = still
+            if not pending:
+                break
+            if timeout is not None and time.monotonic() - started > timeout:
+                raise TimeoutError(f"jobs still running after {timeout}s: {pending}")
+
+            # A heartbeat, so a long wait is visibly a wait. Without it the
+            # process prints nothing between the last submission and the next
+            # stage, which reads as a hang.
+            now = time.monotonic()
+            if now - last_report >= max(self.poll_interval, 60):
+                last_report = now
+                breakdown = ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
+                logger.info("    %d/%d done after %dm (%s)",
+                            done, total, (now - started) // 60, breakdown)
+            time.sleep(self.poll_interval)
+
+        logger.info("  all %d job(s) terminal after %dm (%d failed)",
+                    total, (time.monotonic() - started) // 60, len(failures))
+
+        # "deduped" is terminal, so the count above says 0 failed -- and then
+        # the run dies minutes later trying to read outputs that do not exist.
+        # Say it here, while the ids are still in hand.
+        deduped = [j for j in job_ids if last_status.get(j) in DEDUPED]
+        if deduped:
+            logger.warning(
+                "  %d job(s) came back DEDUPED and produced no output: %s. "
+                "MAAP reused an earlier identical submission rather than "
+                "running these, and a deduped job has no result to read. "
+                "Re-run without --dedup.",
+                len(deduped), ", ".join(j[:8] for j in deduped))
+
+        if failures and raise_on_failure:
+            # The ids alone are not a diagnosis, and this is where a run ends,
+            # so say how to get one rather than leaving the reader holding
+            # twenty UUIDs.
+            listed = "\n".join(f"  {jid}  [{status}]"
+                                for jid, status in failures.items())
+            raise RuntimeError(
+                f"{len(failures)} job(s) failed:\n{listed}\n\n"
+                f"Logs:\n  python utils/job_logs.py "
+                f"{' '.join(list(failures)[:3])}"
+                + (" ..." if len(failures) > 3 else ""))
+        return failures
+
+    # -- outputs ------------------------------------------------------------
+
+    def _job_listing(self, job_id: str):
+        """(prefix, keys) for a completed job, cached per job.
+
+        get_job_result is asked once per job rather than once per output --
+        landice alone is queried for three.
+        """
+        if job_id in self._result_cache:
+            return self._prefix_cache[job_id], self._result_cache[job_id]
+
+        status = self.get_job_status(job_id)
+        if status in DEDUPED:
+            # Verified against the API: status is 200 {"status": "deduped"},
+            # list_jobs does not contain the id, and get_job_result is a 500
+            # carrying MAAP's own traceback ("'NoneType' object has no
+            # attribute 'get'"). There is nothing to wait for and nothing to
+            # retry, so say so now rather than after 2.5 minutes of backoff.
+            raise RuntimeError(
+                f"job {job_id} was DEDUPED: MAAP matched it to an identical "
+                f"earlier submission instead of running it. A deduped job has "
+                f"no DPS output of its own -- it is absent from 'View My Jobs' "
+                f"and its result is a 500 -- so its outputs cannot be read. "
+                f"Submit with dedup=False (the default; --dedup turns it back "
+                f"on).")
+        if status not in TERMINAL_OK:
+            raise RuntimeError(
+                f"job {job_id} is {status!r}; results exist only once it is "
+                f"terminal (asking early returns HTTP 500)")
+
+        body = _retrying(f"result of {job_id}",
+                         lambda: self._fetch_result_body(job_id, status),
+                         retries=RESULT_RETRIES, delay=RESULT_RETRY_DELAY)
+        href = _outputs.result_prefix(body)
+        bucket, prefix = _outputs.parse_dps_href(href)
+        keys = [k[len(f"s3://{bucket}/"):] for k in
+                self.list_objects(f"s3://{bucket}/{prefix}")]
+
+        self._prefix_cache[job_id] = prefix
+        self._result_cache[job_id] = keys
+        return prefix, keys
+
+    def _fetch_result_body(self, job_id: str, status: str = "") -> Dict:
+        """One get_job_result call, with the HTTP code honoured.
+
+        The same lesson get_job_status learned, in the other half of the API.
+        A failed result fetch comes back as a 200-shaped body:
+
+            {"status": 500, "detail": "Failed to get job result of job with
+             id: f9799088-..."}
+
+        and handing that to result_prefix reports "no s3:// link anywhere in
+        the job result" -- which reads as "the job produced nothing" and sends
+        the operator to the logs of a job that was perfectly fine. It cost a
+        run that had ten successful jobs behind it.
+
+        A 5xx is the API failing, and a 404 on a job already known terminal is
+        the result not being indexed yet; both are worth another try, so they
+        are raised as transient and _retrying backs off.
+        """
+        resp = self.maap.get_job_result(job_id)
+        code = getattr(resp, "status_code", 200)
+        body = resp.json() if resp.content else {}
+        if code == 404 or code >= 500:
+            detail = body.get("detail") if isinstance(body, dict) else None
+            raise OSError(
+                f"MAAP returned HTTP {code} asking for the result of job "
+                f"{job_id}" + (f" (status {status!r})" if status else "")
+                + (f": {detail}" if detail else "")
+                + ". " + _result_failure_hint(status, detail))
+        return body
+
+    def get_job_output(self, job_id: str, output_name: str, **fmt) -> str:
+        """The s3:// href of one named output of a completed job."""
+        prefix, keys = self._job_listing(job_id)
+        process_id = self._job_process.get(job_id)
+        if process_id is None:
+            raise RuntimeError(
+                f"no process recorded for {job_id}; get_job_output needs to know "
+                f"which patterns to match (was the job submitted by this client?)")
+        # prefix= relativizes the keys before matching; without it the patterns
+        # are compared against full dps_output/... keys and never match.
+        rel = _outputs.resolve_output(
+            keys, process_id, output_name, prefix=prefix, **fmt)
+        bucket = self.workspace.path().bucket
+        return f"s3://{bucket}/{rel}"
+
+    # -- catalogue ----------------------------------------------------------
+
+    def publish_stac_item(self, netcdf_href, process_date, mode,
+                          *, extra_assets=None,
+                          analysis_level=None) -> None:
+        """Record the L4 granule as a STAC Item in the workspace bucket.
+
+        NOT the published item. The granule's catalogued identity comes from
+        the catalog.json mrva stages out, which MAAP ingests into
+        dps-stac.maap-project.org; this is a local sidecar the dataviewer
+        reads, holding both products and the browse rasters in one record --
+        a shape the published items deliberately do not have, because titiler
+        cannot tile an item that mixes a netCDF with its GeoTIFFs.
+
+        Kept because it needs no endpoint and no ingest delay: it is readable
+        the moment the run finishes, whereas MAAP ingests on its own
+        schedule.
+        """
+        item = _stac.build_l4_item(netcdf_href, process_date, mode,
+                                   extra_assets=extra_assets,
+                                   analysis_level=analysis_level)
+        from . import paths
+        href = self.write_manifest(paths.stac_item_key(process_date, mode), item)
+        logger.info("recorded STAC item %s -> %s", item["id"], href)
+
+    def stac_search(self, collections, start, end, *, sensor=None) -> List[str]:
+        """PO.DAAC granule hrefs for one collection and day.
+
+        Not a STAC search, and no longer a copy either. It once fetched every
+        granule here and re-uploaded it to the workspace bucket, because a DPS
+        job could not read a DAAC bucket. The container does that itself now --
+        localize.sh mints Earthdata credentials from MAAP_PGT -- so this
+        returns PO.DAAC's own hrefs and moves no bytes.
+
+        The name is kept because run_day() calls it; what it returns is still
+        "the hrefs for this collection and day".
+        """
+        from . import granules
+
+        if sensor is None:
+            # run_day passes start == end, one sensor's collections at a time.
+            sensor = self._sensor_for_collections(collections)
+        return granules.granules_for_day(
+            self, sensor, list(collections), start,
+            mode=self.granule_staging,
+            workdir=self.granule_workdir,
+            collection_filter=self.collection_filter,
+        )
+
+    def _sensor_for_collections(self, collections) -> str:
+        """Which sensor a collection list belongs to.
+
+        Staged granules are keyed by sensor, so this cannot be guessed from
+        the collection name -- AMSR2R alone has two.
+        """
+        for sensor, cfg in (self.sensor_collections or {}).items():
+            if list(cfg) == list(collections):
+                return sensor
+        raise GranuleSensorUnknown(
+            f"no sensor configured for collections {list(collections)}; pass "
+            f"sensor_collections to the client so staged granules can be keyed "
+            f"by sensor")

@@ -1,0 +1,899 @@
+"""MaapPyClient against hand-rolled fakes.
+
+No moto, no network: the fakes reproduce the exact response shapes observed
+from a live MAAP job, so a change in how those are parsed fails here.
+"""
+import json
+
+import pytest
+
+from mur_maap.client import MaapPyClient, normalize_status
+from mur_maap.workspace import WorkspacePath
+
+BUCKET = "maap-ops-workspace"
+USER = "jleach_jpl"
+PREFIX = f"{USER}/dps_output/mur-landice_1756/2.0.0/2026/09/18/00/18/23/870639"
+
+LANDICE_KEYS = [f"{PREFIX}/{k}" for k in [
+    "outputs_result-20260918T001823870639.met.json",
+    "_stdout.txt", "_stderr.txt",
+    "p01/2026/Global_ice_2026_164.bip.gz",
+    "p01/2026/icefiles_2026_164.txt",
+    "p01/2026/landiceP01_2026_164.gds.gz",
+    "p011/2026/Global_ice_2026_164.bip.gz",
+    "p011/2026/icefiles_2026_164.txt",
+    "p011/2026/landice_2026_164.gds.gz",
+]]
+
+
+class Resp:
+    def __init__(self, body, status=200):
+        self._body, self.status_code = body, status
+        self.content = b"x" if body is not None else b""
+    def json(self): return self._body
+
+
+class FakeMaapPy:
+    """Reproduces the shapes a live MAAP returned."""
+    def __init__(self, statuses=None):
+        self.submitted = []
+        self.statuses = statuses or {}
+        self._n = 0
+
+    def list_algorithms(self):
+        return Resp({"processes": [
+            {"id": "mur-landice", "version": "2.0.0", "processID": 65},
+            {"id": "mur-landice", "version": "1.0.0", "processID": 12},
+            {"id": "mur-iquam",   "version": "2.0.0", "processID": 64},
+        ]})
+
+    def submit_job(self, process_id, inputs, queue, dedup, tag):
+        self._n += 1
+        jid = f"job-{self._n:04d}"
+        self.submitted.append({"process_id": process_id, "inputs": inputs,
+                               "queue": queue, "tag": tag, "dedup": dedup})
+        return Resp({"jobID": jid, "processID": process_id, "status": "accepted"})
+
+    def get_job_status(self, job_id):
+        seq = self.statuses.get(job_id, ["successful"])
+        return Resp({"status": seq.pop(0) if len(seq) > 1 else seq[0]})
+
+    def get_job_result(self, job_id):
+        return Resp({"additionalProp1": {
+            "links": [
+                {"href": f"http://{BUCKET}.s3-website-us-west-2.amazonaws.com/{PREFIX}"},
+                {"href": f"s3://s3-us-west-2.amazonaws.com:80/{BUCKET}/{PREFIX}"},
+            ],
+            "id": "outputs_result-20260918T001823870639"}})
+
+
+class FakeS3:
+    def __init__(self, keys=()):
+        self.keys = list(keys)
+        self.put = []
+        self.put_buckets = []
+        self.copied = []
+    def get_paginator(self, name):
+        keys = self.keys
+        class P:
+            def paginate(self, Bucket, Prefix):
+                return [{"Contents": [{"Key": k, "Size": 1}
+                                      for k in keys if k.startswith(Prefix)]}]
+        return P()
+    def head_object(self, Bucket, Key):
+        if Key not in self.keys:
+            from botocore.exceptions import ClientError
+            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+        return {"ContentLength": 1}
+    def put_object(self, Bucket, Key, Body, ContentType=None):
+        self.put.append((Key, json.loads(Body)))
+        self.put_buckets.append(Bucket)
+        self.keys.append(Key)
+    def copy_object(self, Bucket, Key, CopySource):
+        self.copied.append((CopySource["Key"], Key))
+        self.keys.append(Key)
+
+
+class FakeWorkspace:
+    def __init__(self, s3): self._s3 = s3
+    def s3(self): return self._s3
+    def path(self): return WorkspacePath(BUCKET, USER)
+
+
+def make_client(keys=(), statuses=None, data_root=None):
+    s3 = FakeS3(keys)
+    maap = FakeMaapPy(statuses)
+    c = MaapPyClient(maap, queue="q", version="2.0.0",
+                     workspace=FakeWorkspace(s3), poll_interval=0,
+                     data_root=data_root)
+    return c, maap, s3
+
+
+# --- status ----------------------------------------------------------------
+
+@pytest.mark.parametrize("raw,expected", [
+    ({"status": "Accepted"}, "accepted"),
+    ("RUNNING", "running"),
+    ({"state": "successful"}, "successful"),
+    (None, ""),
+])
+def test_normalize_status(raw, expected):
+    assert normalize_status(raw) == expected
+
+
+def test_an_unknown_status_is_not_coerced_to_terminal():
+    """Calling it failed abandons a running job; calling it succeeded reads
+    results that do not exist."""
+    from mur_maap.client import TERMINAL_OK, TERMINAL_BAD
+    assert normalize_status("weird") not in TERMINAL_OK | TERMINAL_BAD
+
+
+# --- algorithms ------------------------------------------------------------
+
+def test_resolves_the_numeric_process_id_for_the_right_version():
+    """Two versions are registered; each has its own processID."""
+    c, _, _ = make_client()
+    assert c.resolve_algorithms(["mur-landice"]) == {"mur-landice": 65}
+
+
+def test_a_redeployment_resolves_to_the_newest_registration(caplog):
+    """Deploying the same name and version again ADDS a registration rather
+    than replacing it, and each one keeps its own frozen copy of the CWL. That
+    happens every time a CWL is fixed without bumping the version -- to change
+    a dockerPull digest, say. Resolving positionally would then submit against
+    the registration holding the OLD image, and the job would look entirely
+    normal while running last week's code."""
+    c, maap, _ = make_client()
+    maap.list_algorithms = lambda: Resp({"processes": [
+        {"id": "mur-landice", "version": "2.0.0", "processID": 65},
+        {"id": "mur-landice", "version": "2.0.0", "processID": 88},
+        {"id": "mur-landice", "version": "1.0.0", "processID": 12},
+    ]})
+    import logging
+    with caplog.at_level(logging.WARNING):
+        assert c.resolve_algorithms(["mur-landice"]) == {"mur-landice": 88}
+    assert "registered 2 times" in caplog.text
+
+
+def test_a_single_registration_warns_about_nothing(caplog):
+    c, _, _ = make_client()
+    import logging
+    with caplog.at_level(logging.WARNING):
+        c.resolve_algorithms(["mur-landice"])
+    assert "registered" not in caplog.text
+
+
+def test_a_missing_version_names_the_ones_registered():
+    c, _, _ = make_client()
+    c.version = "9.9.9"
+    with pytest.raises(LookupError, match="registered versions"):
+        c.resolve_algorithms(["mur-landice"])
+
+
+# --- submit ----------------------------------------------------------------
+
+def test_submit_uses_the_numeric_id_and_reads_jobID():
+    c, maap, _ = make_client()
+    jid = c.submit_job("mur-landice", {"year": 2026, "doy": 164})
+    assert jid == "job-0001"
+    assert maap.submitted[0]["process_id"] == 65
+
+
+def test_every_input_is_stringified():
+    """The CWL declares every input as `string`; ints would cross unquoted."""
+    c, maap, _ = make_client()
+    c.submit_job("mur-landice", {"year": 2026, "doy": 164, "sensors": None})
+    sent = maap.submitted[0]["inputs"]
+    assert sent == {"year": "2026", "doy": "164", "sensors": ""}
+
+
+def test_a_response_without_a_job_id_raises_with_the_keys_it_saw():
+    c, maap, _ = make_client()
+    maap.submit_job = lambda **kw: Resp({"detail": "queue not found"}, 400)
+    with pytest.raises(RuntimeError, match="no job id"):
+        c.submit_job("mur-landice", {})
+
+
+# --- waiting ---------------------------------------------------------------
+
+def test_wait_all_returns_once_every_job_is_terminal():
+    c, _, _ = make_client(statuses={"job-0001": ["accepted", "running", "successful"]})
+    jid = c.submit_job("mur-landice", {})
+    c.wait_all([jid])
+
+
+def test_wait_all_raises_on_a_failed_job():
+    c, _, _ = make_client(statuses={"job-0001": ["failed"]})
+    jid = c.submit_job("mur-landice", {})
+    with pytest.raises(RuntimeError, match="failed"):
+        c.wait_all([jid])
+
+
+# --- outputs ---------------------------------------------------------------
+
+def test_get_job_output_resolves_through_the_real_layout():
+    c, _, _ = make_client(LANDICE_KEYS)
+    jid = c.submit_job("mur-landice", {})
+    got = c.get_job_output(jid, "landice_grid_p01", year=2026, doy=164)
+    assert got == f"s3://{BUCKET}/{PREFIX}/p01/2026/landiceP01_2026_164.gds.gz"
+
+
+def test_get_job_output_queries_the_result_once_per_job():
+    """landice is asked for three outputs; one listing should serve all."""
+    c, maap, _ = make_client(LANDICE_KEYS)
+    calls = []
+    inner = maap.get_job_result
+    maap.get_job_result = lambda j: (calls.append(j), inner(j))[1]
+
+    jid = c.submit_job("mur-landice", {})
+    for name in ("landice_ice_p011", "landice_grid_p01", "landice_icefiles_p011"):
+        c.get_job_output(jid, name, year=2026, doy=164)
+    assert len(calls) == 1
+
+
+def test_results_are_refused_before_the_job_is_terminal():
+    """Asking early makes MAAP return HTTP 500 rather than a clean error."""
+    c, _, _ = make_client(LANDICE_KEYS, statuses={"job-0001": ["running"]})
+    jid = c.submit_job("mur-landice", {})
+    with pytest.raises(RuntimeError, match="terminal"):
+        c.get_job_output(jid, "landice_grid_p01", year=2026, doy=164)
+
+
+# --- S3 --------------------------------------------------------------------
+
+def test_object_exists_is_false_for_a_missing_key_not_an_error():
+    c, _, _ = make_client(LANDICE_KEYS)
+    assert c.object_exists(f"s3://{BUCKET}/{LANDICE_KEYS[3]}") is True
+    assert c.object_exists(f"s3://{BUCKET}/{USER}/nope.bic") is False
+
+
+def test_write_manifest_returns_a_full_uri_under_the_workspace_prefix():
+    c, _, s3 = make_client()
+    href = c.write_manifest("mur/manifests/mrva/2026/218.json", {"files": []})
+    assert href == f"s3://{BUCKET}/{USER}/mur/manifests/mrva/2026/218.json"
+    assert s3.put[0][1] == {"files": []}
+
+
+def test_write_manifest_follows_a_team_bucket_root():
+    """With maap.workspace_root in the team bucket, manifests and STAC
+    sidecars go there too, not to the personal prefix beside dps_output."""
+    c, _, s3 = make_client(data_root="s3://mur-sst/")
+    href = c.write_manifest("mur/manifests/mrva/2026/218.json", {"files": []})
+    assert href == "s3://mur-sst/mur/manifests/mrva/2026/218.json"
+    assert s3.put_buckets == ["mur-sst"]
+    assert s3.put[0][0] == "mur/manifests/mrva/2026/218.json"
+
+
+def test_username_is_the_personal_prefix_whatever_the_data_root():
+    c, _, _ = make_client(data_root="s3://mur-sst")
+    assert c.username == USER
+
+
+def test_copy_object_promotes_between_keys():
+    c, _, s3 = make_client(LANDICE_KEYS)
+    src = f"s3://{BUCKET}/{LANDICE_KEYS[3]}"
+    dst = f"s3://{BUCKET}/{USER}/mur/bic/AMSR2R/2026/Global_AMSR2R_2026_164.bic.gz"
+    assert c.copy_object(src, dst) == dst
+    assert s3.copied[0][1].endswith("Global_AMSR2R_2026_164.bic.gz")
+
+
+def test_publish_stac_item_writes_an_item_to_the_bucket():
+    import datetime
+    c, _, s3 = make_client()
+    c.publish_stac_item(f"s3://{BUCKET}/x.nc", datetime.date(2026, 8, 6), "nrt")
+    key, item = s3.put[0]
+    assert key.endswith("mur/stac/items/2026/218nrt.json")
+    assert item["id"] == "mur-l4-20260806-nrt"
+
+
+# --- granule staging -------------------------------------------------------
+
+def test_stac_search_needs_a_sensor_for_the_collections():
+    """Staged granules are keyed by sensor, and a collection list does not
+    identify one on its own -- AMSR2R alone has two collections."""
+    from mur_maap.client import GranuleSensorUnknown
+    c, _, _ = make_client()
+    with pytest.raises(GranuleSensorUnknown, match="no sensor configured"):
+        c.stac_search(["AMSR2-REMSS-L2P-v8.2"], None, None)
+
+
+def test_stac_search_maps_collections_back_to_their_sensor():
+    import datetime
+    c, _, _ = make_client()
+    c.sensor_collections = {"AMSR2R": ["AMSR2-REMSS-L2P-v8.2"]}
+
+    seen = []
+    import mur_maap.granules as g
+    real = g.granules_for_day
+    g.granules_for_day = lambda client, sensor, cols, day, **kw: seen.append(sensor) or []
+    try:
+        c.stac_search(["AMSR2-REMSS-L2P-v8.2"], datetime.date(2026, 8, 6), None)
+    finally:
+        g.granules_for_day = real
+    assert seen == ["AMSR2R"]
+
+
+# --- per-module queues -----------------------------------------------------
+
+def test_a_single_queue_is_used_for_every_module():
+    c, _, _ = make_client()
+    assert c.queue_for("mur-landice") == c.queue_for("mur-mrva") == "q"
+
+
+def test_mrva_can_be_sent_to_its_own_queue():
+    """MRVA needs 64 GiB where the others need 4-8. One queue for all four
+    either wastes a large worker on iquam, or fails MRVA at the very end
+    after everything upstream has already succeeded."""
+    c, maap, _ = make_client()
+    c.queues = {"mur-mrva": "big-queue"}
+    assert c.queue_for("mur-landice") == "q"
+    assert c.queue_for("mur-mrva") == "big-queue"
+
+
+def test_the_override_reaches_the_submission():
+    c, maap, _ = make_client()
+    c.queues = {"mur-mrva": "big-queue"}
+    c.algorithms = {"mur-landice": 65, "mur-mrva": 67}
+    c.submit_job("mur-landice", {})
+    c.submit_job("mur-mrva", {})
+    assert [s["queue"] for s in maap.submitted] == ["q", "big-queue"]
+
+
+def test_the_submit_log_names_the_queue(caplog):
+    """Which pool a job ran on is the first question asked when it dies for an
+    environmental reason -- mrva's repeated "permission denied ...
+    /var/run/docker.sock" is a property of the worker, not of the job. The
+    queue also comes from the operator's own config.maap.json, which is not in
+    this repo, so without it in the log there is no way to tell a stale config
+    from a genuine failure on the intended queue.
+    """
+    import logging
+    c, _, _ = make_client()
+    c.queues = {"mur-mrva": "maap-dps-worker-64gb"}
+    c.algorithms = {"mur-mrva": 67}
+    with caplog.at_level(logging.INFO, logger="mur_maap.client"):
+        c.submit_job("mur-mrva", {})
+    assert "maap-dps-worker-64gb" in caplog.text
+
+
+def test_a_bare_list_algorithm_listing_does_not_crash():
+    """MAAP has returned both {"processes": [...]} and a bare list. The old
+    guard was `body.get("processes", body if isinstance(body, list) else [])`
+    -- which raises AttributeError on a list, because a dict default is only
+    consulted once .get() has already been called on a dict."""
+    c, maap, _ = make_client()
+    maap.list_algorithms = lambda: Resp([
+        {"id": "mur-landice", "version": "2.0.0", "processID": 65},
+    ])
+    assert c.resolve_algorithms(["mur-landice"]) == {"mur-landice": 65}
+
+
+# --- a long wait must look different from a hang ---------------------------
+#
+# Between the last submission and the next stage, wait_all printed nothing.
+# A run sitting in it is indistinguishable from a hung process -- and one real
+# way to hang is built in: normalize_status returns "" for a response shape it
+# does not recognize, "" is not terminal, so the loop polls forever. Silently.
+
+def test_an_unrecognized_status_is_warned_about_not_just_polled(caplog):
+    import logging
+    from mur_maap.client import MaapPyClient
+
+    c, maap, _ = make_client()
+    c.poll_interval = 0
+    seen = []
+
+    def status(job_id):
+        seen.append(job_id)
+        # Unknown twice, then terminal, so the loop ends.
+        return "" if len(seen) < 3 else "successful"
+
+    c.get_job_status = status
+    with caplog.at_level(logging.WARNING):
+        c.wait_all(["job-1"])
+    assert any("neither terminal nor a known running state" in r.getMessage()
+               for r in caplog.records), caplog.text
+
+
+def test_the_unknown_status_warning_fires_once_per_value(caplog):
+    """A 30-second poll over a long MRVA job would otherwise emit hundreds."""
+    import logging
+    c, _, _ = make_client()
+    c.poll_interval = 0
+    calls = []
+
+    def status(job_id):
+        calls.append(1)
+        return "" if len(calls) < 6 else "successful"
+
+    c.get_job_status = status
+    with caplog.at_level(logging.WARNING):
+        c.wait_all(["job-1"])
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+
+
+def test_wait_all_reports_when_it_starts_and_finishes(caplog):
+    import logging
+    c, _, _ = make_client()
+    c.poll_interval = 0
+    c.get_job_status = lambda jid: "successful"
+    with caplog.at_level(logging.INFO):
+        c.wait_all(["job-1", "job-2"])
+    text = caplog.text
+    assert "waiting on 2 job(s)" in text
+    assert "terminal" in text, "no line marks the wait ending"
+
+
+def test_a_known_active_status_is_not_warned_about(caplog):
+    """running/queued are normal; warning about them would train people to
+    ignore the warning that matters."""
+    import logging
+    c, _, _ = make_client()
+    c.poll_interval = 0
+    calls = []
+
+    def status(job_id):
+        calls.append(1)
+        return "running" if len(calls) < 3 else "successful"
+
+    c.get_job_status = status
+    with caplog.at_level(logging.WARNING):
+        c.wait_all(["job-1"])
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_deduped_is_terminal():
+    """MAAP returns "deduped" when it matched an identical earlier
+    submission. It is terminal -- it never becomes anything else -- and the
+    work exists, done by that earlier job. Matching none of the status sets
+    made wait_all poll it forever, which is exactly what happened on a real
+    run."""
+    from mur_maap.client import TERMINAL_OK, TERMINAL_BAD, ACTIVE
+    assert "deduped" in TERMINAL_OK
+    assert "deduped" not in TERMINAL_BAD
+    assert "deduped" not in ACTIVE
+
+
+def test_wait_all_returns_on_a_deduped_job(caplog):
+    c, _, _ = make_client()
+    c.poll_interval = 0
+    c.get_job_status = lambda jid: "deduped"
+    assert c.wait_all(["job-1"]) == {}, "deduped is not a failure"
+
+
+def test_dedup_can_be_overridden_per_submission():
+    c, maap, _ = make_client()
+    c.submit_job("mur-landice", {"year": 2026}, dedup=False)
+    assert maap.submitted[-1].get("dedup") is False
+    c.submit_job("mur-landice", {"year": 2026})
+    assert maap.submitted[-1].get("dedup") is c.dedup
+
+
+# --- a network blip must not end a run -------------------------------------
+#
+# A real run died on one status check:
+#
+#   Failed to resolve 'api.maap-project.org'
+#   ([Errno -3] Temporary failure in name resolution)
+#
+# Eleven jobs were healthy on DPS at the time. They carried on running with
+# nothing watching them, and the day was reported as failed.
+
+def test_a_transient_error_is_retried_not_raised(caplog):
+    import logging
+    from mur_maap import client as mod
+
+    c, _, _ = make_client()
+    calls = []
+
+    def flaky(job_id):
+        calls.append(1)
+        if len(calls) < 3:
+            raise OSError("Temporary failure in name resolution")
+        return "successful"
+
+    c.maap.get_job_status = lambda jid: (_ for _ in ()).throw(
+        AssertionError("should not reach maap"))
+    monkey = mod._retrying("status", lambda: flaky("j"), delay=0)
+    assert monkey == "successful"
+    assert len(calls) == 3
+
+
+def test_retries_are_bounded_and_the_error_survives():
+    """A genuinely dead API must still surface, not spin."""
+    from mur_maap import client as mod
+    calls = []
+
+    def always_fail():
+        calls.append(1)
+        raise OSError("nope")
+
+    with pytest.raises(OSError):
+        mod._retrying("thing", always_fail, retries=3, delay=0)
+    assert len(calls) == 3
+
+
+def test_one_unreachable_sweep_does_not_fail_the_run(caplog):
+    """The job is unknown, not failed. Abandoning a running job because the
+    workspace could not resolve DNS is the worst available answer."""
+    import logging
+    c, _, _ = make_client()
+    c.poll_interval = 0
+    calls = []
+
+    def status(job_id):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("Temporary failure in name resolution")
+        return "successful"
+
+    c.get_job_status = status
+    with caplog.at_level(logging.WARNING):
+        failures = c.wait_all(["job-1"])
+    assert failures == {}, "an unreachable status became a failure"
+    assert "could not reach MAAP" in caplog.text
+
+
+def test_an_unreachable_job_is_never_reported_as_failed():
+    c, _, _ = make_client()
+    c.poll_interval = 0
+    calls = []
+
+    def status(job_id):
+        calls.append(1)
+        if len(calls) < 4:
+            raise OSError("down")
+        return "successful"
+
+    c.get_job_status = status
+    assert c.wait_all(["job-1"], raise_on_failure=True) == {}
+
+
+def test_a_sustained_outage_stops_and_says_the_jobs_are_still_running():
+    """Polling forever against a dead API helps nobody, but the message must
+    make clear the jobs were not cancelled."""
+    c, _, _ = make_client()
+    c.poll_interval = 0
+
+    def always_down(job_id):
+        raise OSError("down")
+
+    c.get_job_status = always_down
+    with pytest.raises(RuntimeError, match="unreachable"):
+        c.wait_all(["job-1"])
+
+
+def test_the_outage_message_says_a_rerun_picks_up():
+    c, _, _ = make_client()
+    c.poll_interval = 0
+    c.get_job_status = lambda jid: (_ for _ in ()).throw(OSError("down"))
+    with pytest.raises(RuntimeError) as exc:
+        c.wait_all(["job-1"])
+    message = str(exc.value)
+    assert "NOT cancelled" in message
+    assert "re-running" in message
+
+
+# --- a freshly submitted job is not queryable straight away ----------------
+#
+# submit_job returns a job id before /ogc/jobs/<id> answers, so the first
+# polls 404. get_job_status parsed the 404 BODY -- {"status": 404, ...} --
+# and returned the literal status "404", which matched no set. wait_all then
+# polled it forever while warning that it did not recognize it:
+#
+#   job 990467cb-... reports status '404', which is neither terminal nor a
+#   known running state.
+#
+# With one job in the run, that is a permanent hang.
+
+class Resp404:
+    status_code = 404
+    content = b'{"status": 404, "message": "job not found"}'
+    def json(self):
+        return {"status": 404, "message": "job not found"}
+
+
+def test_a_404_is_a_state_not_a_status():
+    from mur_maap.client import UNINDEXED
+    c, maap, _ = make_client()
+    maap.get_job_status = lambda jid: Resp404()
+    assert c.get_job_status("j") == UNINDEXED
+    assert c.get_job_status("j") != "404"
+
+
+def test_not_yet_indexed_is_a_known_active_state():
+    """So it keeps polling without the alarming unknown-status warning."""
+    from mur_maap.client import UNINDEXED, ACTIVE, TERMINAL_OK, TERMINAL_BAD
+    assert UNINDEXED in ACTIVE
+    assert UNINDEXED not in TERMINAL_OK and UNINDEXED not in TERMINAL_BAD
+
+
+def test_a_job_that_appears_after_a_few_404s_completes(caplog):
+    import logging
+    c, maap, _ = make_client()
+    c.poll_interval = 0
+    calls = []
+
+    class Ok:
+        status_code = 200
+        content = b"{}"
+        def json(self):
+            return {"status": "successful"}
+
+    def status(jid):
+        calls.append(1)
+        return Resp404() if len(calls) < 4 else Ok()
+
+    maap.get_job_status = status
+    with caplog.at_level(logging.WARNING):
+        assert c.wait_all(["job-1"]) == {}
+    assert "neither terminal nor a known running state" not in caplog.text, \
+        "a normal indexing delay should not warn about an unknown status"
+
+
+def test_a_job_that_never_appears_eventually_fails():
+    """Waiting forever for a submission MAAP acknowledged and then lost is
+    not better than saying so."""
+    import mur_maap.client as mod
+    c, maap, _ = make_client()
+    c.poll_interval = 0
+    maap.get_job_status = lambda jid: Resp404()
+
+    original = mod.UNINDEXED_GRACE_SECONDS
+    mod.UNINDEXED_GRACE_SECONDS = -1          # expire immediately
+    try:
+        with pytest.raises(RuntimeError, match="not become visible"):
+            c.wait_all(["job-1"])
+    finally:
+        mod.UNINDEXED_GRACE_SECONDS = original
+
+
+def test_a_5xx_is_retried_rather_than_becoming_a_status():
+    """A server blip must not turn into the status string '503'."""
+    c, maap, _ = make_client()
+    calls = []
+
+    class Down:
+        status_code = 503
+        content = b"{}"
+        def json(self):
+            return {}
+
+    class Ok:
+        status_code = 200
+        content = b"{}"
+        def json(self):
+            return {"status": "successful"}
+
+    def status(jid):
+        calls.append(1)
+        return Down() if len(calls) < 3 else Ok()
+
+    maap.get_job_status = status
+    import mur_maap.client as mod
+    original = mod.API_RETRY_DELAY
+    mod.API_RETRY_DELAY = 0
+    try:
+        assert c.get_job_status("j") == "successful"
+    finally:
+        mod.API_RETRY_DELAY = original
+    assert len(calls) == 3
+
+
+def test_retry_settings_are_read_at_call_time():
+    """They were default arguments, bound at import -- so overriding
+    mur_maap.client.API_RETRY_DELAY did nothing, and a test meant to run
+    instantly slept for fifteen seconds instead. The same trap applies to
+    anyone tuning these in the field."""
+    import mur_maap.client as mod
+    calls = []
+
+    def always_fail():
+        calls.append(1)
+        raise OSError("down")
+
+    original_delay, original_retries = mod.API_RETRY_DELAY, mod.API_RETRIES
+    mod.API_RETRY_DELAY, mod.API_RETRIES = 0, 2
+    try:
+        import time
+        start = time.monotonic()
+        with pytest.raises(OSError):
+            mod._retrying("thing", always_fail)
+        assert time.monotonic() - start < 1, "the overridden delay was ignored"
+        assert len(calls) == 2, "the overridden retry count was ignored"
+    finally:
+        mod.API_RETRY_DELAY, mod.API_RETRIES = original_delay, original_retries
+
+
+# --- the result fetch must honour the HTTP code too -------------------------
+#
+# A real run: ten jobs succeeded over twenty-five minutes, then the day died on
+#
+#   2026-09-21 FAILED: no s3:// link anywhere in the job result. This is the
+#   body MAAP returned: {'status': 500, 'detail': 'Failed to get job result of
+#   job with id: f9799088-...'}
+#
+# which reads as "landice produced nothing" and sends the operator to the logs
+# of a job that had in fact finished cleanly. The job was fine; the result
+# lookup 500'd, and the 500 body was parsed as though it were a result.
+
+class ResultResp:
+    def __init__(self, body, status=200):
+        self._body, self.status_code = body, status
+        self.content = b"x"
+    def json(self):
+        return self._body
+
+
+FIVE_HUNDRED = {"status": 500,
+                "detail": "Failed to get job result of job with id: j"}
+
+
+def _no_result_delay():
+    import mur_maap.client as mod
+    return mod
+
+
+def test_a_500_on_the_result_is_retried_not_parsed_as_a_result():
+    mod = _no_result_delay()
+    c, maap, s3 = make_client(keys=LANDICE_KEYS)
+    c._job_process["job-1"] = "mur-landice"
+    good = maap.get_job_result("job-1").json()
+    calls = []
+
+    def result(jid):
+        calls.append(1)
+        return (ResultResp(FIVE_HUNDRED, 500) if len(calls) < 3
+                else ResultResp(good))
+
+    maap.get_job_result = result
+    original = mod.RESULT_RETRY_DELAY
+    mod.RESULT_RETRY_DELAY = 0
+    try:
+        href = c.get_job_output("job-1", "landice_grid_p01")
+    finally:
+        mod.RESULT_RETRY_DELAY = original
+    assert href.startswith("s3://")
+    assert len(calls) == 3
+
+
+def test_a_persistent_500_says_the_api_failed_not_that_the_job_was_empty():
+    mod = _no_result_delay()
+    c, maap, _ = make_client(keys=LANDICE_KEYS)
+    c._job_process["job-1"] = "mur-landice"
+    maap.get_job_result = lambda jid: ResultResp(FIVE_HUNDRED, 500)
+
+    original = mod.RESULT_RETRY_DELAY
+    mod.RESULT_RETRY_DELAY = 0
+    try:
+        with pytest.raises(OSError) as err:
+            c.get_job_output("job-1", "landice_grid_p01")
+    finally:
+        mod.RESULT_RETRY_DELAY = original
+
+    message = str(err.value)
+    assert "HTTP 500" in message
+    assert "result" in message and "lookup failing" in message
+    assert "no s3:// link" not in message, \
+        "blaming the job for an API failure is what cost the last run"
+
+
+def test_a_404_on_the_result_of_a_terminal_job_is_also_retried():
+    """A job can go terminal a moment before its result is indexed."""
+    mod = _no_result_delay()
+    c, maap, _ = make_client(keys=LANDICE_KEYS)
+    c._job_process["job-1"] = "mur-landice"
+    good = maap.get_job_result("job-1").json()
+    calls = []
+
+    def result(jid):
+        calls.append(1)
+        return (ResultResp({"status": 404, "detail": "not found"}, 404)
+                if len(calls) < 2 else ResultResp(good))
+
+    maap.get_job_result = result
+    original = mod.RESULT_RETRY_DELAY
+    mod.RESULT_RETRY_DELAY = 0
+    try:
+        assert c.get_job_output("job-1", "landice_grid_p01").startswith("s3://")
+    finally:
+        mod.RESULT_RETRY_DELAY = original
+    assert len(calls) == 2
+
+
+def test_a_genuinely_empty_result_still_says_so():
+    """The old message is right when the body really is a result."""
+    c, maap, _ = make_client(keys=LANDICE_KEYS)
+    c._job_process["job-1"] = "mur-landice"
+    maap.get_job_result = lambda jid: ResultResp({"outputs": {"n": 3}})
+    with pytest.raises(ValueError, match="no s3:// link"):
+        c.get_job_output("job-1", "landice_grid_p01")
+
+
+def test_the_result_fetch_waits_longer_than_an_ordinary_call():
+    """It is asked once per job at the end of a long wait, and losing it
+    throws away every job behind it."""
+    import mur_maap.client as mod
+    assert mod.RESULT_RETRIES > mod.API_RETRIES
+    assert mod.RESULT_RETRY_DELAY > mod.API_RETRY_DELAY
+
+
+# --- a failed result lookup should say what to do about it ------------------
+#
+# The second run failed the same way with a fuller detail:
+#
+#   Failed to get job result of job with id: 2898989c-... 'NoneType' object
+#   has no attribute 'get'. If you don't see expected results, please contact
+#   administrator of DPS.
+#
+# and the operator reported that the id does not appear under "View My Jobs".
+# A NoneType crash in MAAP's own lookup plus an id missing from the listing
+# means there is no DPS record behind the id -- which is exactly what a
+# deduped submission leaves behind.
+
+def test_a_deduped_job_says_so_rather_than_blaming_the_api():
+    from mur_maap.client import _result_failure_hint
+    hint = _result_failure_hint("deduped", "Failed to get job result")
+    assert "DEDUPED" in hint
+    assert "--no-dedup" in hint
+
+
+def test_a_nonetype_crash_points_at_view_my_jobs():
+    from mur_maap.client import _result_failure_hint
+    hint = _result_failure_hint("successful",
+                                "'NoneType' object has no attribute 'get'")
+    assert "View My Jobs" in hint
+    assert "--no-dedup" in hint
+
+
+def test_an_ordinary_500_keeps_the_neutral_hint():
+    from mur_maap.client import _result_failure_hint
+    hint = _result_failure_hint("successful", "upstream timeout")
+    assert "may be fine" in hint
+    assert "--no-dedup" not in hint
+
+
+def test_a_deduped_job_fails_immediately_without_retrying():
+    """Confirmed against the live API:
+
+        get_job_status  200  {"status": "deduped"}
+        list_jobs            the id is not in it
+        get_job_result  500  "'NoneType' object has no attribute 'get'"
+
+    There is no DPS record behind a deduped id, so there is nothing to wait
+    for. Backing off for two and a half minutes first only delays the news.
+    """
+    c, maap, _ = make_client(keys=LANDICE_KEYS)
+    c._job_process["job-1"] = "mur-landice"
+    maap.get_job_status = lambda jid: ResultResp({"status": "deduped"})
+
+    calls = []
+    def result(jid):
+        calls.append(1)
+        return ResultResp({"status": 500, "detail": "x"}, 500)
+    maap.get_job_result = result
+
+    with pytest.raises(RuntimeError, match="DEDUPED"):
+        c.get_job_output("job-1", "landice_grid_p01")
+    assert calls == [], "a deduped job has no result; asking for it is waste"
+
+
+def test_dedup_is_off_by_default():
+    """Every job this pipeline submits has its outputs read by a later stage,
+    and a deduped job has none -- so dedup is not a safe default here."""
+    c, _, _ = make_client()
+    assert c.dedup is False
+
+
+def test_a_deduped_job_is_called_out_at_the_end_of_the_wait(caplog):
+    """wait_all counts deduped as terminal-OK, so the summary says 0 failed
+    and the run dies minutes later reading outputs that do not exist."""
+    import logging
+    c, maap, _ = make_client()
+    c.poll_interval = 0
+    maap.get_job_status = lambda jid: ResultResp({"status": "deduped"})
+    with caplog.at_level(logging.WARNING):
+        assert c.wait_all(["job-1", "job-2"]) == {}
+    assert "DEDUPED" in caplog.text
+    assert "job-1"[:8] in caplog.text

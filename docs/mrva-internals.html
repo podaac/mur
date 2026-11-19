@@ -823,17 +823,35 @@
     <pre><code>Scale L:  mx(L) = mx0 * 2^(L-L0)
               my(L) = my0 * 2^(L-L0)
 
-    Example (REA mode, L0=2):
-    L=2:  mx=101,  my=45    (~1250km spacing)
-    L=3:  mx=202,  my=90    (~625km)
-    L=4:  mx=404,  my=180   (~312km)
-    L=5:  mx=808,  my=360   (~156km)
-    L=6:  mx=1616, my=720   (~78km)
-    L=7:  mx=3232, my=1440  (~39km)
-    L=8:  mx=6464, my=2880  (~19km)
-    L=9:  mx=12928, my=5760  (~10km)
-    L=10: mx=25856, my=11520 (~5km)
-    L=11: mx=51712, my=23040 (~2.5km)</code></pre>
+    gridgrain = 45/2**L0 degrees
+    mx0 = int(360/gridgrain)+1;  my0 = int(180/gridgrain)+1
+
+    REA mode, L0=2  ->  gridgrain 11.25 deg,  mx0=33,  my0=17
+    L=2:  mx=33,    my=17     (~10.9 deg)
+    L=6:  mx=528,   my=272    (~0.68 deg)
+    L=8:  mx=2112,  my=1088   (~0.17 deg)
+    L=9:  mx=4224,  my=2176   (~0.085 deg)
+    L=10: mx=8448,  my=4352   (~0.043 deg)
+    L=11: mx=16896, my=8704   (~0.021 deg)
+
+    NRT mode, L0=6  ->  gridgrain 0.703 deg, mx0=513, my0=257
+    L=8:  mx=2052,  my=1028
+    L=11: mx=16416, my=8224</code></pre>
+
+    <p>Verified against a live run: <code>mrva.f</code> calls
+    <code>spmPCG(csp, mx3*my3, ...)</code> and prints that value, so a job log
+    states the coefficient count directly. DPS job <code>50f7b39a</code> (NRT,
+    L=8) printed <code>maxIter= 2115612</code>, against 2,115,585 predicted
+    above.</p>
+
+    <p>An earlier version of this table gave <code>mx0=101, my0=45</code>,
+    reaching <code>51712 &times; 23040</code> at L=11 &mdash; roughly four times
+    too large in each dimension. That figure came from a Dockerfile comment and
+    describes something closer to the interpolated <em>output</em> grid
+    (<code>outL=10, outL4=11</code>), not the spline coefficient grid allocated
+    by <code>spmInit</code>. The same conflation put every row of the MRVA
+    memory analysis two levels out; see the correction at the top of
+    <code>mrva/docs/MEMORY_ANALYSIS_AND_MATRIX_FREE_PLAN.md</code>.</p>
     <p><strong>Coefficient Upsampling</strong>:</p>
     <p>When transitioning from scale L to L+1, the coefficient array is upsampled using bicubic interpolation:</p>
     <pre><code class="language-fortran">! Old grid: mx_old x my_old

@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Fetch the logs of a DPS job -- especially one that failed.
+
+    python utils/job_logs.py c3cdae3c-718f-4347-862f-36c53695aede
+    python utils/job_logs.py <id> <id> <id>          # several at once
+    python utils/job_logs.py --status-only <id> ...  # just the statuses
+    python utils/job_logs.py --full <id>             # whole log, not the tail
+
+WHY THIS EXISTS
+    wait_all raises `job(s) failed: {id: 'failed'}` -- the ids and nothing
+    else -- so a failed run leaves you holding twenty UUIDs and no reason.
+    And MaapPyClient._job_listing deliberately refuses a job that is not
+    terminal-OK, because asking for the RESULTS of a running job returns HTTP
+    500. That guard is right for outputs and exactly wrong for logs: a failed
+    job is the one whose logs you need.
+
+    So this asks for the result prefix regardless of status, and treats a
+    refusal as "no logs published yet" rather than an error.
+
+WHERE THE LOGS ARE
+    DPS stages a job's working directory to S3 alongside its products, so
+    _stdout.txt, _stderr.txt and any traceback sit in the same prefix
+    get_job_result names. Everything log-shaped in that prefix is fetched.
+"""
+import argparse
+import pathlib
+import sys
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+# Files DPS writes beside the products. Matched case-insensitively on the
+# basename, so a rename to stderr.txt or job.log is still picked up.
+#
+# The second row is HySDS's own job artifacts, which this missed for weeks.
+# MAAP runs HySDS, so a Verdi worker writes more than stdout/stderr beside the
+# products: pge_metrics.json carries resource measurements, _docker_stats.json
+# can carry memory, and _job.json / _context.json record what was actually
+# dispatched -- including the queue, which is otherwise only in our own submit
+# log. Four MRVA jobs were post-mortemed on an OOM kill while whatever those
+# files had to say was sitting unread in the same prefix.
+LOG_HINTS = ("stdout", "stderr", "traceback", ".log", "_alt_", "docker_",
+             "exit_code", "failure",
+             "metrics", "_context", "_job.", "pge_", "_stats")
+
+TAIL_LINES = 60
+
+
+def looks_like_a_log(key: str) -> bool:
+    name = key.rsplit("/", 1)[-1].lower()
+    return any(hint in name for hint in LOG_HINTS)
+
+
+def build_client(config_path=None):
+    """A client good enough to read status and list S3.
+
+    queue and version are required by the constructor but irrelevant here --
+    nothing is submitted -- so they are filled with values that would fail
+    loudly if this ever did try to submit.
+    """
+    from mur_maap.client import MaapPyClient
+    from mur_maap.version import ALGORITHM_VERSION
+    return MaapPyClient(queue="__read_only__", version=ALGORITHM_VERSION)
+
+
+def result_prefix_even_if_failed(client, job_id):
+    """(bucket, prefix) for a job, ignoring whether it succeeded."""
+    from mur_maap import outputs as _outputs
+
+    resp = client.maap.get_job_result(job_id)
+    if resp.status_code >= 400:
+        return None, None
+    body = resp.json() if resp.content else {}
+    try:
+        href = _outputs.result_prefix(body)
+        return _outputs.parse_dps_href(href)
+    except Exception:                                      # noqa: BLE001
+        return None, None
+
+
+def jobs_by_tag(client, tag_prefix):
+    """Job ids whose tag starts with `tag_prefix`.
+
+    A tag is a batch name, one per stage (MUR-L2P, MUR-MRVA, ... -- see
+    mur_maap/tags.py), so this finds every job of that stage MAAP still
+    lists, from every day. Pair it with --status-only to see what failed
+    before pulling logs for all of them.
+    """
+    resp = client.maap.list_jobs()
+    body = resp.json() if resp.content else {}
+    rows = body if isinstance(body, list) else (
+        body.get("jobs") or body.get("results") or [])
+    found = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        tag = str(row.get("tags") or row.get("tag") or "")
+        if tag.startswith(tag_prefix):
+            jid = next((row[k] for k in ("jobID", "jobId", "job_id", "id")
+                        if row.get(k)), None)
+            if jid:
+                found.append(jid)
+    return found
+
+
+def show(client, job_id, *, full=False, status_only=False):
+    status = client.get_job_status(job_id)
+    print(f"\n{'=' * 70}\n{job_id}  [{status or 'unknown'}]\n{'=' * 70}")
+    if status_only:
+        return
+
+    try:
+        bucket, prefix = result_prefix_even_if_failed(client, job_id)
+    except Exception as exc:                               # noqa: BLE001
+        print(f"  could not ask for results: {exc}")
+        bucket = prefix = None
+
+    if not bucket:
+        print("  MAAP published no result location for this job.")
+        print("  A job that failed before staging out has none -- its logs are")
+        print("  only in the MAAP UI:  View my jobs -> this job -> Logs")
+        return
+
+    keys = [k[len(f"s3://{bucket}/"):]
+            for k in client.list_objects(f"s3://{bucket}/{prefix}")]
+    logs = [k for k in keys if looks_like_a_log(k)]
+
+    if not logs:
+        print(f"  no log-shaped files under s3://{bucket}/{prefix}")
+        if keys:
+            print("  what is there:")
+            for k in keys[:20]:
+                print(f"    {k.rsplit('/', 1)[-1]}")
+        return
+
+    s3 = client.workspace.s3()
+    for key in sorted(logs):
+        name = key.rsplit("/", 1)[-1]
+        try:
+            body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+            text = body.decode("utf-8", errors="replace")
+        except Exception as exc:                           # noqa: BLE001
+            print(f"\n--- {name}: could not read ({exc})")
+            continue
+
+        lines = text.splitlines()
+        shown = lines if full else lines[-TAIL_LINES:]
+        elided = len(lines) - len(shown)
+        print(f"\n--- {name} ({len(lines)} lines"
+              + (f", last {len(shown)}" if elided > 0 else "") + ") ---")
+        if elided > 0:
+            print(f"    [{elided} earlier lines; --full for all]")
+        for line in shown:
+            print(f"    {line}")
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("job_ids", nargs="*",
+                        help="job ids, or use --tag to find them")
+    parser.add_argument("--tag",
+                        help="find jobs by tag prefix instead of listing ids, "
+                             "e.g. --tag MUR-L2P for every L2P job")
+    parser.add_argument("--full", action="store_true",
+                        help=f"print the whole log, not the last {TAIL_LINES} lines")
+    parser.add_argument("--status-only", action="store_true")
+    args = parser.parse_args(argv)
+
+    try:
+        client = build_client()
+    except ImportError:
+        print("ERROR: maap-py is not installed. Run this in a MAAP workspace.")
+        return 1
+
+    job_ids = list(args.job_ids)
+    if args.tag:
+        found = jobs_by_tag(client, args.tag)
+        if not found:
+            print(f"No jobs found with a tag starting {args.tag!r}.")
+            return 1
+        print(f"{len(found)} job(s) tagged {args.tag!r}")
+        job_ids.extend(found)
+    if not job_ids:
+        print("Give one or more job ids, or --tag.")
+        return 1
+
+    for job_id in job_ids:
+        try:
+            show(client, job_id, full=args.full, status_only=args.status_only)
+        except Exception as exc:                           # noqa: BLE001
+            print(f"\n{job_id}: {type(exc).__name__}: {exc}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

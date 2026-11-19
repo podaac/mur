@@ -14,7 +14,17 @@ import pytest
 yaml = pytest.importorskip("yaml")
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-MODULES = ("landice", "iquam", "l2p", "mrva")
+MODULES = ("landice", "iquam", "l2p", "mrva", "cog")
+
+# Inputs delivered to the container as environment variables rather than
+# command-line flags, so they have no matching entrypoint flag by design.
+# utils/generate_cwl.sh strips their inputBinding and adds an
+# EnvVarRequirement.
+ENV_INPUTS = {
+    # A credential has no business in argv, which anything able to read /proc
+    # can see, nor in an entrypoint's argument parser.
+    "l2p": {"maap-token": "MAAP_PGT"},
+}
 
 # Flags deliberately not exposed as job inputs, with the reason.
 UNEXPOSED = {
@@ -29,6 +39,10 @@ UNEXPOSED = {
         # rejects it. Bootstrap-only, so omitting it is safe.
         "l4-reference-root",
         # Boolean build/diagnostic flag, not a per-job parameter.
+        "debug",
+    },
+    "cog": {
+        # Same reason as mrva's: a build/diagnostic switch, not science.
         "debug",
     },
 }
@@ -47,6 +61,7 @@ def entrypoint_flags(module):
 @pytest.mark.parametrize("module", MODULES)
 def test_every_declared_input_is_a_real_entrypoint_flag(module):
     declared = {i["name"] for i in load_config(module)["inputs"]}
+    declared -= set(ENV_INPUTS.get(module, {}))
     unknown = declared - entrypoint_flags(module)
     assert not unknown, (
         f"{module}: declares input(s) the entrypoint rejects: {sorted(unknown)}. "
@@ -144,3 +159,466 @@ def test_only_scalar_string_inputs_are_used():
         for item in load_config(module)["inputs"]:
             assert str(item["type"]) in ("string", "string?"), \
                 f"{module}: input {item['name']} has non-scalar type {item['type']}"
+
+
+# --- the orchestrator's arguments must match the declared inputs -----------
+#
+# The existing tests check the CWL inputs against the entrypoint flags, which
+# is one half of the contract. The other half is what run_day() actually
+# submits: a mismatch there is rejected by MAAP with "Parameter X missing from
+# inputs", which is only discoverable by submitting a job.
+
+def _submitted_args():
+    """Every (process, args) run_day submits, via the fake client."""
+    import datetime
+    import sys
+    sys.path.insert(0, str(REPO))
+    from run_mur_maap import MAAPOrchestrator
+    from tests.test_run_mur_maap import CONFIG, FakeMAAPClient
+
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    return client.submitted
+
+
+def _declared_inputs(module):
+    cfg = load_config(module)
+    return {i["name"] for i in cfg["inputs"]}
+
+
+@pytest.mark.parametrize("module", MODULES)
+def test_orchestrator_arguments_map_onto_declared_inputs(module):
+    """Keys are translated _ -> - on submission, so compare in that form."""
+    process = f"mur-{module}"
+    declared = _declared_inputs(module)
+
+    for pid, args in _submitted_args():
+        if pid != process:
+            continue
+        sent = {k.replace("_", "-") for k in args}
+        unknown = sent - declared
+        assert not unknown, (
+            f"{process}: submits {sorted(unknown)}, which the CWL does not "
+            f"declare. MAAP rejects the whole submission for an undeclared "
+            f"input. Declared: {sorted(declared)}")
+
+
+@pytest.mark.parametrize("module", MODULES)
+def test_every_required_input_is_actually_sent(module):
+    """An input with no default that is never sent fails at submission with
+    'Parameter X missing from inputs. No default set in algorithm spec.'"""
+    process = f"mur-{module}"
+    cfg = load_config(module)
+    required = {i["name"] for i in cfg["inputs"]
+                if not str(i["type"]).endswith("?")}
+
+    for pid, args in _submitted_args():
+        if pid != process:
+            continue
+        sent = {k.replace("_", "-") for k in args}
+        missing = required - sent
+        assert not missing, (
+            f"{process}: never sends required input(s) {sorted(missing)}")
+        return
+    pytest.skip(f"{process} is not submitted by run_day in this config")
+
+
+def test_no_mur_input_name_contains_an_underscore():
+    """The _ -> - translation is only total while this holds."""
+    for module in MODULES:
+        for name in _declared_inputs(module):
+            assert "_" not in name, f"{module}: input {name!r} breaks the mapping"
+
+
+@pytest.mark.parametrize("module", MODULES)
+def test_env_delivered_inputs_are_declared_and_optional(module):
+    """An env-delivered input still has to exist in the config -- that is what
+    the CWL references -- and must be optional, since a run without a MAAP
+    token is legitimate for the stages that need no DAAC access."""
+    declared = {i["name"]: i for i in load_config(module)["inputs"]}
+    for name in ENV_INPUTS.get(module, {}):
+        assert name in declared, f"{module}: {name} is not declared"
+        assert str(declared[name]["type"]).endswith("?"), \
+            f"{module}: {name} must be optional"
+
+
+def test_the_cwl_generator_knows_about_every_env_input():
+    """If an input is added to ENV_INPUTS without teaching generate_cwl.sh,
+    it silently stays a command-line flag and the credential lands in argv."""
+    script = (REPO / "utils" / "generate_cwl.sh").read_text()
+    for module, mapping in ENV_INPUTS.items():
+        for name, env in mapping.items():
+            assert name in script, f"generate_cwl.sh does not handle {name}"
+            assert env in script, f"generate_cwl.sh does not set {env}"
+
+
+# --- knowing which image ran -----------------------------------------------
+#
+# cwltool only runs `docker pull` when `docker inspect <dockerPull>` fails, so
+# a worker that has already run a tag keeps its cached copy of that tag even
+# after the tag is rebuilt and repushed. Whether a job gets the new code then
+# depends on which worker picks it up, and the job output looks identical
+# either way. The build stamp is what makes the difference visible.
+
+@pytest.mark.parametrize("module", MODULES)
+def test_every_entrypoint_announces_its_build(module):
+    text = (REPO / module / "bin" / "entrypoint.sh").read_text()
+    assert "MUR_IMAGE_BUILD" in text, (
+        f"{module}: the entrypoint does not print its build stamp, so a job "
+        f"log cannot tell a rebuilt image from a cached one")
+    # Stdout is the module's own output; a banner belongs on stderr.
+    line = next(l for l in text.splitlines() if "MUR_IMAGE_BUILD" in l and l.startswith("echo"))
+    assert line.rstrip().endswith(">&2"), f"{module}: build banner is not on stderr"
+    # Unset must not read as a valid build.
+    assert ":-unknown}" in line, f"{module}: no fallback when the stamp is unset"
+
+
+def test_the_dps_image_bakes_the_stamp_in():
+    text = (REPO / "maap" / "Dockerfile.dps").read_text()
+    assert "ARG BUILD_STAMP" in text
+    assert "ENV MUR_IMAGE_BUILD=${BUILD_STAMP}" in text
+
+
+def test_the_build_script_supplies_and_verifies_the_stamp():
+    """An unset --build-arg leaves the default, and every log line would read
+    'unknown' -- true, but useless, and easy not to notice."""
+    text = (REPO / "utils" / "build_dps_images.sh").read_text()
+    assert "--build-arg \"BUILD_STAMP=${BUILD_STAMP}\"" in text
+    assert "MUR_IMAGE_BUILD=" in text, "the build script never checks the stamp landed"
+
+
+def test_generate_cwl_can_pin_a_digest():
+    """The only way to force a worker off a cached tag.
+
+    Resolution goes through utils/resolve_image_digest.py rather than docker:
+    this script runs in the MAAP workspace, which is where
+    deploy_algorithm_from_cwl_file() reads its file_path from, and a workspace
+    has no Docker daemon. tests/test_image_digest.py covers the resolver."""
+    text = (REPO / "utils" / "generate_cwl.sh").read_text()
+    assert "--pin-digest" in text
+    assert "resolve_image_digest.py" in text, "no way to resolve a tag to a digest"
+    assert (REPO / "utils" / "resolve_image_digest.py").is_file()
+
+
+# --- one version, five places ----------------------------------------------
+#
+# MAAP keeps every registered version, so asking it for a version that is
+# merely OLD is not an error: it resolves, submits, and runs the old image.
+# A half-finished version bump therefore produces a working-looking pipeline
+# running previous code. These make the halves impossible to separate.
+
+def test_the_four_packages_declare_the_version_the_code_asks_for():
+    from mur_maap.version import ALGORITHM_VERSION
+    for module in MODULES:
+        declared = str(load_config(module)["algorithm_version"])
+        assert declared == ALGORITHM_VERSION, (
+            f"{module}: algorithm_config.yml says {declared}, but "
+            f"mur_maap/version.py says {ALGORITHM_VERSION}. The orchestrator "
+            f"would resolve {ALGORITHM_VERSION} and run whatever was deployed "
+            f"under it. Use utils/set_algorithm_version.sh.")
+
+
+def test_the_image_tag_follows_the_version_everywhere():
+    """Already covered per-module; asserted across all four so a partial bump
+    fails loudly rather than leaving one module on the old image."""
+    from mur_maap.version import ALGORITHM_VERSION
+    for module in MODULES:
+        url = load_config(module)["algorithm_container_url"]
+        assert url.endswith(f":{ALGORITHM_VERSION}"), (
+            f"{module}: container URL {url} is not at {ALGORITHM_VERSION}")
+
+
+def test_a_cwl_exists_for_the_current_version():
+    """A CWL filename carries the version, so a bump needs a regenerate.
+
+    Older CWLs are deliberately NOT required to be deleted. They are how you
+    redeploy a previous version after a bad one -- utils/deploy_algorithms.py
+    --version 2.0.0 -- and keeping them costs nothing now that nothing picks a
+    CWL up by globbing the directory. That is the property worth asserting,
+    and test_nothing_deploys_a_cwl_by_globbing does."""
+    from mur_maap.version import ALGORITHM_VERSION
+    cwl_dir = REPO / "maap" / "cwl_workflows"
+    for module in MODULES:
+        expected = cwl_dir / f"process_mur-{module}_{ALGORITHM_VERSION}.cwl"
+        assert expected.is_file(), (
+            f"{module}: {expected.name} does not exist -- regenerate with "
+            f"./utils/generate_cwl.sh")
+
+
+def test_nothing_deploys_a_cwl_by_globbing():
+    """Old CWLs stay committed, so the deploy path must name the file it
+    wants. A glob would register whatever happens to be in the directory --
+    including last version's, which is a silent downgrade that looks like a
+    successful deploy."""
+    import ast
+    tree = ast.parse((REPO / "utils" / "deploy_algorithms.py").read_text())
+
+    # The AST, not the text: the file's own docstring explains why it does not
+    # glob, and a substring search flags that explanation as the offence.
+    directory_scans = {"glob", "rglob", "iterdir", "listdir", "scandir"}
+    found = [node.func.attr for node in ast.walk(tree)
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute)
+             and node.func.attr in directory_scans]
+    assert not found, (
+        f"deploy_algorithms.py scans a directory ({found}) to find a CWL; it "
+        f"must build the path from an explicit version instead.")
+
+
+def test_no_python_source_hardcodes_the_version():
+    """The constant exists so there is exactly one. A literal elsewhere is a
+    default that outlives the next bump."""
+    from mur_maap.version import ALGORITHM_VERSION
+    import re
+    offenders = []
+    for path in [REPO / "run_mur_maap.py"] + sorted((REPO / "mur_maap").glob("*.py")):
+        if path.name == "version.py":
+            continue
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            if re.search(rf'["\']{re.escape(ALGORITHM_VERSION)}["\']', line):
+                offenders.append(f"{path.relative_to(REPO)}:{n}")
+    assert not offenders, (
+        f"the version is hardcoded at {offenders}; import ALGORITHM_VERSION")
+
+
+# --- the DPS layer must not change who the image runs as -------------------
+
+def _runtime_stage(module):
+    """The final stage of a module Dockerfile -- what actually ships."""
+    text = (REPO / module / "Dockerfile").read_text()
+    stages = text.split("\nFROM ")
+    return stages[-1]
+
+
+def test_no_module_image_creates_a_user_in_its_runtime_stage():
+    """The premise behind the next test. Every module builds MATLAB code in a
+    builder stage (which does have a matlab user) and copies the artifacts
+    into a plain debian:bookworm-slim runtime stage that creates none."""
+    for module in MODULES:
+        stage = _runtime_stage(module)
+        assert "useradd" not in stage and "adduser" not in stage, (
+            f"{module}: the runtime stage now creates a user -- "
+            f"test_the_dps_layer_does_not_switch_to_a_nonexistent_user "
+            f"may need updating")
+
+
+def test_the_dps_layer_does_not_switch_to_a_nonexistent_user():
+    """Dockerfile.dps once ended with `USER matlab`, copied from the module
+    Dockerfiles -- where it appears in the BUILDER stage. The runtime stage
+    has no such account, so the image could not start:
+
+        unable to find user matlab: no matching entries in passwd file
+
+    Docker validates USER at run time, not build time, so this built cleanly
+    and broke every `docker run`. DPS itself was unaffected, because cwltool
+    passes a numeric --user that needs no passwd entry (cwltool/docker.py:
+    `runtime.append("--user=%d:%d" % (euid, egid))`) -- which is precisely
+    what made it hard to spot: jobs worked, local runs did not."""
+    text = (REPO / "maap" / "Dockerfile.dps").read_text()
+    users = [line.split(maxsplit=1)[1].strip()
+             for line in text.splitlines()
+             if line.startswith("USER ")]
+    for user in users:
+        assert user in ("root", "0"), (
+            f"Dockerfile.dps switches to {user!r}, which the module runtime "
+            f"stages do not create. The image would build and then fail to "
+            f"start.")
+
+
+def _text_copies(dockerfile_text, module):
+    """(source, destination) for every .sh/.py COPY, build arg substituted.
+
+    Both halves, because a refresh is only a refresh if it lands on the path
+    the module actually reads. Comparing sources alone passed cog for months
+    while Dockerfile.dps wrote /opt/common/bin and cog read /opt/cog/bin.
+    """
+    import re
+    pairs = re.findall(r"^COPY\s+([^-\s]\S*)\s+(\S+)", dockerfile_text, re.M)
+    return {
+        (src.replace("${MODULE}", module), dst.replace("${MODULE}", module))
+        for src, dst in pairs
+        if src.endswith((".sh", ".py"))
+    }
+
+
+def test_the_dps_layer_refreshes_every_text_file_the_modules_copy():
+    """maap/Dockerfile.dps exists so a change to a shell or Python file does
+    not require rebuilding a MATLAB image. That only holds if it refreshes
+    ALL of them, TO THE SAME PATH -- one left out, or one landing somewhere
+    the module does not read, reaches an image only through a full base
+    rebuild, and the omission is invisible: the image builds and the stale
+    file runs."""
+    dps = (REPO / "maap" / "Dockerfile.dps").read_text()
+
+    for module in MODULES:
+        refreshed = _text_copies(dps, module)
+        copied = _text_copies(_runtime_stage(module), module)
+
+        missing = {src for src, _ in copied} - {src for src, _ in refreshed}
+        assert not missing, (
+            f"{module}/Dockerfile copies {sorted(missing)} from the working "
+            f"tree, but Dockerfile.dps does not refresh it. A change there "
+            f"would need a full MATLAB rebuild to reach an image.")
+
+        # Same source, different destination: the refresh writes a file the
+        # module never reads, and the one it does read stays stale.
+        dps_dest = dict(refreshed)
+        for src, dst in sorted(copied):
+            assert dps_dest[src] == dst, (
+                f"{module}/Dockerfile puts {src} at {dst}, but "
+                f"Dockerfile.dps refreshes {dps_dest[src]}. The refresh "
+                f"would write a path {module} does not read.")
+
+
+@pytest.mark.parametrize("module", MODULES)
+def test_every_image_is_linked_to_the_repository(module):
+    """GHCR connects a package to its repo through this label and nothing else.
+
+    Images are pushed by hand -- no CI can reach the JPL licence servers -- so
+    an unlabelled package lands orphaned on GHCR and has to be linked through
+    the web UI afterwards. cog shipped without it and was caught by eye, which
+    is the check this replaces.
+
+    The -dps variants inherit it: maap/Dockerfile.dps does FROM ${BASE_IMAGE},
+    and Docker accumulates LABELs from the parent, so labelling the module
+    image covers both.
+    """
+    dockerfile = (REPO / module / "Dockerfile").read_text()
+    assert 'org.opencontainers.image.source="https://github.com/podaac/mur"' \
+        in dockerfile, (
+            f"{module}/Dockerfile has no source label; its GHCR package would "
+            f"land unlinked")
+
+
+@pytest.mark.parametrize("module", MODULES)
+def test_set_version_rewrites_the_image_tag_whatever_it_said(module, tmp_path):
+    """SET must bring a config into step, not only keep one in step.
+
+    The container URL rewrite used to be anchored on the OLD version:
+
+        s|^\\(algorithm_container_url: .*\\):$OLD$|\\1:$NEW|
+
+    so a config already out of step could never be fixed. The name was the
+    bug: "bump" means move from OLD to NEW, which is why the rewrite keyed
+    on OLD. "Set everything to X" has no such notion. cog was added at
+    cog-dps:2.0.4 while version.py read 2.0.10; bumping to 2.0.11 moved
+    algorithm_version and left the image tag at 2.0.4. The config then
+    described one version while pointing at another version's image, and the
+    registration resolved a container unrelated to what was being deployed.
+
+    This drives the real script against a config deliberately out of step.
+    """
+    import shutil
+    import subprocess
+
+    (tmp_path / "mur_maap").mkdir()
+    (tmp_path / "mur_maap" / "version.py").write_text(
+        'ALGORITHM_VERSION = "9.9.9"\n')
+    for m in MODULES:
+        d = tmp_path / "maap" / m
+        d.mkdir(parents=True)
+        # Every module is in step except the one under test.
+        tag = "1.1.1" if m == module else "9.9.9"
+        (d / "algorithm_config.yml").write_text(
+            f'algorithm_version: "{tag}"\n'
+            f'algorithm_container_url: ghcr.io/podaac/mur/{m}-dps:{tag}\n')
+    (tmp_path / "utils").mkdir()
+    shutil.copy(REPO / "utils" / "set_algorithm_version.sh",
+                tmp_path / "utils")
+
+    subprocess.run(["bash", "utils/set_algorithm_version.sh", "9.9.10"],
+                   cwd=tmp_path, capture_output=True, check=False)
+
+    got = (tmp_path / "maap" / module / "algorithm_config.yml").read_text()
+    assert f"ghcr.io/podaac/mur/{module}-dps:9.9.10" in got, (
+        f"{module}: the image tag was not rewritten from 1.1.1")
+    assert 'algorithm_version: "9.9.10"' in got
+
+
+def test_setting_the_version_already_set_still_repairs_a_stale_module(tmp_path):
+    """Asking for the version already set must still fix an out-of-step module.
+
+    It used to exit at "Already at X; nothing to do", on the assumption that
+    if version.py agrees then everything does. It does not follow -- cog sat at
+    cog-dps:2.0.4 while version.py read 2.0.11 -- so re-running was the obvious
+    thing to try and the one thing that changed nothing.
+
+    There is deliberately no --force: a repair nobody knows to ask for is a
+    repair that does not happen.
+    """
+    import shutil
+    import subprocess
+
+    (tmp_path / "mur_maap").mkdir()
+    (tmp_path / "mur_maap" / "version.py").write_text(
+        'ALGORITHM_VERSION = "2.0.11"\n')
+    for m in MODULES:
+        d = tmp_path / "maap" / m
+        d.mkdir(parents=True)
+        tag = "2.0.4" if m == "cog" else "2.0.11"      # cog alone is behind
+        (d / "algorithm_config.yml").write_text(
+            f'algorithm_version: "2.0.11"\n'
+            f'algorithm_container_url: ghcr.io/podaac/mur/{m}-dps:{tag}\n')
+    (tmp_path / "utils").mkdir()
+    shutil.copy(REPO / "utils" / "set_algorithm_version.sh",
+                tmp_path / "utils")
+
+    # The SAME version it already has.
+    r = subprocess.run(["bash", "utils/set_algorithm_version.sh", "2.0.11"],
+                       cwd=tmp_path, capture_output=True, text=True)
+
+    got = (tmp_path / "maap" / "cog" / "algorithm_config.yml").read_text()
+    assert "cog-dps:2.0.11" in got, (
+        f"re-run did not repair the stale tag.\n{r.stdout}\n{r.stderr}")
+    assert "nothing to do" not in r.stdout
+
+
+def test_generate_refuses_when_the_configs_disagree(tmp_path):
+    """Generating from an inconsistent config produces a CWL that looks fine.
+
+    These configs are tracked files. Managing the version without committing
+    is a reasonable way to work while iterating, but it means every git pull
+    silently reverts them -- and generating before re-running
+    set_algorithm_version.sh is then the natural mistake.
+
+    On 2026-10-07 it produced a 2.0.11-named CWL carrying dockerPull
+    mrva-dps:2.0.4, which registered cleanly and ran a three-week-old image
+    that died on an argument it had never heard of, forty minutes in. Checked
+    before generating rather than after, and before the generator is even
+    cloned, so the answer costs seconds.
+    """
+    import shutil
+    import subprocess
+
+    (tmp_path / "mur_maap").mkdir()
+    (tmp_path / "mur_maap" / "version.py").write_text(
+        'ALGORITHM_VERSION = "2.0.11"\n')
+    for m in MODULES:
+        d = tmp_path / "maap" / m
+        d.mkdir(parents=True)
+        # mrva's image tag alone is stale -- exactly what a pull leaves behind.
+        tag = "2.0.4" if m == "mrva" else "2.0.11"
+        (d / "algorithm_config.yml").write_text(
+            f'algorithm_version: "2.0.11"\n'
+            f'algorithm_container_url: ghcr.io/podaac/mur/{m}-dps:{tag}\n')
+    (tmp_path / "utils").mkdir()
+    shutil.copy(REPO / "utils" / "generate_cwl.sh", tmp_path / "utils")
+
+    # GENERATOR_DIR is redirected into the fixture. Left at its default it is
+    # /tmp/ogc-app-pack-generator, shared with every other test that runs this
+    # script -- so whether a clone happens depends on which tests ran first,
+    # and the assertion below was flaky for exactly that reason.
+    import os
+    gen = tmp_path / "generator"
+    env = {**os.environ, "GENERATOR_DIR": str(gen)}
+    r = subprocess.run(["bash", "utils/generate_cwl.sh"], cwd=tmp_path,
+                       capture_output=True, text=True, env=env)
+
+    assert r.returncode != 0, "an inconsistent config must not generate"
+    assert "Refusing to generate" in r.stdout
+    assert "mrva" in r.stdout and "2.0.4" in r.stdout
+    assert "set_algorithm_version.sh 2.0.11" in r.stdout
+    # And it reached that verdict without fetching a generator it cannot use.
+    assert not gen.exists(), "refused, but cloned the generator anyway"

@@ -314,6 +314,89 @@ assert_eq "config JSON: prior_csp_file is null when not provided" "" "$(json_fie
 assert_eq "config JSON: debug defaults to false" "False" "$(json_field "$scratch/tmp/mrva_config.json" debug)"
 rm -rf "$scratch" "$src_dir"
 
+# --- the stage-out root ------------------------------------------------------
+#
+# mrva called output_root as a function without ever defining one, so the very
+# first line of main() ran `mkdir -p ""` and DPS job 310fc265 died before it
+# localized an input -- reported by CWL as "Did not find output file with glob
+# pattern: ['./output*']", which points at stage-out rather than at the typo.
+# These assert the function exists and that all three callers agree.
+assert_eq "output_root defaults to \$PWD/output" \
+    "/tmp/ep-cwd-probe/output" \
+    "$(mkdir -p /tmp/ep-cwd-probe && cd /tmp/ep-cwd-probe && run_case 'output_root')"
+assert_eq "output_root honours MUR_OUTPUT_ROOT" \
+    "/data/output" \
+    "$(MUR_OUTPUT_ROOT=/data/output run_case 'output_root')"
+
+scratch="$(mktemp -d)"
+out="$(MUR_OUTPUT_ROOT="$scratch/out" run_case 'setup_output_redirect >/dev/null 2>&1; echo "$MUR_STAGE_OUT_MODE"')"
+assert_eq "setup_output_redirect resolves a root and picks a real mode" \
+    "0" "$([[ -n "$out" && "$out" != "none" ]] && echo 0 || echo 1)"
+assert_eq "setup_output_redirect creates the dirs main() globs" \
+    "0" "$([[ -d "$scratch/out/csp" && -d "$scratch/out/netcdf" ]] && echo 0 || echo 1)"
+rm -rf "$scratch" /tmp/ep-cwd-probe
+
+# --- STAC metadata for the granules ----------------------------------------
+#
+# Described from what is on disk, not from --year/--doy: the filename is what
+# the product actually claims, so a disagreement surfaces as a wrong item id
+# rather than being papered over by recomputing the date we asked for.
+stac_root="$(mktemp -d)"
+nc_dir="$stac_root/netcdf/GLOB/JPL/MUR/v4/2026/279nrt"
+mkdir -p "$nc_dir"
+FINE="20261006090000-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-v02.0-fv04.1.nc"
+COARSE="20261006090000-JPL-L4_GHRSST-SSTfnd-MUR25-GLOB-v02.0-fv04.2.nc"
+touch "$nc_dir/$FINE" "$nc_dir/$FINE.md5" \
+      "$nc_dir/$COARSE" "$nc_dir/$COARSE.md5"
+
+assert_eq "it finds the 1 km granule under the nested netcdf tree" \
+    "$nc_dir/$FINE" \
+    "$(MUR_OUTPUT_ROOT="$stac_root" run_case "_stac_find_granule '$stac_root' '*-MUR-GLOB-*.nc'")"
+
+# The .md5 siblings are the trap: a '*MUR-GLOB*' pattern without the .nc
+# anchor matches them too, and the orchestrator's own output patterns failed
+# on "found 2" for exactly that reason.
+assert_eq "the .md5 siblings are not mistaken for granules" \
+    "$nc_dir/$COARSE" \
+    "$(MUR_OUTPUT_ROOT="$stac_root" run_case "_stac_find_granule '$stac_root' '*-MUR25-GLOB-*.nc'")"
+
+assert_eq "asset paths are relative to the stage-out root" \
+    "netcdf/GLOB/JPL/MUR/v4/2026/279nrt/$FINE" \
+    "$(run_case "_stac_relpath '$stac_root' '$nc_dir/$FINE'")"
+
+MUR_OUTPUT_ROOT="$stac_root" run_case "MODE=nrt; DOY=279; MAX_LEVEL=10; write_stac" >/dev/null 2>&1
+assert_eq "a catalog.json lands at the root of the stage-out directory" \
+    "0" "$([[ -f "$stac_root/catalog.json" ]] && echo 0 || echo 1)"
+assert_eq "the item id carries the mode, so REA does not replace NRT" \
+    "0" "$([[ -f "$stac_root/mur-l4-sst/mur-l4-20261006-nrt/mur-l4-20261006-nrt.json" ]] && echo 0 || echo 1)"
+assert_eq "both products are assets of that one item" \
+    "data data25" \
+    "$(python3 -c "
+import json,glob
+p=glob.glob('$stac_root/mur-l4-sst/*/*.json')[0]
+print(' '.join(sorted(json.load(open(p))['assets'])))" 2>/dev/null)"
+
+# An empty directory must produce no catalog at all. An item pointing at
+# nothing appears in the catalogue and fails only when someone draws it.
+empty="$(mktemp -d)"; mkdir -p "$empty/netcdf"
+MUR_OUTPUT_ROOT="$empty" run_case "MODE=nrt; DOY=279; write_stac" >/dev/null 2>&1
+assert_eq "no granule means no catalog, not an empty one" \
+    "1" "$([[ -f "$empty/catalog.json" ]] && echo 0 || echo 1)"
+rm -rf "$stac_root" "$empty"
+
+# --- the exit code survives set -e -----------------------------------------
+#
+# main() runs under `set -e`, so a bare "${CMD[@]}" followed by `$?` exits
+# before anything after it runs -- taking the copy-mode stage-out and the
+# metadata step with it, so a failed run would stage out nothing. Asserted on
+# the source because the real call needs the MATLAB Runtime.
+assert_eq "MATLAB's exit code is captured in an OR-list, not read from \$?" \
+    "1" "$(grep -c '"\${CMD\[@\]}" || rc=\$?' "$ENTRYPOINT")"
+assert_eq "...and the entrypoint no longer execs past the stage-out" \
+    "0" "$(grep -c 'exec "\${CMD\[@\]}"' "$ENTRYPOINT")"
+assert_eq "a failed solve publishes nothing" \
+    "1" "$(grep -c 'STAC: skipped -- MATLAB exited' "$ENTRYPOINT")"
+
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
     echo "All tests passed."

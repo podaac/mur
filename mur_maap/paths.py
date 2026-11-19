@@ -18,7 +18,7 @@ Two vocabularies, kept deliberately distinct:
         because the containers' localize.sh hands it straight to `aws s3 cp`.
 """
 import datetime
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 MUR_ROOT = "mur"
 
@@ -30,6 +30,57 @@ def _doy(day: datetime.date) -> int:
 def href(workspace_root: str, key: str) -> str:
     """Join a workspace root ("s3://bucket/prefix") and a bucket-relative key."""
     return f"{workspace_root.rstrip('/')}/{key.lstrip('/')}"
+
+
+# The bucket MAAP gives every account a personal prefix in. Only a root in
+# this bucket has a username as its last segment; an org bucket such as
+# s3://mur-sst names a team, not a person.
+PERSONAL_WORKSPACE_BUCKET = "maap-ops-workspace"
+
+
+def username_from_config(config: Dict) -> Optional[str]:
+    """The MAAP username a config names, or None if it names none.
+
+    maap.username wins. Otherwise the last segment of maap.workspace_root,
+    but only when that root is a personal prefix in maap-ops-workspace:
+    with the root in a team bucket, its last segment is a bucket or folder
+    name, and MAAP would never have filed a collection under it.
+    """
+    maap = config.get("maap") or {}
+    explicit = str(maap.get("username") or "").strip()
+    if explicit and "<" not in explicit:
+        return explicit
+    root = str(maap.get("workspace_root") or "").rstrip("/")
+    if not root.startswith(f"s3://{PERSONAL_WORKSPACE_BUCKET}/") or "<" in root:
+        return None
+    return root.rsplit("/", 1)[-1] or None
+
+
+# What to look for among the account's team (org) buckets when the config
+# does not say. The project's own name, so that nothing here names a bucket.
+TEAM_BUCKET_MATCH = MUR_ROOT
+
+
+def team_bucket_setting(config: Dict) -> Tuple[Optional[str], Optional[str]]:
+    """How maap.team_bucket says to find the team bucket: (root, match).
+
+    The setting is one of
+      absent           search the account's team buckets for TEAM_BUCKET_MATCH
+      "s3://bucket/p"  use exactly this root; nothing is searched
+      "text"           search for a team bucket whose name contains "text"
+      false / ""       no team bucket; granules are not shared
+    Exactly one of the pair is set, or neither when sharing is off. The
+    search itself needs credentials, so it is the caller's (see
+    WorkspaceBucket.org_path).
+    """
+    maap = config.get("maap") or {}
+    value = maap.get("team_bucket", TEAM_BUCKET_MATCH)
+    if not value or "<" in str(value):
+        return None, None
+    value = str(value).strip()
+    if value.startswith("s3://"):
+        return value.rstrip("/"), None
+    return None, value
 
 
 def split_href(uri: str) -> Tuple[str, str]:
@@ -91,10 +142,99 @@ def bic_relative_path(sensor: str, data_day: datetime.date, filename: str) -> st
     return f"{sensor}/{data_day.year}/{filename}"
 
 
+# --- CSP coefficients (MRVA output, next day's --prior-csp-file) -----------
+
+def csp_filename(process_date: datetime.date) -> str:
+    """The name MRVA gives its L=6 coefficient file.
+
+    Mirrors run_mur_pipeline.py's resolve_mrva_prior_csp, which looks for
+    `<YYYYMMDD>09_MRVA4_Global.c06` under `<csp_dir>/<year>/`.
+    """
+    return f"{process_date.strftime('%Y%m%d')}09_MRVA4_Global.c06"
+
+
+def csp_key(process_date: datetime.date) -> str:
+    return f"{MUR_ROOT}/csp/{process_date.year}/{csp_filename(process_date)}"
+
+
+def prior_csp_href(workspace_root: str, process_date: datetime.date) -> str:
+    """Canonical href for the coefficient MRVA should chain from.
+
+    Only meaningful in NRT mode -- REA never used a prior coefficient (see
+    resolve_mrva_prior_csp). Absence is a valid state: mrva4com_container.m
+    bootstraps instead.
+    """
+    prior_day = process_date - datetime.timedelta(days=1)
+    return href(workspace_root, csp_key(prior_day))
+
+
+# --- landice (daily ice fields, MRVA input) --------------------------------
+#
+# Confirmed against a real mur-landice job (2026/164): DPS stages out
+# p01/<year>/ and p011/<year>/, with the two binaries gzipped and the file
+# list plain. As with BICs, the compressed form is probed first and the real
+# basename is carried into the key rather than assumed.
+
+LANDICE_OUTPUTS = {
+    #  output name           subdir  basename template                gzipped
+    "landice_ice_p011":      ("p011", "Global_ice_{year}_{doy}.bip",   True),
+    "landice_grid_p01":      ("p01",  "landiceP01_{year}_{doy}.gds",   True),
+    "landice_icefiles_p011": ("p011", "icefiles_{year}_{doy}.txt",     False),
+}
+
+
+def landice_filename(output_name: str, day: datetime.date,
+                     compressed: bool = True) -> str:
+    """The canonical name for one landice output.
+
+    Promotion goes through here rather than reusing the DPS object's own
+    basename, so the name written is by construction one of the names
+    landice_filenames() probes for. Deriving it from the source instead would
+    let the two drift apart, and a cache whose key does not match its probe is
+    not a cache -- it is a silent, permanent resubmission (which is how the
+    `s3://mur/...` bucket bug hid, above).
+    """
+    _sub, template, gzipped = LANDICE_OUTPUTS[output_name]
+    base = template.format(year=day.year, doy=f"{_doy(day):03d}")
+    return base + ".gz" if (gzipped and compressed) else base
+
+
+def landice_filenames(output_name: str, day: datetime.date) -> List[str]:
+    """Probe order for one landice output: compressed first, then plain."""
+    if LANDICE_OUTPUTS[output_name][2]:
+        return [landice_filename(output_name, day, True),
+                landice_filename(output_name, day, False)]
+    return [landice_filename(output_name, day, False)]
+
+
+def landice_key(output_name: str, day: datetime.date, filename: str) -> str:
+    subdir = LANDICE_OUTPUTS[output_name][0]
+    return f"{MUR_ROOT}/landice/{subdir}/{day.year}/{filename}"
+
+
+def landice_candidate_hrefs(workspace_root: str, output_name: str,
+                            day: datetime.date) -> List[str]:
+    return [href(workspace_root, landice_key(output_name, day, name))
+            for name in landice_filenames(output_name, day)]
+
+
 # --- iQuam (IQUAM0 fan-in input) -------------------------------------------
 
 def iquam_filename(data_day: datetime.date) -> str:
     return f"Global_IQUAM0_{data_day.year}_{_doy(data_day):03d}.bii"
+
+
+def iquam_key(data_day: datetime.date) -> str:
+    return f"{MUR_ROOT}/iquam/{data_day.year}/{iquam_filename(data_day)}"
+
+
+def iquam_href(workspace_root: str, data_day: datetime.date) -> str:
+    """Canonical href for one day's buoy file.
+
+    The year comes from the data day, matching iquam_relative_path: one job
+    writes its whole +/- window, which can straddle a year boundary.
+    """
+    return href(workspace_root, iquam_key(data_day))
 
 
 def iquam_relative_path(data_day: datetime.date) -> str:
@@ -105,6 +245,44 @@ def iquam_relative_path(data_day: datetime.date) -> str:
     into two year directories.
     """
     return f"IQUAM0/{data_day.year}/{iquam_filename(data_day)}"
+
+
+# --- L4 granules (MRVA's products, and cog's input) ------------------------
+#
+# Promoted to canonical keys for the same reason landice, iquam and the BICs
+# are: a DPS result path contains the job's own id
+# (dps_output/mur-mrva_1756/2.0.12/2026/10/08/18/10/20/964098/...) and cannot
+# be reconstructed from a date. Without a canonical key the granule is
+# findable only by the run that made it, so nothing can regenerate browse
+# rasters for an existing day, re-publish a STAC item, or compare two days --
+# which is exactly what `--execute cog` could not do.
+#
+# Mode is in the key because a day is produced first as NRT and later
+# reprocessed as REA, and both are real artifacts. Collapsing them would let
+# the reanalysis silently overwrite the interim.
+
+def l4_filename(process_date: datetime.date, mode: str,
+                resolution: str = "1km") -> str:
+    """The canonical name for one promoted granule.
+
+    Generated rather than copied from the DPS basename, which carries a
+    product version (fv04.1 for 1 km, fv04.2 for MUR25 -- they differ) that
+    a probe would have to guess. Same reasoning as landice_filename.
+    """
+    tag = "MUR25" if resolution == "25km" else "MUR"
+    return (f"{process_date.strftime('%Y%m%d')}09-JPL-L4_GHRSST-SSTfnd-"
+            f"{tag}-GLOB-{mode}.nc")
+
+
+def l4_key(process_date: datetime.date, mode: str,
+           resolution: str = "1km") -> str:
+    return (f"{MUR_ROOT}/l4/{resolution}/{process_date.year}/"
+            f"{l4_filename(process_date, mode, resolution)}")
+
+
+def l4_href(workspace_root: str, process_date: datetime.date, mode: str,
+            resolution: str = "1km") -> str:
+    return href(workspace_root, l4_key(process_date, mode, resolution))
 
 
 # --- manifests -------------------------------------------------------------

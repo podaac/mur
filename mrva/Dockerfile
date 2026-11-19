@@ -19,6 +19,15 @@
 # DEBUG: Set to 1 to enable debug build with symbols, bounds checking, and tracebacks
 #        Default is 0 (production build with full optimizations)
 ARG DEBUG=0
+# infoMatrix storage precision for the main mrva solver. 0 (default) builds it
+# real*4: 30.77 GiB at L=11 rather than 55.48, which is what makes the run fit
+# a 64 GiB pool at all. 1 restores real*8, which needs more memory than any
+# pool we can reach -- see the comment block at the top of
+# mrva/src/fortran/spmm.f, including the validation this has not had. Applied
+# only to the main Fortran build: cx/ carries its own copy of spmm.f with no
+# preprocessor guards and cx/Makefile has no -fpp, so the flag would be
+# silently ignored there.
+ARG INFOMATRIX_R8=0
 
 # ========================================================================
 # Stage 1: Fortran Build Stage (Intel oneAPI HPC Toolkit with ifort)
@@ -27,6 +36,7 @@ FROM intel/oneapi-hpckit:2024.0.1-devel-ubuntu22.04 AS fortran-builder
 
 # Re-declare ARGs after FROM to make them available in this stage
 ARG DEBUG
+ARG INFOMATRIX_R8
 
 # Remove problematic Intel GPU repository (not needed for Fortran compilation)
 RUN rm -f /etc/apt/sources.list.d/intel-graphics.list 2>/dev/null || true
@@ -52,7 +62,7 @@ COPY mrva/src/fortran/cx/*.f /app/fortran/cx/
 COPY mrva/src/fortran/cx/Makefile /app/fortran/cx/
 
 # Update Makefiles to use ifort from oneAPI (just update the path, keep optimization flags)
-# The original Makefiles use Intel-specific flags: -80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost
+# The Makefiles use these flags (-march, not the reference -xHost; see mrva/src/fortran/Makefile): -80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -march=core-avx-i
 RUN sed -i 's|^FC = /opt/intel/bin/ifort|FC = ifort|g' /app/fortran/Makefile && \
     sed -i 's|^FC = /opt/intel/bin/ifort|FC = ifort|g' /app/fortran/cx/Makefile && \
     sed -i 's|^default:.*|default: cbscxdata cbscxcoeff cbscxcoeffvector|g' /app/fortran/cx/Makefile && \
@@ -66,7 +76,7 @@ RUN sed -i 's|^FC = /opt/intel/bin/ifort|FC = ifort|g' /app/fortran/Makefile && 
 #
 # Build modes (controlled by DEBUG build arg):
 #   DEBUG=0 (default): Production build with full optimizations
-#     -80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost -fpp
+#     -80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -march=core-avx-i -fpp
 #   DEBUG=1: Debug build with symbols, bounds checking, and tracebacks
 #     -80 -qopenmp -fpp -g -traceback -check bounds -check uninit -fpe0 -warn all -O0
 #
@@ -83,7 +93,7 @@ RUN cd /app/fortran && \
     fi && \
     ifort --version && \
     make clean && \
-    make DEBUG=${DEBUG:-0} && \
+    make DEBUG=${DEBUG:-0} INFOMATRIX_R8=${INFOMATRIX_R8:-0} && \
     echo "Main Fortran executables compiled successfully" && \
     echo "Verifying main executables:" && \
     ls -lh /app/fortran/mrva \
@@ -155,6 +165,7 @@ ENV MRVA_DEBUG_BUILD=${DEBUG}
 # fetch s3:// input hrefs (direct-value flags and --sensor-inputs-manifest
 # entries) to local disk before MATLAB runs -- see
 # docs/input-contract.html section 4.
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libc6 \
@@ -168,14 +179,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/*
 
-# Copy custom MATLAB Runtime installer from builder stage
-COPY --from=matlab-builder /tmp/runtime_installer/ /tmp/runtime_installer/
-
 # Install custom MATLAB Runtime
-RUN cd /tmp/runtime_installer && \
+# The installer is bind-mounted from the builder stage, not COPY'd: a COPY
+# leaves the ~640 MiB installer in its own layer of the final image, and a
+# later rm only hides it. rw lets the installer write beside itself; those
+# writes are discarded with the mount. Needs BuildKit (default since Docker 23).
+RUN --mount=type=bind,from=matlab-builder,source=/tmp/runtime_installer,target=/tmp/runtime_installer,rw \
+    cd /tmp/runtime_installer && \
     chmod +x mrva_runtime.install && \
-    ./mrva_runtime.install -mode silent -agreeToLicense yes -destinationFolder /opt/matlabruntime && \
-    rm -rf /tmp/runtime_installer
+    ./mrva_runtime.install -mode silent -agreeToLicense yes -destinationFolder /opt/matlabruntime
 
 # Copy Intel OpenMP and runtime libraries needed by ifort-compiled executables
 # These are required for executables compiled with -qopenmp flag
@@ -254,7 +266,15 @@ WORKDIR /data
 # common/*.m above, this is bash, not MATLAB source to be compiled away, so
 # it has to persist into this final image.
 COPY common/bin/localize.sh /opt/common/bin/localize.sh
-RUN chmod +x /opt/common/bin/localize.sh
+# Mints DAAC credentials from a MAAP token, so the container can read
+# a bucket its own role cannot. stdlib only -- no new dependencies.
+COPY common/bin/maap_credentials.py /opt/common/bin/maap_credentials.py
+# Emits the catalog.json MAAP ingests into dps-stac.maap-project.org, so a
+# granule is addressable by date instead of by the DPS job that made it.
+# stdlib only -- there is no pip in this image, and the catalog is validated
+# against real pystac by tests/test_write_stac.py before the image is built.
+COPY common/bin/write_stac.py /opt/common/bin/write_stac.py
+RUN chmod +x /opt/common/bin/localize.sh /opt/common/bin/write_stac.py
 
 # Entrypoint wrapper script (source: mrva/bin/entrypoint.sh).
 # Named-args only (--year --doy --mode plus the explicit static/dynamic
@@ -279,13 +299,18 @@ ENTRYPOINT ["/opt/mrva/bin/entrypoint.sh"]
 CMD []
 
 # Labels for metadata
+# org.opencontainers.image.source connects the pushed package to the
+# repository on GHCR. Images are pushed by hand (no CI can reach the JPL
+# licence servers), so without this label a package lands unlinked and has
+# to be connected through the web UI.
+LABEL org.opencontainers.image.source="https://github.com/podaac/mur"
 LABEL description="MUR MRVA (Multi-Resolution Variational Analysis) Module - Container Wrapper"
 LABEL version="1.4"
 LABEL maintainer="MUR Team"
 LABEL build-pattern="3-stage: (1) Intel ifort Fortran build, (2) MATLAB compilation, (3) Base runtime image"
 LABEL base-image="mur-matlab-base:r2024b"
 LABEL compiler="Intel Fortran Compiler (ifort) from oneAPI HPC Toolkit 2024.0.1"
-LABEL compiler-flags-production="-80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost"
+LABEL compiler-flags-production="-80 -qopenmp -pad -ipo -O3 -no-prec-div -fp-model fast=2 -march=core-avx-i"
 LABEL compiler-flags-debug="-80 -qopenmp -g -traceback -check bounds -check uninit -fpe0 -warn all -O0"
 LABEL build-arg-debug="Set DEBUG=1 for debug build with symbols and bounds checking"
 LABEL interface="Named args only: --year --doy --mode plus explicit static/dynamic input flags and --sensor-inputs-manifest"

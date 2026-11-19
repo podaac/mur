@@ -148,10 +148,21 @@ for isensor=1:size(sensors,1),
 
 %% packing:
 
-  % Preallocate arrays for better performance
-  % Use large flat estimate to avoid any reallocations (trim at end)
-  % MODIS worst case: ~30M/day × 5 days = 150M points
-  max_size = 200000000;  % 200M points - covers all sensors with margin
+  % Preallocate arrays for better performance (trim at end).
+  %
+  % This used to be a flat 200M points for every sensor -- a MODIS worst case
+  % of ~30M/day x 5 days, paid in full by all six. At 5 double arrays that is
+  % 7.45 GiB allocated before a single point is read, whether the sensor is
+  % MODISA or IQUAM0, which in the 2026-266 run contributed 212,612 points --
+  % 0.1% of the allocation. DPS job 2026-09-24T16:51 was OOM-killed (exit 137)
+  % part way through MODISA on a 16 GB worker with that 7.45 GiB standing.
+  %
+  % Sizing from the input files is safe in a way that restructuring this loop
+  % is not: the arrays are trimmed to idx below regardless, so the data handed
+  % downstream is bit-identical for any max_size >= the true point count, and
+  % the doubling branch in the read loop already covers an underestimate. An
+  % estimate that is wrong costs one reallocation, never a wrong answer.
+  max_size = estimate_max_points(indir, inregion, sensor, year, day, dayrange);
 
   % NOTE: Must use double precision to match production behavior
   % Single precision causes weight calculation errors (1/rms^2 overflow)
@@ -564,3 +575,73 @@ if flog>1, fclose(flog); end;
 clear lonbip latbip dhrbip sstbip wgtbip;
 clear lon lat sst bias rms hour qt sun;
 clear keep;
+
+
+function n = estimate_max_points(indir, inregion, sensor, year, day, dayrange)
+% Upper bound on the points a sensor's window can contribute, from file sizes.
+%
+% Read-only, and deliberately generous. Its only job is to stop every sensor
+% paying MODIS's worst case; being wrong costs one reallocation in the read
+% loop, never a wrong result, because the arrays are trimmed to the true count
+% before anything downstream sees them.
+%
+% Bytes per point, from the record-length assertions in the read branches
+% below -- the same constants those branches use to validate rec_len:
+%
+%   .bin   32   lon,lat,sst,bias,rms,hour,qt,sun all 4-byte
+%   .bic   16   lon(4) lat(4) hour(2) sst(2) bias(2) rms(1) qt(1)
+%   .bii    9   sst(2) lon(2) lat(2) hour(2) qt(1)
+%
+% A compressed file's directory entry gives the COMPRESSED size, so a factor
+% is applied rather than trusting it. Expected ratio for a .bic record, by
+% field: lon/lat are float32 with near-random mantissas (~1.1x), hour/sst/bias
+% are correlated int16 (~2x), rms/qt are repetitive uint8 (~5x) -- weighted,
+% 16 bytes compress to about 10.7, so ~1.5x. GZIP_FACTOR is set to double that
+% so the estimate stays an over-estimate without inflating MODIS back into the
+% ceiling, which would waste the whole exercise on the one sensor that needs
+% the help most.
+  BYTES_PER_POINT = 16;   % assume .bic unless the name says otherwise
+  GZIP_FACTOR     = 3;    % ~2x the ~1.5x this data actually achieves
+  SAFETY          = 1.30; % headroom for mixed formats and header/marker bytes
+  FLOOR_POINTS    = 1000000;      %  1M  -> 40 MB of arrays; cheap
+  CEIL_POINTS     = 200000000;    % the historical flat value, never exceeded
+
+  total = 0;
+  for dt = -dayrange:dayrange
+      % The year-rollover arithmetic is duplicated from the read loop rather
+      % than factored out of it. Touching the loop that decides WHICH files
+      % are read is the risk this whole change exists to avoid; a divergence
+      % here only mis-sizes an allocation the doubling branch will fix.
+      d = day + dt; y = year;
+      if mod(y,4)==0 & (mod(y,100)~=0 | mod(y,400)==0), md = 366; else, md = 365; end;
+      if d < 1
+          y = y - 1;
+          if mod(y,4)==0 & (mod(y,100)~=0 | mod(y,400)==0), md = 366; else, md = 365; end;
+          d = d + md;
+      elseif d > md
+          d = d - md; y = y + 1;
+      end
+
+      dirlist = dir(sprintf('%s/%04d/%s_%s_%04d_%03d.b*', ...
+                            indir, y, inregion, sensor, y, d));
+      if isempty(dirlist), continue; end;
+
+      bytes = double(dirlist(1).bytes);
+      name  = dirlist(1).name;
+      [~, body, tail] = fileparts(name);
+      if strcmp(tail, '.gz') || strcmp(tail, '.bz2')
+          bytes = bytes * GZIP_FACTOR;
+          [~, ~, tail] = fileparts(body);
+      end
+
+      switch tail
+        case '.bin', bpp = 32;
+        case '.bii', bpp = 9;
+        otherwise,   bpp = BYTES_PER_POINT;
+      end
+      total = total + bytes / bpp;
+  end
+
+  n = min(CEIL_POINTS, max(FLOOR_POINTS, ceil(total * SAFETY)));
+  fprintf(1, '  %s: sizing BIQ arrays for %d points (%.2f GiB)\n', ...
+          sensor, n, n * 8 * 5 / 2^30);

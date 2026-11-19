@@ -21,11 +21,37 @@ The MUR dataviewer is a comprehensive Python visualization tool for browsing and
 ├── __init__.py              # Module exports (v1.0.0)
 ├── __pycache__/             # Compiled Python modules
 ├── dataviewer.py            # Main CLI application (62.9 KB)
+├── web_viewer.py            # Streamlit web interface
 ├── format_readers.py        # Format-specific readers (23.8 KB)
 ├── fortran_io.py            # Fortran binary I/O utils (8.9 KB)
+├── sources.py               # Data-source catalogs (local / MAAP STAC / PO.DAAC)
+├── viewer_config.py         # Data-source configuration resolution
 ├── test_viewer.py           # Test suite (5.8 KB)
 └── README.md                # Documentation (12.1 KB)
 ```
+
+### Data-source layer (`sources.py`, `viewer_config.py`)
+
+Used by the web viewer only. It separates *what a granule is* from *where it
+lives*, so that discovery and download stay out of the read/plot/diff path:
+
+- **`Granule`** — an id, a date, a mode (`nrt`/`rea`) and an href that may be a
+  local path, an `s3://` key or an `https://` URL.
+- **`Catalog`** — `search(start, end)`, `find_for_date(day)` and
+  `fetch(granule) -> Path`. Three implementations: `LocalCatalog`,
+  `MaapStacCatalog` (MAAP STAC API, falling back to the deterministic item keys
+  in the workspace bucket) and `PublicMurCatalog` (PO.DAAC via CMR/earthaccess).
+
+Everything downstream — the format readers, `build_full_res_diff`, the plots —
+keeps operating on local paths and never learns a file came from a catalogue.
+That is deliberate: the diff opens both files with `netCDF4.Dataset` and reads
+them in row chunks, so a lazy remote handle would have to satisfy the whole
+HDF5 read path. Downloading once into a content-addressed cache is simpler and,
+for a file read in thousands of chunks, faster.
+
+`earthaccess`, `s3fs` and `requests` are imported *inside* the methods that need
+them, so importing `dataviewer` — and running the local-only viewer — requires
+none of them.
 
 ---
 

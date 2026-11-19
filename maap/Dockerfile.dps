@@ -1,29 +1,97 @@
 # DPS variant of a MUR module image.
 #
 # WHY THIS EXISTS
-#   The module images set ENTRYPOINT ["/opt/<module>/bin/entrypoint.sh"], which
-#   is right for `docker run <image> --year 2026 ...` as run_mur_pipeline.py
-#   invokes them. But CWL sets `baseCommand`, and Docker APPENDS the command to
-#   ENTRYPOINT rather than replacing it -- so a CWL job would execute
+#   1. ENTRYPOINT collides with CWL. The module images set
+#      ENTRYPOINT ["/opt/<module>/bin/entrypoint.sh"], which is right for
+#      `docker run <image> --year 2026 ...` as run_mur_pipeline.py invokes
+#      them. But CWL supplies `baseCommand`, and Docker APPENDS a command to
+#      ENTRYPOINT rather than replacing it -- so a CWL job would execute
 #
-#       entrypoint.sh /opt/landice/bin/entrypoint.sh --year 2026 ...
+#          entrypoint.sh /opt/landice/bin/entrypoint.sh --year 2026 ...
 #
-#   and every MUR entrypoint rejects unknown positional args with
-#   "ERROR: Unknown argument", exiting 1. (MAAP's own stac_clip reference
-#   Containerfile declares no ENTRYPOINT for exactly this reason.)
+#      and every MUR entrypoint rejects unknown positional args with
+#      "ERROR: Unknown argument", exiting 1. (MAAP's own stac_clip reference
+#      Containerfile declares no ENTRYPOINT for exactly this reason.)
 #
-#   Clearing ENTRYPOINT in a derived image is a metadata-only change: it adds
-#   no layer content, builds in about a second, and leaves the base image --
-#   and therefore local execution -- completely untouched.
+#   2. It refreshes the text files. entrypoint.sh, localize.sh and
+#      maap_credentials.py are COPY'd in the FINAL layer of every module
+#      image, after the MATLAB Runtime install -- so overwriting them here
+#      picks up changes without recompiling anything. That matters because an
+#      image built before the MUR_OUTPUT_ROOT stage-out fix writes to absolute
+#      paths CWL cannot collect, and would otherwise need a full MATLAB
+#      rebuild (licence server, ~30 minutes) just to change a bash script.
+#
+#      A consequence worth knowing: when a release changes only these files,
+#      the base image does not need rebuilding at all. Retag it and rebuild
+#      this layer -- see utils/build_dps_images.sh --retag-base.
+#
+#   Both are metadata and text: the MATLAB Runtime, the compiled binaries and
+#   the Fortran executables are all inherited unchanged from the base image.
 #
 # BUILD
-#   See utils/build_dps_images.sh, which builds all four.
+#   Use utils/build_dps_images.sh, which builds all four with the right
+#   MODULE arg and repo-root context:
 #
 #     docker build -f maap/Dockerfile.dps \
-#       --build-arg BASE_IMAGE=ghcr.io/podaac/mur/landice:1.0.0 \
-#       -t ghcr.io/podaac/mur/landice-dps:1.0.0 maap/
+#       --build-arg BASE_IMAGE=ghcr.io/podaac/mur/landice:2.0.0 \
+#       --build-arg MODULE=landice \
+#       -t ghcr.io/podaac/mur/landice-dps:2.0.0 .
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
+
+# Repeated after FROM: an ARG declared before it is out of scope afterwards.
+ARG MODULE
+
+# Identifies this exact build. A tag rebuilt in place is indistinguishable
+# from the old one on any host that already pulled it -- cwltool only runs
+# `docker pull` when `docker inspect` of the tag FAILS, so a DPS worker that
+# has run this tag before keeps using its cached copy forever. The entrypoint
+# echoes this, so a job log answers "which build actually ran" as a fact
+# instead of an assumption. build_dps_images.sh fills it from git.
+ARG BUILD_STAMP=unknown
+ENV MUR_IMAGE_BUILD=${BUILD_STAMP}
+LABEL org.opencontainers.image.revision="${BUILD_STAMP}"
+
+# Refresh every file the module images take from the working tree: the
+# entrypoint, the localization helper, the credential helper, and the STAC
+# emitter. All of them are COPY'd in the FINAL layer of each module image, so
+# replacing them here costs nothing and needs no MATLAB.
+#
+# All of them, not some. maap_credentials.py was missing from this list once,
+# which meant a change to it could only reach an image through a full base
+# rebuild -- a licence server and half an hour -- to update one Python file.
+# That is exactly the cost this layer exists to avoid, and the omission was
+# invisible: the image builds, and the stale helper runs.
+#
+# The DESTINATION has to match too, not just the source path. cog once copied
+# these to /opt/cog/bin, so every refresh below wrote files it never read.
+# tests/test_algorithm_configs.py compares destinations for that reason.
+#
+# iquam neither installs awscli nor sources localize.sh, so its copies are
+# inert -- a few KB, and it keeps this one Dockerfile serving all five
+# modules.
+USER root
+COPY common/bin/localize.sh /opt/common/bin/localize.sh
+COPY common/bin/maap_credentials.py /opt/common/bin/maap_credentials.py
+COPY common/bin/write_stac.py /opt/common/bin/write_stac.py
+COPY ${MODULE}/bin/entrypoint.sh /opt/${MODULE}/bin/entrypoint.sh
+RUN chmod 0755 /opt/common/bin/localize.sh \
+                /opt/common/bin/maap_credentials.py \
+                /opt/common/bin/write_stac.py \
+                /opt/${MODULE}/bin/entrypoint.sh
+
+# NO `USER matlab` HERE, though an earlier version of this file had one.
+# `USER matlab` appears in every module Dockerfile, but in the BUILDER stage
+# -- the runtime stage is `FROM debian:bookworm-slim` and creates no users at
+# all, so the module images run as root and have no matlab account. Declaring
+# it here produced an image that could not start:
+#
+#     unable to find user matlab: no matching entries in passwd file
+#
+# Docker validates USER at run time, not build time, so the build succeeded
+# and every container made from it failed. Leave the base image's user alone.
+# DPS may override the UID anyway, which is why the entrypoints create their
+# own directories and mrva's stage-out has a copy fallback.
 
 # CWL supplies the command via baseCommand; an ENTRYPOINT would prefix it.
 ENTRYPOINT []

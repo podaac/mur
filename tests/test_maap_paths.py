@@ -102,3 +102,130 @@ def test_run_state_and_stac_keys():
 def test_leap_day_doy_is_366():
     leap = datetime.date(2024, 12, 31)
     assert paths.bic_key("AMSR2R", leap).endswith("Global_AMSR2R_2024_366.bic.gz")
+
+
+# --- CSP coefficients (cross-run chaining) ---------------------------------
+
+def test_csp_filename_matches_the_local_executors_convention():
+    """run_mur_pipeline.py's resolve_mrva_prior_csp looks for
+    <YYYYMMDD>09_MRVA4_Global.c06 under <csp_dir>/<year>/."""
+    assert paths.csp_filename(DAY) == "2026080609_MRVA4_Global.c06"
+    assert paths.csp_key(DAY) == "mur/csp/2026/2026080609_MRVA4_Global.c06"
+
+
+def test_prior_csp_href_points_at_the_previous_day():
+    assert paths.prior_csp_href(WS, DAY) == \
+        f"{WS}/mur/csp/2026/2026080509_MRVA4_Global.c06"
+
+
+def test_prior_csp_href_crosses_a_year_boundary():
+    assert paths.prior_csp_href(WS, datetime.date(2026, 1, 1)) == \
+        f"{WS}/mur/csp/2025/2025123109_MRVA4_Global.c06"
+
+
+# --- a cache whose key does not match its probe is not a cache -------------
+
+def test_every_promoted_landice_name_is_a_name_the_probe_looks_for():
+    """The whole reuse mechanism rests on this one equality. If promotion
+    writes `Global_ice_2026_218.bip.gz` and the probe asks for
+    `Global_ice_2026.bip.gz`, nothing errors -- landice simply resubmits
+    forever, silently, exactly as it did before."""
+    day = datetime.date(2026, 8, 6)
+    for output_name in paths.LANDICE_OUTPUTS:
+        probed = paths.landice_filenames(output_name, day)
+        for compressed in (True, False):
+            written = paths.landice_filename(output_name, day, compressed)
+            assert written in probed, (
+                f"{output_name}: promotion writes {written!r}, which "
+                f"_find_cached_landice never asks for {probed!r}")
+
+
+def test_the_compressed_landice_form_is_probed_first():
+    day = datetime.date(2026, 8, 6)
+    names = paths.landice_filenames("landice_ice_p011", day)
+    assert names == ["Global_ice_2026_218.bip.gz", "Global_ice_2026_218.bip"]
+
+
+def test_the_icefiles_list_is_never_looked_for_gzipped():
+    """DPS stages it plain -- confirmed on a real job (2026/164)."""
+    names = paths.landice_filenames("landice_icefiles_p011",
+                                    datetime.date(2026, 8, 6))
+    assert names == ["icefiles_2026_218.txt"]
+
+
+def test_an_iquam_day_keys_off_the_data_year_not_the_analysis_year():
+    """One job writes its whole +/- window, which can straddle 1 January."""
+    assert paths.iquam_key(datetime.date(2025, 12, 31)).startswith(
+        "mur/iquam/2025/")
+    assert paths.iquam_key(datetime.date(2026, 1, 1)).startswith(
+        "mur/iquam/2026/")
+
+
+def test_a_granule_has_a_canonical_key_derivable_from_a_date():
+    """A DPS result path embeds the job id and cannot be reconstructed.
+
+        dps_output/mur-mrva_1756/2.0.12/2026/10/08/18/10/20/964098/...
+
+    So an unpromoted granule is findable only by the run that made it, which
+    is why regenerating browse rasters for an existing day was impossible --
+    `--execute cog` had nothing to look up. These keys come from the date and
+    mode alone, like landice's and iquam's.
+    """
+    import datetime
+    d = datetime.date(2026, 10, 6)
+
+    assert paths.l4_key(d, "nrt", "1km") == \
+        "mur/l4/1km/2026/2026100609-JPL-L4_GHRSST-SSTfnd-MUR-GLOB-nrt.nc"
+    assert paths.l4_key(d, "nrt", "25km") == \
+        "mur/l4/25km/2026/2026100609-JPL-L4_GHRSST-SSTfnd-MUR25-GLOB-nrt.nc"
+
+    # Mode is in the key: a day is produced as NRT and later reprocessed as
+    # REA, and collapsing them would let the reanalysis overwrite the interim.
+    assert paths.l4_key(d, "nrt", "1km") != paths.l4_key(d, "rea", "1km")
+
+    # And the two resolutions never collide, despite both containing "MUR".
+    assert paths.l4_key(d, "nrt", "1km") != paths.l4_key(d, "nrt", "25km")
+
+
+def test_the_granule_name_is_generated_not_copied():
+    """The DPS basenames carry product versions that differ between the two
+    products -- fv04.1 for 1 km, fv04.2 for MUR25, observed on the same run.
+    A probe built from a guessed version would miss, so the canonical name is
+    generated and carries no fv at all. Same reasoning as landice_filename.
+    """
+    import datetime
+    name = paths.l4_filename(datetime.date(2026, 10, 6), "nrt", "1km")
+    assert "fv04" not in name
+    assert name.endswith("-nrt.nc")
+
+
+# --- username --------------------------------------------------------------
+
+@pytest.mark.parametrize("maap,expected", [
+    ({"workspace_root": "s3://maap-ops-workspace/jleach_jpl/"}, "jleach_jpl"),
+    # A team bucket's root names a bucket or folder, never a person.
+    ({"workspace_root": "s3://mur-sst"}, None),
+    ({"workspace_root": "s3://mur-sst/maap"}, None),
+    ({"workspace_root": "s3://mur-sst", "username": "jleach_jpl"}, "jleach_jpl"),
+    ({"workspace_root": "s3://maap-ops-workspace/a", "username": "b"}, "b"),
+    ({"workspace_root": "s3://maap-ops-workspace/<username>"}, None),
+    ({"workspace_root": "s3://mur-sst", "username": "<username>"}, None),
+    ({}, None),
+])
+def test_username_from_config(maap, expected):
+    assert paths.username_from_config({"maap": maap}) == expected
+
+
+# --- team bucket -----------------------------------------------------------
+
+@pytest.mark.parametrize("maap,expected", [
+    ({}, (None, "mur")),                                   # search by default
+    ({"team_bucket": "sst"}, (None, "sst")),
+    ({"team_bucket": "s3://some-bucket/shared/"}, ("s3://some-bucket/shared", None)),
+    ({"team_bucket": False}, (None, None)),
+    ({"team_bucket": ""}, (None, None)),
+    ({"team_bucket": None}, (None, None)),
+    ({"team_bucket": "s3://<team bucket>"}, (None, None)),  # unfilled template
+])
+def test_team_bucket_setting(maap, expected):
+    assert paths.team_bucket_setting({"maap": maap}) == expected

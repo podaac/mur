@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+"""Register the MUR application packages with MAAP.
+
+Run this in a MAAP workspace, from a checkout of this repo:
+
+    python utils/deploy_algorithms.py              # all four, current version
+    python utils/deploy_algorithms.py --dry-run    # show what would happen
+    python utils/deploy_algorithms.py --modules l2p
+    python utils/deploy_algorithms.py --version 2.0.0    # redeploy an old one
+
+WHY A SCRIPT
+    deploy_algorithm_from_cwl_file() takes a file_path on the local
+    filesystem, so deployment happens where the repo is checked out. That used
+    to be a Python snippet printed by generate_cwl.sh for copy-pasting, which
+    is a worse version of a file: it cannot be tested, cross-checked, or run
+    twice the same way.
+
+WHY IT NEVER GLOBS THE CWL DIRECTORY
+    maap/cwl_workflows/ accumulates a file per version, and old ones are worth
+    keeping -- they are how you redeploy 2.0.0 after 2.0.1 turns out to be
+    wrong. That only stays safe if nothing can pick one up by accident, so the
+    path is built from an explicit version and the file must exist at that
+    exact name. `*.cwl` would deploy whatever happens to be lying there.
+
+WHAT DEPLOYING DOES
+    It registers an algorithm; it provisions nothing. Deploying the same name
+    and version again ADDS a registration rather than replacing one, each with
+    its own processID and its own frozen copy of the CWL -- so this reports
+    every registration afterwards, and says which one the orchestrator will
+    resolve.
+
+    It is also ASYNCHRONOUS. MAAP answers 202 Accepted with a deploymentJobID
+    and a link to a GitLab pipeline that does the real work; the process is not
+    registered when that response arrives, and listing the algorithms straight
+    away shows only the previous version. So this polls until each one appears,
+    and says plainly if it does not. Treating 202 as done reported success for
+    a deployment that had not happened yet.
+"""
+import argparse
+import pathlib
+import sys
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "utils"))
+
+MODULES = ("cog", "iquam", "landice", "l2p", "mrva")   # cheapest first
+
+
+def cwl_for(module: str, version: str) -> pathlib.Path:
+    return REPO / "maap" / "cwl_workflows" / f"process_mur-{module}_{version}.cwl"
+
+
+def registrations(maap, name: str):
+    """Every (version, processID) currently registered under `name`."""
+    resp = maap.list_algorithms()
+    body = resp.json() if resp.content else {}
+    # A bare list, not {"processes": [...]}: body.get would raise before the
+    # isinstance default is ever consulted -- that default only applies when
+    # body IS a dict lacking the key.
+    procs = body if isinstance(body, list) else body.get("processes", [])
+    return sorted(
+        (str(p.get("version")), p.get("processID"))
+        for p in procs if p.get("id") == name
+    )
+
+
+def report_registrations(maap, modules, version):
+    """Print every registration for each module. Returns those missing `version`.
+
+    Shared by --status and the post-deploy report, so the two cannot drift
+    into disagreeing about what "deployed" means.
+    """
+    print("\n==> Registrations visible to MAAP")
+    missing = []
+    for module in modules:
+        name = f"mur-{module}"
+        rows = registrations(maap, name)
+        at_version = [pid for v, pid in rows if v == version]
+        if not at_version:
+            missing.append(module)
+        # Highest processID wins: registrations accumulate, and
+        # run_mur_maap.py takes the most recent one at its version.
+        resolves = max(at_version) if at_version else None
+        if not rows:
+            print(f"  {name}: no registrations at all")
+            continue
+        for v, pid in rows:
+            mark = " <- resolves here" if pid == resolves else ""
+            print(f"  {name}  v{v}  processID {pid}{mark}")
+        if len(at_version) > 1:
+            print(f"      NOTE: {len(at_version)} registrations at v{version}. "
+                  f"Each holds its own copy of the CWL; run_mur_maap.py takes "
+                  f"the highest processID.")
+    return missing
+
+
+def wait_for_registration(maap, modules, version, *, timeout, poll_interval):
+    """Block until every module is registered at `version`, or time runs out.
+
+    Deployment is asynchronous: the 202 means a pipeline was queued. Polling
+    the algorithm listing asks the only question that matters -- can a job be
+    submitted against this version yet -- rather than inferring it from a
+    deployment job's own status, which is a different thing that has been
+    reported as finished before the process appeared.
+    """
+    import time
+
+    if not modules:
+        return set()
+
+    print(f"\n==> Waiting for MAAP to register {len(modules)} process(es) "
+          f"(up to {timeout:.0f}s)")
+    deadline = time.monotonic() + timeout
+    done = set()
+    while True:
+        for module in modules:
+            if module in done:
+                continue
+            if any(v == version
+                   for v, _ in registrations(maap, f"mur-{module}")):
+                done.add(module)
+                print(f"  registered  mur-{module} v{version}")
+        if len(done) == len(modules):
+            return done
+        if time.monotonic() >= deadline:
+            print(f"  timed out after {timeout:.0f}s")
+            return done
+        waiting = [m for m in modules if m not in done]
+        print(f"  waiting on {', '.join(waiting)} ...")
+        time.sleep(poll_interval)
+
+
+def main(argv=None) -> int:
+    from mur_maap.version import ALGORITHM_VERSION
+
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--modules", nargs="+", default=list(MODULES),
+                        choices=list(MODULES))
+    parser.add_argument("--version", default=ALGORITHM_VERSION,
+                        help=f"default: {ALGORITHM_VERSION}, from mur_maap/version.py")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="show what would be deployed and exit. Offline: "
+                             "checks the files, contacts MAAP for nothing.")
+    parser.add_argument("--status", action="store_true",
+                        help="ask MAAP what is registered and exit, deploying "
+                             "nothing. Exits non-zero if --version is absent.")
+    parser.add_argument("--skip-check", action="store_true",
+                        help="skip the CWL/config cross-check (not advised)")
+    parser.add_argument("--no-wait", action="store_true",
+                        help="submit the deployments and exit without waiting "
+                             "for MAAP to finish registering them")
+    parser.add_argument("--timeout", type=float, default=900.0,
+                        help="seconds to wait for registration (default: %(default)s)")
+    parser.add_argument("--poll-interval", type=float, default=15.0,
+                        help="seconds between checks (default: %(default)s)")
+    args = parser.parse_args(argv)
+    # Naming a module explicitly means you want THAT one; a missing CWL is then
+    # an error worth stopping for, not a module that happens to be newer.
+    args.explicit_modules = bool(argv and "--modules" in argv)
+
+    version = args.version
+
+    if args.status:
+        try:
+            from maap.maap import MAAP
+        except ImportError:
+            print("ERROR: maap-py is not installed. Run this in a MAAP "
+                  "workspace.\n       (--dry-run works offline; --status has "
+                  "to ask MAAP.)")
+            return 1
+        missing = report_registrations(MAAP(), args.modules, version)
+        if missing:
+            print(f"\nNOT registered at {version}: {', '.join(sorted(missing))}")
+            print("Deployment is asynchronous -- a pipeline may still be "
+                  "running. Check again\nbefore redeploying, or you will add a "
+                  "second registration rather than\nreplacing the first.")
+            return 1
+        print(f"\nAll {len(args.modules)} registered at {version}.")
+        return 0
+
+    if version != ALGORITHM_VERSION:
+        print(f"NOTE: deploying {version}, but this checkout builds "
+              f"{ALGORITHM_VERSION}. Jobs run whatever run_mur_maap.py "
+              f"resolves, which is {ALGORITHM_VERSION} unless the config "
+              f"overrides it.\n")
+
+    # Every file must exist before anything is registered. A partial deploy
+    # leaves some modules on the new version and some on the old, which is a
+    # worse state than not having started.
+    missing = [m for m in args.modules if not cwl_for(m, version).is_file()]
+
+    # A module the caller did not name is one that simply did not exist at this
+    # version -- cog was added at 2.1.0, so redeploying 2.0.3 must not fail for
+    # want of a package nobody ever built. Dropped with a note rather than
+    # treated as an error, which is the difference between "you cannot roll
+    # back" and "rolling back gives you what that version had".
+    if missing and not args.explicit_modules:
+        for m in missing:
+            print(f"note: no CWL at {version} for {m}; it did not exist then. "
+                  f"Skipping.")
+        args.modules = [m for m in args.modules if m not in missing]
+        missing = []
+        if not args.modules:
+            # Not "this module is newer" but "this version does not exist".
+            # Keep the actionable hint: a bare refusal leaves the reader
+            # guessing whether the version is wrong or the packages are
+            # missing.
+            print(f"ERROR: no CWL at {version} for any module.")
+            print(f"       Expected e.g. {cwl_for(MODULES[0], version)}")
+            print(f"       Generate them first:  ./utils/generate_cwl.sh")
+            return 1
+
+    if missing:
+        print(f"ERROR: no CWL at {version} for: {', '.join(missing)}")
+        print(f"       Expected e.g. {cwl_for(missing[0], version)}")
+        print(f"       Generate them first:  ./utils/generate_cwl.sh")
+        return 1
+
+    # The cross-check reads algorithm_config.yml, which describes the CURRENT
+    # version. An older CWL cannot be checked against it -- the config moved
+    # on, and that is exactly why the old file was kept. Checking anyway would
+    # report every module as MISSING and block the rollback.
+    if args.skip_check:
+        pass
+    elif version != ALGORITHM_VERSION:
+        print(f"==> Skipping the config cross-check: it compares against "
+              f"algorithm_config.yml,\n    which is at {ALGORITHM_VERSION}. "
+              f"A {version} CWL predates it. Deploying the file as committed.\n")
+    else:
+        import check_cwl_against_config as check
+        print("==> Cross-checking each CWL against its config")
+        if check.main([str(REPO), *args.modules]) != 0:
+            print("\nERROR: refusing to deploy a CWL that does not match its "
+                  "config.\n       Fix it, or pass --skip-check if you are "
+                  "certain.")
+            return 1
+        print()
+
+    # A check that holds whatever the configs say, and so runs even when the
+    # cross-check above is skipped.
+    #
+    # process_mur-mrva_2.0.11.cwl must pull mrva-dps:2.0.11. That is true by
+    # construction -- the filename and the tag both come from the same
+    # algorithm_version -- and it needs no reference to algorithm_config.yml,
+    # which is the whole reason the cross-check gets skipped on a rollback.
+    #
+    # It exists because the skip had a direction nobody intended. Deploying a
+    # version OLDER than the tree is a rollback and the skip is right. But
+    # version.py sitting BEHIND the version being deployed skipped it too, and
+    # that is the dangerous direction: on 2026-10-07 a 2.0.11 CWL carrying
+    # dockerPull mrva-dps:2.0.4 registered cleanly and ran a 2026-09-24 image
+    # that had never heard of --max-level. The job failed on an unknown
+    # argument, forty minutes in, for a reason nothing in the deploy mentioned.
+    mismatched = []
+    for module in args.modules:
+        text = cwl_for(module, version).read_text()
+        for line in text.splitlines():
+            if "dockerPull:" not in line:
+                continue
+            pulled = line.split("dockerPull:", 1)[1].strip()
+            if "@sha256:" in pulled:          # digest-pinned, tag not present
+                break
+            if not pulled.endswith(f":{version}"):
+                mismatched.append((module, pulled))
+            break
+
+    if mismatched and not args.skip_check:
+        print("==> Refusing to deploy: a CWL pulls another version's image")
+        print()
+        for module, pulled in mismatched:
+            print(f"  mur-{module}: {cwl_for(module, version).name}")
+            print(f"    dockerPull  {pulled}")
+            print(f"    expected    ...:{version}")
+        print()
+        print("  The CWL was generated before the version was set. Run, in "
+              "this order:")
+        print(f"    ./utils/set_algorithm_version.sh {version}")
+        print("    ./utils/generate_cwl.sh")
+        print()
+        print("  Deploying as-is registers a process under this version's "
+              "name that runs")
+        print("  another version's image, which fails late and confusingly "
+              "rather than at")
+        print("  submit. --skip-check overrides, if you are certain.")
+        return 1
+
+    print(f"==> Deploying at {version}")
+    for module in args.modules:
+        print(f"  mur-{module}  <- {cwl_for(module, version).name}")
+    if args.dry_run:
+        print("\nDry run: nothing was registered.")
+        return 0
+
+    try:
+        from maap.maap import MAAP
+    except ImportError:
+        print("\nERROR: maap-py is not installed. This script must run in a "
+              "MAAP workspace.\n       pip install maap-py")
+        return 1
+
+    maap = MAAP()
+    print()
+    pipelines = {}
+    submitted = []
+    for module in args.modules:
+        path = cwl_for(module, version)
+        resp = maap.deploy_algorithm_from_cwl_file(file_path=str(path))
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+
+        # 202 Accepted: MAAP has queued a pipeline, not registered anything.
+        job_id = body.get("deploymentJobID") if isinstance(body, dict) else None
+        status = body.get("status") if isinstance(body, dict) else None
+        if 200 <= resp.status_code < 300:
+            submitted.append(module)
+            detail = f"deploymentJobID {job_id}" if job_id else (status or "accepted")
+            print(f"  mur-{module}: HTTP {resp.status_code}  {detail}")
+            if isinstance(body, dict):
+                link = (body.get("processPipelineLink") or {}).get("href")
+                if link:
+                    pipelines[module] = link
+        else:
+            text = body if body else resp.text[:200]
+            print(f"  mur-{module}: HTTP {resp.status_code}  {text}")
+
+    rejected = [m for m in args.modules if m not in submitted]
+    if rejected:
+        print(f"\nMAAP refused {len(rejected)}: {', '.join(rejected)}")
+
+    if args.no_wait:
+        print("\n--no-wait: deployments are queued but not yet registered.")
+        for module, link in pipelines.items():
+            print(f"  mur-{module}: {link}")
+        return 1 if rejected else 0
+
+    registered = wait_for_registration(
+        maap, submitted, version,
+        timeout=args.timeout, poll_interval=args.poll_interval)
+
+    still_missing = report_registrations(maap, args.modules, version)
+
+    if still_missing or rejected:
+        print(f"\nNOT registered at {version}: "
+              f"{', '.join(sorted(set(still_missing) | set(rejected)))}")
+        for module in sorted(set(still_missing)):
+            if module in pipelines:
+                print(f"  mur-{module} pipeline: {pipelines[module]}")
+        print("\nA deployment pipeline can still be running, or it can have "
+              "failed.\nThe pipeline link above says which. Do not submit jobs "
+              "until this is clean --\nrun_mur_maap.py would resolve the "
+              "PREVIOUS version and run it silently.")
+        return 1
+
+    print(f"\nAll {len(args.modules)} registered at {version}. Run one job "
+          f"before trusting the rest --\nthe first job log prints the image "
+          f"build:\n    MUR image build: <sha>-<timestamp>")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

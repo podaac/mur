@@ -1,0 +1,131 @@
+{
+  "_comment": [
+    "MAAP/DPS configuration for run_mur_maap.py. Paths here are s3:// hrefs,",
+    "not local directories -- bucket mounts do not exist inside a DPS job.",
+    "Fill workspace_root and username from:",
+    "    python utils/upload_static_resources.py --check",
+    "which prints both, discovered from workspace_bucket_credentials()."
+  ],
+  "maap": {
+    "workspace_root": "s3://maap-ops-workspace/<username>",
+    "_workspace_root_note": "Where every cached input, L4, manifest, STAC sidecar and (under mur/static-resources) static resource lives. It is the ONE setting to change to move all of that. A personal workspace works for one person; a team bucket lets teammates read and run against the same data. To move: utils/migrate_workspace_root.py copies mur/ across (and repoints the hrefs inside its JSON), `upload_static_resources.py --check` probes the team bucket, then set this to the root the migration printed as its destination. DPS stages job outputs in the submitting user's personal dps_output/ wherever this points; promotion copies them here.",
+    "username": "<username>",
+    "_username_note": "Your MAAP username, the prefix of your personal workspace. MAAP files every published collection as <username>__<algorithm>__<version>, so links to them need it. Kept separate from workspace_root so the root can move to a bucket that does not contain it. Optional while the root is your personal workspace.",
+    "team_bucket": "mur",
+    "_team_bucket_note": "Only matters while workspace_root is NOT the team bucket: each finished L4 netCDF is then also copied there so teammates can download it. Text here is searched for among the team (org) buckets MAAP authorizes your account for, so no bucket name needs writing down; the first whose name contains it is used. An s3:// root is used as given. false shares nothing. With workspace_root in the team bucket the granule is already there and nothing extra is copied.",
+    "queue": "<queue name from MAAP ops>",
+    "granule_staging": "direct",
+    "_granule_staging_note": "direct = pass PO.DAAC's own s3:// hrefs to the job; the container fetches them itself, minting DAAC credentials from MAAP_PGT via common/bin/maap_credentials.py. This is the only behaviour now. 'workspace' is still accepted, for configs written when granules were copied into the workspace bucket first, and does the same thing.",
+    "queues": {
+      "mur-mrva": "maap-dps-worker-64gb"
+    },
+    "_queues_note": "maap.queue is the default for every module. maap.queues overrides it per process. Only MRVA needs a large worker; landice, iquam and l2p fit on 4-8 GiB. Run --list-queues to see what is available.",
+    "_queues_note_32vcpu": "maap-dps-worker-32vcpu-64gb is the queue that nominally fits mrva's 65536 MiB / 16 cores, but on 2026-09-22 every job submitted to it failed before starting: cwltool could not reach /var/run/docker.sock (permission denied on both the inspect and the pull). The identical landice package succeeded on the small queue minutes earlier, so it is the worker pool, not the package. mrva is on maap-dps-worker-64gb until MAAP ops fixes that. Watch for the opposite failure there: 64 GB is 59.6 GiB, less than mrva's ram_min of 65536 MiB.",
+    "algorithm_version": null,
+    "_algorithm_version_note": "null = use the version this checkout builds (mur_maap/version.py), which is almost always what you want. Set it only to run packages deployed from a different revision -- a rollback, say. MAAP keeps every version ever registered, so naming an old one here succeeds silently and runs old code."
+  },
+  "landice": {
+    "_static_resources_dir_note": "Unset = <maap.workspace_root>/mur/static-resources, as for mrva. Set static_resources_dir only to keep them somewhere else."
+  },
+  "iquam": {
+    "buoy_dayrange": 3,
+    "stable_latency": 2
+  },
+  "l2p": {
+    "active_sensors": [
+      "AMSR2R",
+      "MODISA",
+      "MODIST",
+      "AVMTAG",
+      "AVMTBG"
+    ],
+    "sensors": {
+      "AMSR2R": {
+        "collection_name": [
+          "AMSR2-REMSS-L2P-v8.2",
+          "AMSR2-REMSS-L2P_RT-v8.2"
+        ],
+        "region": "Global",
+        "day_range": [
+          2,
+          2
+        ],
+        "stable": 2
+      },
+      "MODISA": {
+        "collection_name": [
+          "MODIS_A-JPL-L2P-v2019.0"
+        ],
+        "region": "Global",
+        "day_range": [
+          2,
+          2
+        ],
+        "stable": 2
+      },
+      "MODIST": {
+        "collection_name": [
+          "MODIS_T-JPL-L2P-v2019.0"
+        ],
+        "region": "Global",
+        "day_range": [
+          2,
+          2
+        ],
+        "stable": 3
+      },
+      "AVMTAG": {
+        "collection_name": [
+          "AVHRRMTA_G-NAVO-L2P-v2.0"
+        ],
+        "region": "Global",
+        "day_range": [
+          2,
+          2
+        ],
+        "stable": 2
+      },
+      "AVMTBG": {
+        "collection_name": [
+          "AVHRRMTB_G-NAVO-L2P-v2.0"
+        ],
+        "region": "Global",
+        "day_range": [
+          2,
+          2
+        ],
+        "stable": 2
+      }
+    }
+  },
+  "mrva": {
+    "active_sensors": [
+      "IQUAM0",
+      "AMSR2R",
+      "MODISA",
+      "MODIST",
+      "AVMTAG",
+      "AVMTBG"
+    ],
+    "sensors": {
+      "IQUAM0": {
+        "day_range": 3
+      },
+      "AMSR2R": {
+        "day_range": 2
+      },
+      "MODISA": {
+        "day_range": 2
+      },
+      "MODIST": {
+        "day_range": 2
+      },
+      "AVMTAG": {
+        "day_range": 2
+      },
+      "AVMTBG": {
+        "day_range": 2
+      }
+    }
+  }
+}

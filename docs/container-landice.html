@@ -97,8 +97,8 @@
       -v /path/to/static-resources/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro \
       -v /path/to/static-resources/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro \
       -v /path/to/static-resources/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro \
-      -v /path/to/output/p011:/output/p011 \
-      -v /path/to/output/p01:/output/p01 \
+      -v /path/to/output/p011:/data/output/p011 \
+      -v /path/to/output/p01:/data/output/p01 \
       mur-landice:latest \
       --year 2024 --doy 100 \
       --landmask-p01-file /input/landmask-p01.gds \
@@ -148,8 +148,8 @@
       -v /data/static-resources/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro \
       -v /data/static-resources/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro \
       -v /data/static-resources/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro \
-      -v /data/output/p011:/output/p011 \
-      -v /data/output/p01:/output/p01 \
+      -v /data/output/p011:/data/output/p011 \
+      -v /data/output/p01:/data/output/p01 \
       mur-landice:latest \
       --year 2024 --doy 150 \
       --landmask-p01-file /input/landmask-p01.gds \
@@ -169,8 +169,8 @@
       -v /data/static-resources/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro \
       -v /data/static-resources/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro \
       -v /data/static-resources/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro \
-      -v /data/output/p011:/output/p011 \
-      -v /data/output/p01:/output/p01 \
+      -v /data/output/p011:/data/output/p011 \
+      -v /data/output/p01:/data/output/p01 \
       mur-landice:latest \
       --year 2024 --doy 150 \
       --landmask-p01-file /input/landmask-p01.gds \
@@ -197,8 +197,8 @@
       -v /data/static-resources/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro \
       -v /data/static-resources/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro \
       -v /data/static-resources/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro \
-      -v /data/output/p011:/output/p011 \
-      -v /data/output/p01:/output/p01 \
+      -v /data/output/p011:/data/output/p011 \
+      -v /data/output/p01:/data/output/p01 \
       mur-landice:latest \
       --year 2024 --doy 150 \
       --landmask-p01-file /input/landmask-p01.gds \
@@ -227,8 +227,8 @@
             -v "$STATIC/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro" \
             -v "$STATIC/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro" \
             -v "$STATIC/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro" \
-            -v /data/output/p011:/output/p011 \
-            -v /data/output/p01:/output/p01 \
+            -v /data/output/p011:/data/output/p011 \
+            -v /data/output/p01:/data/output/p01 \
             mur-landice:latest \
             --year "$YEAR" --doy "$DOY" \
             --landmask-p01-file /input/landmask-p01.gds \
@@ -297,8 +297,8 @@
           - ${STATIC_RESOURCES_DIR}/grids/maskGlob1km.gds:/input/landmask-p011.gds:ro
           - ${STATIC_RESOURCES_DIR}/mat/p011/saf2north.mat:/input/gridindex-north-p011.mat:ro
           - ${STATIC_RESOURCES_DIR}/mat/p011/saf2south.mat:/input/gridindex-south-p011.mat:ro
-          - ${OUTPUT_DIR_P011}:/output/p011
-          - ${OUTPUT_DIR_P01}:/output/p01
+          - ${OUTPUT_DIR_P011}:/data/output/p011
+          - ${OUTPUT_DIR_P01}:/data/output/p01
         command:
           - "--year"
           - "${YEAR}"
@@ -436,7 +436,7 @@
     <p>Run it (see the usage examples above for the full named-flag invocation):</p>
     <pre><code class="language-bash">docker run --rm --shm-size=512M \
       -v /path/to/static-resources:/input:ro \
-      -v /path/to/output:/output \
+      -v /path/to/output:/data/output \
       mur-landice:latest \
       --year 2024 --doy 100 ...</code></pre>
     <p>For a raw <code>docker build</code> — custom tags, external CI, Dockerfile debugging — see <a href="configuration.html#manual-builds-advanced">Manual Builds (Advanced)</a>:</p>
@@ -577,7 +577,7 @@
     <pre><code class="language-bash">docker run --rm \
       --shm-size=512M \
       -v /path/to/input:/input:ro \
-      -v /path/to/output:/output \
+      -v /path/to/output:/data/output \
       landice-runtime:latest \
       year 2024 \
       doy 100</code></pre>
@@ -595,7 +595,7 @@
       -e OSISAF_FTP_ARCHIVE="ftp://example.com/archive" \
       -e OSISAF_FTP_PROD="ftp://example.com/prod" \
       -v /path/to/input:/input:ro \
-      -v /path/to/output:/output \
+      -v /path/to/output:/data/output \
       landice-runtime:latest \
       year 2024 \
       doy 100</code></pre>
@@ -670,7 +670,7 @@
       -e OSISAF_FTP_ARCHIVE="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
       -e OSISAF_FTP_PROD="https://thredds.met.no/thredds/fileServer/osisaf/met.no/ice/amsr2_conc" \
       -v $(pwd)/tests/in:/input:ro \
-      -v $(pwd)/tests/out:/output \
+      -v $(pwd)/tests/out:/data/output \
       mur-landice:latest \
       2024 101</code></pre>
     <h3 id="performance-optimization">Performance Optimization</h3>
@@ -741,7 +741,7 @@
     docker run --rm \
       --shm-size=512M \
       --user $(id -u):$(id -g) \
-      -v /path/to/output:/output \
+      -v /path/to/output:/data/output \
       mur-landice:latest [arguments]</code></pre></li>
     <li><strong>Network Issues</strong>
     <pre><code class="language-bash"># Test connectivity to the OSI-SAF THREDDS endpoint. Do NOT test

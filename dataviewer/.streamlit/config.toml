@@ -14,14 +14,15 @@ enableXsrfProtection = true
 #   openssl req -x509 -newkey rsa:4096 -keyout ssl/key.pem -out ssl/cert.pem \
 #     -days 365 -nodes -subj '/CN=localhost'
 #
-# sslCertFile = "ssl/cert.pem"
-# sslKeyFile = "ssl/key.pem"
-# address = "0.0.0.0"
-# enableCORS = true
+#sslCertFile = "ssl/cert.pem"
+#sslKeyFile = "ssl/key.pem"
+#address = "0.0.0.0"
+#enableCORS = true
 
 # Default: localhost-only, no SSL
 address = "127.0.0.1"
 enableCORS = false
+headless = true
 
 [browser]
 # Don't automatically open browser on startup

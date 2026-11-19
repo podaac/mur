@@ -32,19 +32,53 @@ FC = /opt/intel/bin/ifort
 # Intel(R) Fortran Intel(R) 64 Compiler Version 19.0.4.243 Build 20190416
 
 # Base flags (always used)
-FCOPT_BASE = -80 -qopenmp -fpp
+FCOPT_BASE = -80 -qopenmp -fpp -heap-arrays 64
 # -80 = Allow 80 column fixed format
 # -qopenmp = Enable OpenMP directives
 # -fpp = Enable Fortran preprocessor for #ifdef directives
+# -heap-arrays 64 = automatic arrays over 64 KB go on the heap, not the stack
+#
+# -heap-arrays is not a tuning flag here, it is what makes the solver run at
+# all inside a container. The PCG solver declares automatic work arrays sized
+# by the unknown count: at L=8 that is 2,115,612 REAL*8, or 16.1 MB, in a
+# single array. DPS job 50f7b39a died on the first touch of one --
+#
+#   Starting PCG solver (maxIter= 2115612 )
+#   forrtl: severe (174): SIGSEGV, segmentation fault occurred
+#
+# -- with the entrypoint reporting, a hundred lines earlier:
+#
+#   Warning: Could not set unlimited stack size
+#   Stack:    10240 (soft limit)
+#
+# 10 MB of stack, 16.1 MB of array. The entrypoint asks for an unlimited stack
+# and says so when refused, but inside DPS it IS refused: the hard limit comes
+# from the Docker daemon, cwltool does not pass --ulimit, and the daemon is not
+# ours. So the stack size is not something this project can set, and a solver
+# that depends on it is a solver that runs on the developer's laptop and dies
+# on the platform.
+#
+# The threshold keeps small temporaries on the stack, so the cost is confined
+# to the few arrays that were the problem. ifort allocates these per-thread,
+# which also covers the OpenMP workers -- they never saw `ulimit -s` anyway,
+# only KMP_STACKSIZE, so they were one L-level away from the same crash.
 
 # Production optimization flags
-FCOPT_PROD = -pad -ipo -O3 -no-prec-div -fp-model fast=2 -xHost
+FCOPT_PROD = -pad -ipo -O3 -no-prec-div -fp-model fast=2 -march=core-avx-i
 # -pad = Enables changing of variable and array memory layout
 # -ipo = Interprocedural optimization
 # -O3 = Aggressive optimizations
 # -no-prec-div = Faster division
 # -fp-model fast=2 = Fast floating point model
-# -xHost = Optimize for host CPU
+# -march=core-avx-i = AVX + F16C, any x86-64 vendor (see below)
+# -march=core-avx-i, not -xHost. Any -x option makes ifort insert a check
+# that refuses to start on a non-Intel CPU, whatever instructions it has:
+# DPS job on r7a.2xlarge (AMD EPYC), 2026-10-29 --
+#   Please verify that both the operating system and the processor support
+#   Intel(R) X87, CMOV, MMX, FXSAVE, SSE, ..., AVX and F16C instructions.
+# -xHost also tied the code to whichever machine built the image; that list
+# is what it resolved to there (AVX + F16C). -march= targets the same set
+# with no vendor check, so it runs on Intel and AMD pools alike.
 
 # Debug flags for crash investigation
 FCOPT_DEBUG = -g -traceback -check bounds -check uninit -fpe0 -warn all -O0
@@ -55,6 +89,18 @@ FCOPT_DEBUG = -g -traceback -check bounds -check uninit -fpe0 -warn all -O0
 # -fpe0 = Stop on floating-point exceptions (div by zero, overflow, invalid)
 # -warn all = Enable all compiler warnings
 # -O0 = No optimization (makes debugging easier, variables not optimized away)
+
+# infoMatrix storage precision. real*4 by default: 24.72 GiB rather than
+# 49.43 at L=11, for a 30.77 GiB working set rather than 55.48. real*8 is the
+# opt-out, and it is an opt-out rather than the default because it does not
+# fit on any pool available to us -- see the comment block at the top of
+# spmm.f, including the validation this has not had.
+ifeq ($(INFOMATRIX_R8),1)
+    FCOPT_BASE += -DINFOMATRIX_R8
+    $(info *** infoMatrix in real*8: 55.48 GiB at L=11, needs >64 GiB ***)
+else
+    $(info *** infoMatrix in real*4 -- validate against production output ***)
+endif
 
 # Select flags based on DEBUG setting
 ifeq ($(DEBUG),1)

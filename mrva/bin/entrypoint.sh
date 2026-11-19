@@ -15,13 +15,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../common/bin/localize.sh
 source "$SCRIPT_DIR/../../common/bin/localize.sh"
 
+# Say which image this is before doing anything else. Docker reuses a cached
+# image for a tag that was rebuilt in place, so "the tag is 2.0.0" is not
+# evidence that the bits are today's -- this line is. Set at build time by
+# maap/Dockerfile.dps; "unknown" means a base image built outside that path.
+echo "MUR image build: ${MUR_IMAGE_BUILD:-unknown} (module: mrva)" >&2
+
 usage() {
     echo "Usage: docker run ... --year YEAR --doy DOY --mode MODE \\"
     echo "  --polar-cap-edge-file FILE --seasonal-file FILE \\"
     echo "  --landice-ice-p011-file FILE --landice-grid-p01-file FILE --landice-icefiles-p011-file FILE \\"
     echo "  --sensor-inputs-manifest FILE \\"
     echo "  [--sensors LIST] [--mur25-grid-file FILE] [--prior-csp-file FILE] \\"
-    echo "  [--l4-reference-root DIR] [--debug]"
+    echo "  [--l4-reference-root DIR] [--max-level N] [--debug]"
     echo "  YEAR:     4-digit year (e.g., 2025)"
     echo "  DOY:      Day of year (1-366)"
     echo "  MODE:     nrt (near-real-time) or rea (reanalysis)"
@@ -29,6 +35,9 @@ usage() {
     echo "  Every FILE/DIR value may be a local path or an s3:// href."
     echo "  --mur25-grid-file, --prior-csp-file and --l4-reference-root are optional"
     echo "  (absence is a valid state, not an error)."
+    echo "  --max-level N caps the analysis below its full L=11. An escape hatch"
+    echo "  for workers too small for L=11, not a tuning knob: the granule comes"
+    echo "  out on the same grid but SMOOTHER than the operational product."
 }
 
 parse_args() {
@@ -56,6 +65,7 @@ parse_args() {
             --debug)                       DEBUG_MODE=1;                     shift ;;
             --polar-cap-edge-file)         POLAR_CAP_EDGE_FILE="$2";         shift 2 ;;
             --mur25-grid-file)             MUR25_GRID_FILE="$2";             shift 2 ;;
+            --max-level)                   MAX_LEVEL="$2";                   shift 2 ;;
             --seasonal-file)               SEASONAL_FILE="$2";               shift 2 ;;
             --landice-ice-p011-file)       LANDICE_ICE_P011_FILE="$2";       shift 2 ;;
             --landice-grid-p01-file)       LANDICE_GRID_P01_FILE="$2";       shift 2 ;;
@@ -176,13 +186,19 @@ config = {
     'sensors': sensors,
     'debug': sys.argv[11] == '1',
 }
+# Appended rather than slotted in, so every existing sys.argv index above
+# keeps its meaning. Absent or empty means the full L=2..11 analysis; the
+# key is omitted entirely in that case so MATLAB's isfield check decides,
+# rather than this having to know the default too.
+if sys.argv[13]:
+    config['max_level'] = int(sys.argv[13])
 with open(sys.argv[12], 'w') as f:
     json.dump(config, f)
 " \
         "$POLAR_CAP_EDGE_FILE" "$MUR25_GRID_FILE" "$SEASONAL_FILE" \
         "$LANDICE_ICE_P011_FILE" "$LANDICE_GRID_P01_FILE" "$LANDICE_ICEFILES_P011_FILE" \
         "$SENSOR_INPUTS_ROOT" "$PRIOR_CSP_FILE" "$SENSORS" \
-        "$L4_REFERENCE_ROOT" "$DEBUG_MODE" "$config_path"
+        "$L4_REFERENCE_ROOT" "$DEBUG_MODE" "$config_path" "${MAX_LEVEL:-}"
 }
 
 build_command() {
@@ -207,8 +223,19 @@ build_command() {
 # Whether this works depends on DPS's UID/GID policy: the Dockerfile
 # group-0-chmods /data, and local runs pass --group-add 0, but DPS's is
 # unknown -- so fall back to copying and say which branch fired.
+# The stage-out root, resolved in exactly one place.
+#
+# landice and l2p have had this as a function since the CWL stage-out fix;
+# mrva grew the same expression twice by hand and then called output_root as
+# though it were a function -- which it was not, so `mkdir -p "$(output_root)"`
+# expanded to `mkdir -p ""` and the job died before localizing a single input.
+# One definition, three callers, no third spelling to drift.
+output_root() {
+    echo "${MUR_OUTPUT_ROOT:-$(pwd)/output}"
+}
+
 setup_output_redirect() {
-    local root="${MUR_OUTPUT_ROOT:-$(pwd)/output}"
+    local root; root="$(output_root)"
     MUR_STAGE_OUT_MODE="none"
     mkdir -p "$root/csp" "$root/netcdf"
 
@@ -233,15 +260,153 @@ setup_output_redirect() {
 
 finish_output_redirect() {
     [ "${MUR_STAGE_OUT_MODE:-none}" = "copy" ] || return 0
-    local root="${MUR_OUTPUT_ROOT:-$(pwd)/output}"
+    local root; root="$(output_root)"
     echo "stage-out: copying /data/output -> $root" >&2
     cp -a /data/output/csp/. "$root/csp/" 2>/dev/null || true
     cp -a /data/output/netcdf/. "$root/netcdf/" 2>/dev/null || true
 }
 
+# What the box actually has, and where scratch really lives.
+#
+# The finest analysis level dominates everything: at L=11 the Fortran holds
+# ~28.8 GiB of grid, against a worker whose size we only know from the queue
+# name. Three runs have now been lost to an out-of-memory kill whose margin
+# nobody could quantify afterwards, because the log recorded neither the RAM
+# available nor how much of it scratch was consuming.
+#
+# The /tmp question is the one worth asking out loud. DPS bind-mounts the
+# host's /tmp into the container, and localize_all_inputs stages every BIC
+# and BIP under it. If that filesystem is tmpfs, those files are RAM -- they
+# compete directly with the solver and never appear in any process's RSS, so
+# the job dies with gigabytes seemingly unaccounted for. If it is real disk,
+# they cost nothing and this line says so.
+report_memory_budget() {
+    # Gated on /proc, which is the honest condition: /proc/meminfo and GNU
+    # `stat -f -c` are both Linux-only, and on a developer's Mac this would
+    # otherwise print nonsense (BSD stat reads -c as a format string). The
+    # container is Linux; anywhere else, say nothing rather than guess.
+    [ -r /proc/meminfo ] || return 0
+
+    awk '/^MemTotal:/     {t=$2}
+         /^MemAvailable:/ {a=$2}
+         END {printf "Memory:   %.1f GiB total, %.1f GiB available at start\n",
+                     t/1048576, a/1048576}' /proc/meminfo
+
+    local tmpdir="${TMP_DIR:-/tmp/mrva_tmp}" fstype
+    fstype=$(stat -f -c %T "$(dirname "$tmpdir")" 2>/dev/null | head -1)
+    [ -n "$fstype" ] || fstype=unknown
+    case "$fstype" in
+        tmpfs|ramfs)
+            echo "Scratch:  $tmpdir is on $fstype -- STAGED INPUTS CONSUME RAM and compete with the solver" ;;
+        unknown)
+            echo "Scratch:  $tmpdir filesystem could not be determined" ;;
+        *)
+            echo "Scratch:  $tmpdir is on $fstype (disk-backed, costs no RAM)" ;;
+    esac
+}
+
+# --- STAC metadata for the analysis granules ---------------------------------
+#
+# MAAP ingests a catalog.json written into the stage-out directory and
+# publishes it at dps-stac.maap-project.org, served by
+# titiler-dps-stac.maap-project.org. That is what makes a granule findable by
+# date without anyone having to know which DPS job produced it, and it is why
+# the pipeline no longer copies granules to invented S3 keys: the ingest
+# service rewrites relative asset hrefs to absolute s3:// URLs, so the file
+# stays where DPS put it.
+#
+# Only the two L4 granules are described. The coefficient files and the
+# per-sensor BICs are internal plumbing -- they churn daily, nobody discovers
+# them, and cataloguing them would mean thousands of items no one queries.
+# They stay at deterministic workspace keys instead.
+
+# Relative to the stage-out root, which is what write_stac.py wants.
+_stac_relpath() {
+    local root="$1" path="$2"
+    echo "${path#"$root"/}"
+}
+
+# The newest match, so a re-run in a dirty directory describes what this run
+# produced rather than whatever sorts first.
+_stac_find_granule() {
+    local root="$1" pattern="$2"
+    find "$root/netcdf" -type f -name "$pattern" 2>/dev/null \
+        | sort | tail -n 1
+}
+
+write_stac() {
+    local root; root="$(output_root)"
+
+    local one; one="$(_stac_find_granule "$root" '*-MUR-GLOB-*.nc')"
+    local p25; p25="$(_stac_find_granule "$root" '*-MUR25-GLOB-*.nc')"
+
+    if [ -z "$one" ] && [ -z "$p25" ]; then
+        echo "STAC: no L4 granule under $root/netcdf; nothing to describe" >&2
+        return 0
+    fi
+
+    # The item datetime and id come from the granule filename, not from
+    # --year/--doy. The filename is what the product actually claims, and a
+    # disagreement between the two should surface as a wrong id rather than be
+    # papered over by recomputing the date we asked for.
+    local base; base="$(basename "${one:-$p25}")"
+    # The leading field, up to the first hyphen -- not a fixed 14-character
+    # slice. The slice is what broke the cog module: handed the promoted
+    # canonical name (2026100809-JPL-...), it took "2026100809-JPL" as a
+    # timestamp, failed the digit check and silently published nothing. These
+    # names are mrva's own output and are always YYYYMMDDHHMMSS, but a parser
+    # that fails loudly on a length it does not know beats one that depends
+    # on the length never changing.
+    local ts="${base%%-*}"
+    if [[ ! "$ts" =~ ^[0-9]{14}$ ]]; then
+        echo "STAC: cannot read a 14-digit timestamp from '$base'" >&2
+        echo "STAC: skipping metadata; the granules above are intact" >&2
+        return 0
+    fi
+    local dt="${ts:0:4}-${ts:4:2}-${ts:6:2}T${ts:8:2}:${ts:10:2}:${ts:12:2}Z"
+
+    local -a args=(
+        --output-dir "$root"
+        --collection mur-l4-sst
+        --item-id "mur-l4-${ts:0:8}-${MODE}"
+        --datetime "$dt"
+        --property "mur:mode=$MODE"
+        --property "mur:run_type=$([ "$MODE" = rea ] && echo final || echo interim)"
+        --property "mur:doy=$DOY"
+        --property "processing:level=L4"
+    )
+    # Mirrors the granule's own mrva_analysis_level attribute. On the item as
+    # well as in the file because the item is what a catalogue listing reads:
+    # a capped granule is structurally identical to a full one, so without
+    # this nothing can say which days reached production resolution.
+    if [ -n "${MAX_LEVEL:-}" ]; then
+        args+=(--property "mur:analysis_level=$MAX_LEVEL")
+    fi
+    [ -n "$one" ] && args+=(--asset "data=$(_stac_relpath "$root" "$one")")
+    [ -n "$p25" ] && args+=(--asset "data25=$(_stac_relpath "$root" "$p25")")
+
+    # Never fatal. The granules are the product of an hour of analysis; the
+    # metadata makes them discoverable and can be regenerated. Failing a
+    # finished solve over a sidecar JSON would be the worse trade by far.
+    if ! python3 "$SCRIPT_DIR/../../common/bin/write_stac.py" "${args[@]}"; then
+        echo "STAC: metadata generation failed; the granules above are intact" >&2
+    fi
+    return 0
+}
+
 main() {
     set -e
     parse_args "$@" || exit 1
+    # Create the stage-out directory BEFORE anything that can fail. CWL
+    # collects ./output* when the job ends, successfully or not; with no such
+    # directory it reports
+    #
+    #   Did not find output file with glob pattern: ['./output*']
+    #
+    # as the job's error, which buries the real one. An empty directory makes
+    # the actual failure the only failure in the log.
+    mkdir -p "$(output_root)"
+
     localize_all_inputs || exit 1
     verify_inputs_exist || exit 1
 
@@ -252,10 +417,23 @@ main() {
 
     setup_output_redirect
 
-    # The Fortran PCG solver uses large local arrays that can exceed default
-    # stack; unlimited stack prevents segfaults during solver iterations.
-    # KMP_STACKSIZE sets thread stack for Intel OpenMP parallel regions.
-    ulimit -s unlimited 2>/dev/null || echo "Warning: Could not set unlimited stack size"
+    # Raise the stack where we are allowed to. Under DPS we are not: the hard
+    # limit comes from the Docker daemon, cwltool passes no --ulimit, and the
+    # daemon is not ours -- job 50f7b39a ran with 10 MB and segfaulted in the
+    # PCG solver on a 16.1 MB automatic array.
+    #
+    # That is why the Fortran is built with -heap-arrays (see
+    # mrva/src/fortran/Makefile): correctness cannot rest on a limit the
+    # platform refuses to grant. This call is kept because where it DOES work
+    # it is still free, and the message below is worded so that a future
+    # segfault points at the right place instead of scrolling past as a
+    # warning nobody reads.
+    if ! ulimit -s unlimited 2>/dev/null; then
+        echo "Note: stack stays at $(ulimit -s) KB (the container's hard limit" \
+             "forbids raising it). Harmless while the Fortran is built with" \
+             "-heap-arrays; if you see SIGSEGV in a solver, check that flag" \
+             "survived the build before suspecting anything else." >&2
+    fi
     export KMP_STACKSIZE=${KMP_STACKSIZE:-128M}
 
     # Debug mode is enabled if the image was built with DEBUG=1, or via the
@@ -301,6 +479,7 @@ main() {
     echo "-----------------------------------------"
     echo "Stack:    $(ulimit -s) (soft limit)"
     echo "KMP_STACKSIZE: $KMP_STACKSIZE"
+    report_memory_budget
     echo "========================================="
     echo ""
 
@@ -320,15 +499,31 @@ main() {
 
     echo "Starting MATLAB runtime..."
     build_command || exit 1
-    # Not `exec` when a copy-mode stage-out still has to run afterwards;
-    # exec would replace this shell and the copy would never happen.
-    if [ "${MUR_STAGE_OUT_MODE:-none}" = "copy" ]; then
-        "${CMD[@]}"
-        local rc=$?
-        finish_output_redirect
-        exit "$rc"
+
+    # Never `exec`. Two things have to happen after MATLAB exits -- the
+    # copy-mode stage-out, and the STAC metadata that makes the granules
+    # discoverable -- and exec would replace this shell before either ran.
+    # This used to exec in the common case and fall back to a non-exec branch
+    # only for copy-mode stage-out; the branch is gone because the metadata
+    # step applies to every path.
+    # `|| rc=$?` rather than a bare call followed by `$?`: main() runs under
+    # `set -e`, which would exit on a non-zero MATLAB before either of the
+    # steps below could run -- taking the copy-mode stage-out with it, so a
+    # failed run would stage out nothing at all. Inside an OR-list the
+    # failure is handled, not fatal.
+    local rc=0
+    "${CMD[@]}" || rc=$?
+    finish_output_redirect
+    if [ "$rc" -eq 0 ]; then
+        echo ""
+        write_stac
+    else
+        # A failed solve may still have left partial granules on disk.
+        # Publishing those as a finished product is worse than publishing
+        # nothing: a catalogue entry carries no hint that its run died.
+        echo "STAC: skipped -- MATLAB exited $rc" >&2
     fi
-    exec "${CMD[@]}"
+    exit "$rc"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

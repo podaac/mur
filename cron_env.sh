@@ -8,5 +8,5 @@
 # The `:=` form only assigns when the variable is unset, so existing
 # overrides from cron entries or shell environments are preserved.
 
-: "${MUR_CONFIG:=config.prod.json}"
+: "${MUR_CONFIG:=config.container.json}"
 export MUR_CONFIG

@@ -19,6 +19,8 @@
 #   ./utils/build_and_push.sh                     # build only, no push
 #   ./utils/build_and_push.sh --push              # build and push
 #   ./utils/build_and_push.sh --push --tag v1.2.3 # with an explicit tag
+#   ./utils/build_and_push.sh --push --tag 2.0.0 --with-dps
+#                                                 # ...and the MAAP -dps variants
 #   ./utils/build_and_push.sh --modules landice   # one module
 #
 set -euo pipefail
@@ -27,13 +29,15 @@ REGISTRY="${REGISTRY:-ghcr.io}"
 REPO="${REPO:-podaac/mur}"
 BASE_IMAGE="mur-matlab-base:r2024b"
 PLATFORM="linux/amd64"
-MODULES="iquam l2p landice mrva"
+MODULES="iquam l2p landice mrva cog"
 PUSH=0
+WITH_DPS=0
 TAG=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --push)    PUSH=1; shift ;;
+    --with-dps) WITH_DPS=1; shift ;;
     --tag)     TAG="$2"; shift 2 ;;
     --modules) MODULES="$2"; shift 2 ;;
     -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
@@ -49,8 +53,25 @@ if [ -z "$TAG" ]; then
 fi
 
 # --- base image: built once, reused, never pushed ------------------------
-if [ ! -f network.lic ]; then
+#
+# Only for modules that actually compile MATLAB. cog does not: it is
+# debian-slim plus gdal-bin, and demanding a MATLAB licence to build a GeoTIFF
+# converter would make the cheap module as hard to build as the expensive one
+# -- which is most of the reason it was split out of mrva.
+NEEDS_MATLAB=0
+for module in $MODULES; do
+  if grep -q 'mur-matlab-base' "${module}/Dockerfile" 2>/dev/null; then
+    NEEDS_MATLAB=1
+  fi
+done
+
+if [ "$NEEDS_MATLAB" -eq 0 ]; then
+  echo "==> No requested module needs the MATLAB base; skipping it."
+fi
+
+if [ "$NEEDS_MATLAB" -eq 1 ] && [ ! -f network.lic ]; then
   echo "ERROR: network.lic not found. It is gitignored; copy it in before building." >&2
+  echo "       (only needed for MATLAB modules -- cog builds without it)" >&2
   exit 1
 fi
 
@@ -58,7 +79,9 @@ fingerprint=$(sha256sum matlab-base/Dockerfile | cut -c1-16)
 have=$(docker image inspect "$BASE_IMAGE" \
          --format '{{index .Config.Labels "mur.base.fingerprint"}}' 2>/dev/null || echo "")
 
-if [ "$have" = "$fingerprint" ]; then
+if [ "$NEEDS_MATLAB" -eq 0 ]; then
+  :
+elif [ "$have" = "$fingerprint" ]; then
   echo "==> Base image is current (fingerprint $fingerprint); reusing."
 else
   echo "==> Building base image (this is the slow one; it is cached afterwards)."
@@ -70,8 +93,10 @@ else
     .
 fi
 
-echo "==> MATLAB update level in base image:"
-docker run --rm --entrypoint cat "$BASE_IMAGE" /opt/matlab/.update_level
+if [ "$NEEDS_MATLAB" -eq 1 ]; then
+  echo "==> MATLAB update level in base image:"
+  docker run --rm --entrypoint cat "$BASE_IMAGE" /opt/matlab/.update_level
+fi
 
 # --- module images -------------------------------------------------------
 for module in $MODULES; do
@@ -101,6 +126,21 @@ for module in $MODULES; do
     docker push "${image}:${TAG}"
   fi
 done
+
+# The DPS variants must be rebuilt whenever their base is, or MAAP keeps
+# running whatever scripts the previous -dps layer captured. Chaining here
+# removes the chance of rebuilding one and forgetting the other.
+if [ "$WITH_DPS" -eq 1 ]; then
+  echo
+  echo "==> Building DPS variants"
+  # An explicit if, not `[ ... ] && ...`: under `set -e` a failing test in an
+  # AND-list is easy to misread, and this must never silently skip the push.
+  dps_args=(--tag "$TAG" --modules "$MODULES")
+  if [ "$PUSH" -eq 1 ]; then
+    dps_args+=(--push --verify)
+  fi
+  "$(dirname "$0")/build_dps_images.sh" "${dps_args[@]}"
+fi
 
 if [ "$PUSH" -eq 0 ]; then
   echo

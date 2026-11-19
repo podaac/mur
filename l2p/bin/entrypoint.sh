@@ -11,6 +11,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../common/bin/localize.sh
 source "$SCRIPT_DIR/../../common/bin/localize.sh"
 
+# Say which image this is before doing anything else. Docker reuses a cached
+# image for a tag that was rebuilt in place, so "the tag is 2.0.0" is not
+# evidence that the bits are today's -- this line is. Set at build time by
+# maap/Dockerfile.dps; "unknown" means a base image built outside that path.
+echo "MUR image build: ${MUR_IMAGE_BUILD:-unknown} (module: l2p)" >&2
+
 usage() {
     echo "Usage: docker run ... --sensor S --region R --year YEAR --doy DAY --rewrite 0|1 --granules-manifest FILE"
     echo "  SENSOR:            AMSR2R, AVMTBG, MODISA, MODIST"
@@ -77,6 +83,16 @@ build_command() {
 main() {
     set -e
     parse_args "$@" || exit 1
+    # Create the stage-out directory BEFORE anything that can fail. CWL
+    # collects ./output* when the job ends, successfully or not; with no such
+    # directory it reports
+    #
+    #   Did not find output file with glob pattern: ['./output*']
+    #
+    # as the job's error, which buries the real one. An empty directory makes
+    # the actual failure the only failure in the log.
+    mkdir -p "$(output_root)"
+
     localize_all_inputs || exit 1
 
     # Ensure scratch dirs exist and are owned by the runtime UID. These are
@@ -85,7 +101,6 @@ main() {
     mkdir -p "${TMP_DIR:-/tmp/l2p_tmp}" "${MATLAB_PREFDIR:-/tmp/.matlab}" "${MCR_CACHE_ROOT:-/tmp}"
 
     # On DPS nothing pre-creates the output directory the way a bind mount does.
-    mkdir -p "$(output_root)"
 
     build_command
     exec "${CMD[@]}"

@@ -54,6 +54,15 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import static_resources_layout as layout  # noqa: E402
 
+# The token lives in ~/.maap-token, found identically by the cron wrapper, the
+# orchestrator and the backfill. Reading only os.environ meant --check failed
+# for anyone who had not also exported it by hand -- including as the cron
+# wrapper's pre-flight, where it is the one gate that must not give a false
+# negative.
+from mur_maap import auth as _auth  # noqa: E402
+
+_auth.load()
+
 DEFAULT_SUBPREFIX = "mur/static-resources"
 REFRESH_MARGIN_SECONDS = 900  # re-mint with 15 min left, matching botocore's advisory refresh
 
@@ -67,50 +76,523 @@ def _maap_client():
     return MAAP()
 
 
+def _normalize_credentials(data: Dict) -> Dict:
+    """Coerce a credentials response into botocore's metadata shape.
+
+    Two documented shapes disagree, so accept both rather than pick:
+    MAAP's OGC docs show snake_case nested under a "credentials" key
+    (aws_access_key_id / expires_at), while maap-py's own
+    workspace_bucket_credentials docstring describes a flat camelCase object
+    (accessKeyId / sessionToken / expiration). A flat STS-style response
+    (AccessKeyId / SessionToken / Expiration) is handled too, so the same
+    parser serves --credentials-command.
+    """
+    creds = data.get("credentials", data)
+
+    def pick(*names):
+        for n in names:
+            if creds.get(n):
+                return creds[n]
+        return None
+
+    payload = {
+        "access_key": pick("aws_access_key_id", "accessKeyId", "AccessKeyId", "access_key"),
+        "secret_key": pick("aws_secret_access_key", "secretAccessKey",
+                           "SecretAccessKey", "secret_key"),
+        "token": pick("aws_session_token", "sessionToken", "SessionToken", "token"),
+        "expiry_time": pick("expires_at", "expiration", "Expiration", "expiry_time"),
+    }
+    missing = [k for k, v in payload.items() if not v and k != "token"]
+    if missing:
+        raise ValueError(
+            f"credentials response is missing {missing}; got keys {sorted(creds)}. "
+            f"Expected MAAP's workspace_bucket_credentials() response or a flat "
+            f"AWS credentials object."
+        )
+    return payload
+
+
 def _credentials_payload(maap) -> Dict:
     """One call to MAAP, normalized into botocore's metadata shape."""
     resp = maap.aws.workspace_bucket_credentials()
-    creds = resp["credentials"]
-    return {
-        "access_key": creds["aws_access_key_id"],
-        "secret_key": creds["aws_secret_access_key"],
-        "token": creds["aws_session_token"],
-        "expiry_time": creds.get("expires_at") or creds.get("expiration"),
-    }, resp
+    return _normalize_credentials(resp), resp
 
 
-def workspace_session(maap):
-    """A boto3 Session whose credentials refresh themselves.
+def _credentials_from_command(command: str) -> Dict:
+    """Refresh credentials by running a shell command that prints JSON.
+
+    The escape hatch for a host that cannot install maap-py or reach the MAAP
+    API. The command is re-run on every refresh, not once, which is what keeps
+    a multi-hour upload alive: anything that can mint fresh credentials works,
+    including an ssh back to a workspace that runs maap-py there.
+
+    Shape handling is shared with the maap-py path, so a command can pipe
+    workspace_bucket_credentials() straight through without reshaping it.
+    """
+    import subprocess
+
+    out = subprocess.run(command, shell=True, check=True,
+                         capture_output=True, text=True).stdout
+    data = json.loads(out)
+    return _normalize_credentials(data), data
+
+
+def make_session(args, maap=None):
+    """A boto3 Session, however this host is able to get credentials.
+
+    Three sources, in precedence order:
+
+      --credentials-command   any command printing JSON; re-run on refresh
+      maap-py                 the workspace case; self-refreshing
+      the standard AWS chain  env vars, profile, or an instance role
+
+    Only the first two need refresh wiring. The standard chain already
+    refreshes itself for roles, and for static keys there is nothing to
+    refresh.
+    """
+    import boto3
+
+    if args.credentials_command:
+        return _refreshable_session(
+            lambda: _credentials_from_command(args.credentials_command)[0],
+            method="mur-credentials-command")
+
+    if maap is not None:
+        return _refreshable_session(
+            lambda: _credentials_payload(maap)[0], method="maap-workspace")
+
+    if args.aws_profile:
+        return boto3.Session(profile_name=args.aws_profile)
+    return boto3.Session()
+
+
+def _refreshable_session(fetch, *, method: str):
+    """Wrap a credentials fetcher so botocore re-mints before expiry.
 
     botocore checks expiry before signing every request, so a refresh lands
-    between multipart parts and is invisible to an in-flight upload.
+    between multipart parts and is invisible to an in-flight upload -- which
+    is the whole reason this is not `aws s3 sync`.
     """
     import boto3
     from botocore.credentials import RefreshableCredentials
     from botocore.session import get_session
 
-    def fetch():
-        payload, _ = _credentials_payload(maap)
-        return payload
-
-    initial = fetch()
     session = get_session()
     session._credentials = RefreshableCredentials.create_from_metadata(
-        metadata=initial,
-        refresh_using=fetch,
-        method="maap-workspace",
-    )
+        metadata=fetch(), refresh_using=fetch, method=method)
     return boto3.Session(botocore_session=session)
+
+
+def workspace_session(maap):
+    """Backwards-compatible shim for the maap-py path."""
+    return _refreshable_session(
+        lambda: _credentials_payload(maap)[0], method="maap-workspace")
+
+
+# Everything the UPLOAD path imports. --verify additionally needs the
+# orchestrator's resolvers and their imports, which is a much larger set --
+# so verify from the workspace, where the whole repo already lives, rather
+# than dragging it onto a production host.
+BUNDLE_FILES = (
+    "utils/upload_static_resources.py",
+    "static_resources_layout.py",
+    "landice_static_files.py",
+    "mrva_static_files.py",
+)
+
+
+def make_bundle(dest_dir: str) -> int:
+    """Copy the few files the uploader needs into a directory ready to scp.
+
+    The static data lives on a production host that has no checkout of this
+    repo and may have no way to get one. The upload path deliberately imports
+    only these four files so that copying them across is the whole install.
+    """
+    import shutil
+
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    out = pathlib.Path(dest_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    for rel in BUNDLE_FILES:
+        src = repo / rel
+        if not src.is_file():
+            print(f"ERROR: {src} is missing", file=sys.stderr)
+            return 1
+        # Flatten utils/ -- the script inserts its parent on sys.path, so a
+        # flat directory resolves the sibling imports correctly.
+        shutil.copy2(src, out / pathlib.Path(rel).name)
+        print(f"  {rel}")
+
+    readme = out / "README.txt"
+    readme.write_text(BUNDLE_README)
+    print(f"  README.txt\n\nBundle written to {out}")
+    print("\nNext:")
+    print(f"  scp -r {out} <prod-host>:~/mur-upload/")
+    print("  then follow README.txt there.")
+    return 0
+
+
+BUNDLE_README = """\
+MUR static-resources uploader (portable bundle)
+===============================================
+
+These four files are everything the UPLOAD path needs. Run them with any
+Python 3.8+ that has boto3:
+
+    pip install --user boto3
+
+CREDENTIALS
+-----------
+This host probably cannot install maap-py or reach the MAAP API. Credentials
+are temporary and a 141 GB upload outlives them, so they must be REFRESHABLE,
+not copied over once. Use --credentials-command: it is re-run on every
+refresh, so anything that can mint fresh credentials works.
+
+If you can ssh to a MAAP workspace from here:
+
+    --credentials-command "ssh maap-workspace \\
+        python -c \\"import json;from maap.maap import MAAP;\\
+        print(json.dumps(MAAP().aws.workspace_bucket_credentials()))\\""
+
+If this host has its own AWS role or profile, use --aws-profile instead.
+
+Either way you must pass --dest explicitly, because discovering the workspace
+URI needs maap-py. Get it by running this in a workspace:
+
+    python utils/upload_static_resources.py --check
+
+RUNNING
+-------
+    # see the plan; moves nothing
+    python upload_static_resources.py --from-prod-layout --dry-run \\
+        --include-optional --dest s3://<bucket>/<user>/mur/static-resources
+
+    # ~1.6 GiB, minutes. Unblocks landice testing.
+    python upload_static_resources.py --from-prod-layout --include-optional \\
+        --no-seasonal --dest s3://... --credentials-command "..."
+
+    # ~141 GB. Resumable: re-run the same command after any interruption.
+    nohup python upload_static_resources.py --from-prod-layout --seasonal-only \\
+        --dest s3://... --credentials-command "..." \\
+        --ledger ~/mur_static_ledger.jsonl > ~/mur_upload.log 2>&1 &
+
+Source locations default to bundle_prod_static.sh's contract and can be
+overridden:  GRIDS_DIR, ICE_DIR, SEASONAL_DIR, POLARCAP_FILE
+
+VERIFYING
+---------
+Run the verify pass from the WORKSPACE, not here -- it imports the pipeline's
+own resolvers to confirm every href the orchestrator will ask for actually
+resolves:
+
+    python utils/upload_static_resources.py --verify-only --include-optional
+"""
+
+
+def _token_shape_warnings(token: str):
+    """Catch a token that was mangled in transit.
+
+    A MAAP personal access token is `jwt:` followed by a JWT, and a JWT always
+    starts `eyJ` (base64 for '{"'). Copying one out of a terminal by mouse can
+    drop a leading character, which is invisible -- the value still looks like
+    a long opaque blob -- and produces a 401 that says only "Invalid session".
+    Checking the prefix turns that into an immediate answer.
+    """
+    import re
+
+    warnings = []
+    if token != token.strip():
+        warnings.append("!! has leading/trailing whitespace -- a copy-paste artifact.")
+
+    stripped = token.strip()
+    if stripped.startswith("jwt:"):
+        return warnings                       # expected shape
+
+    # One specific, unambiguous failure: a PARTIAL `jwt:` prefix in front of a
+    # JWT body. `wt:eyJ...` cannot be a token in its own right, so this is a
+    # clip and nothing else.
+    #
+    # Nothing else about the shape is judged. MAAP tokens come in more than one
+    # form -- a workspace session ticket starts `jwt:`, a token generated at
+    # console.maap-project.org need not -- and an earlier version of this
+    # function called the latter an "unrecognized shape", which read as a
+    # problem while the token worked perfectly. Only the authenticated calls
+    # below decide whether a token is good.
+    if re.match(r"^(j?w?t?):(eyJ)", stripped):
+        warnings.append(
+            f"!! starts {stripped[:4]!r}, which is a partial 'jwt:' prefix in "
+            f"front of a JWT -- the leading character(s) were clipped when it "
+            f"was copied.")
+        warnings.append("   Re-copy it; do not hand-repair it, in case more is missing.")
+    return warnings
+
+
+def _redact(value, keep=6):
+    if not value:
+        return repr(value)
+    v = str(value)
+    return f"{v[:keep]}...{v[-keep:]} ({len(v)} chars)"
+
+
+def _diagnose_auth(maap) -> None:
+    """Show what the server actually said, and what we actually sent.
+
+    maap-py calls raise_for_status(), which discards the response body -- and
+    that body is usually the only thing that distinguishes an expired token
+    from a wrong KIND of token. Re-issue the same request by hand to recover
+    it, and probe a simpler authenticated endpoint first to tell "auth is
+    broken generally" apart from "this one endpoint rejects me".
+    """
+    import requests
+
+    if maap is None:
+        print("                     (client construction failed; nothing to probe)")
+        return
+
+    print("\n  --- auth diagnosis ---")
+
+    header = maap._get_api_header()
+    print("  headers sent")
+    for key in ("token", "proxy-ticket"):
+        if key in header:
+            print(f"    {key:<14} {_redact(header[key])}")
+        else:
+            print(f"    {key:<14} ABSENT")
+
+    # A trailing newline from a copy-paste is invisible and produces exactly
+    # this failure, so check for it explicitly.
+    pgt = os.environ.get("MAAP_PGT", "")
+    if pgt != pgt.strip():
+        print("    !! MAAP_PGT has leading/trailing whitespace -- almost certainly")
+        print("       a copy-paste artifact. Re-export without it.")
+
+    # Simpler authenticated call: if this also fails, the token is the problem
+    # rather than the workspace-bucket endpoint specifically.
+    print("\n  probe: members/self (simpler authenticated endpoint)")
+    try:
+        r = requests.get(url=maap.config.member, headers=header, timeout=30)
+        print(f"    HTTP {r.status_code}")
+        if r.status_code == 200:
+            print("    -> general auth WORKS; the workspace-bucket endpoint is")
+            print("       rejecting this token specifically.")
+        else:
+            body = r.text.strip()
+            print(f"    body: {body[:400]}")
+            print("    -> general auth FAILS, so this is the token, not the endpoint.")
+    except Exception as exc:                              # noqa: BLE001
+        print(f"    request failed: {exc}")
+
+    # The real call, with the body preserved.
+    print("\n  probe: workspaceBucket (the call that failed)")
+    try:
+        r = requests.get(url=maap.config.workspace_bucket_credentials,
+                         headers=header, timeout=30)
+        print(f"    HTTP {r.status_code}")
+        print(f"    body: {r.text.strip()[:400]}")
+    except AttributeError:
+        print("    (endpoint attribute not found on this maap-py version)")
+    except Exception as exc:                              # noqa: BLE001
+        print(f"    request failed: {exc}")
+
+    print("\n  most likely causes, in order")
+    print("    1. The workspace's MAAP_PGT is a SESSION ticket, valid only in that")
+    print("       workspace. For use elsewhere, generate a token at")
+    print("       https://console.maap-project.org/profile/tokens -- that page")
+    print("       exists precisely for off-platform automation.")
+    print("    2. The token expired.")
+    print("    3. It was truncated or gained whitespace in transit. Compare")
+    print("       both ends:  printf %s \"$MAAP_PGT\" | wc -c")
+
+
+def check_environment(args) -> int:
+    """Prove the environment can actually do the upload, before moving 142 GiB.
+
+    Answers, in order, the things that silently go wrong: is maap-py the OGC
+    version, do credentials issue at all, which bucket and prefix do they
+    grant, how long do they last, and -- the one that a HEAD cannot tell you
+    -- can we really WRITE there.
+    """
+    print("MUR static-resources upload: environment check\n")
+    ok = True
+
+    # 1. The user-specific token. maap-py carries two: `maap_token` is
+    #    service-level and fetched automatically, while MAAP_PGT identifies
+    #    YOU -- and the workspace bucket is your bucket, so off-workspace the
+    #    API cannot resolve it without this. Inside a workspace the hub
+    #    usually sets it already.
+    pgt = os.environ.get("MAAP_PGT")
+    if pgt:
+        print(f"  MAAP_PGT           set ({len(pgt)} chars)")
+        for line in _token_shape_warnings(pgt):
+            print(f"                     {line}")
+    else:
+        print("  MAAP_PGT           not set")
+        print("                     Fine inside a workspace if credentials still")
+        print("                     issue below. Elsewhere you need it:")
+        print("                       in a workspace terminal:  echo $MAAP_PGT")
+        print("                       or: https://console.maap-project.org/profile/tokens")
+        print("                     then: export MAAP_PGT='<value>'")
+
+    # 2. maap-py, and the right major version. Below v5 none of the OGC calls
+    #    exist, and the failure mode is a confusing AttributeError much later.
+    # Probe maap.maap specifically, not the top-level name: an unrelated
+    # package called "maap" imports fine and then fails confusingly later.
+    try:
+        import maap.maap  # noqa: F401
+    except ImportError as exc:
+        print(f"  maap-py            NOT USABLE ({exc})")
+        print("                     Run this from a MAAP workspace started on an OGC")
+        print("                     image, e.g. mas.maap-project.org/root/"
+              "maap-workspaces/2i2c/pangeo:v6.0.0")
+        print("                     Elsewhere: pip install maap-py")
+        return 1
+
+    version = "unknown"
+    try:
+        from importlib.metadata import version as _dist_version
+        version = _dist_version("maap-py")
+    except Exception:                                     # noqa: BLE001
+        import maap as maap_pkg
+        version = getattr(maap_pkg, "__version__", "unknown")
+    print(f"  maap-py            {version}")
+
+    major = str(version).lstrip("v").split(".")[0]
+    if major.isdigit() and int(major) < 5:
+        print("                     !! need >= 5 for the OGC API; this workspace")
+        print("                        image ships the non-OGC v4 stack")
+        ok = False
+
+    # 3. Credentials. Build the client and make the call in separate steps so
+    #    the diagnosis below can tell "could not construct a client" apart from
+    #    "the server rejected us".
+    maap = None
+    try:
+        maap = _maap_client()
+        payload, resp = _credentials_payload(maap)
+    except Exception as exc:                              # noqa: BLE001
+        print(f"  credentials        FAILED: {exc}")
+        if args.debug:
+            _diagnose_auth(maap)
+        else:
+            print("                     Re-run with --debug to see the server's own")
+            print("                     error message and which headers were sent.")
+        print("                     Inside a workspace this should just work.")
+        print("                     Elsewhere, maap-py authenticates with a MAAP")
+        print("                     token -- NOT an AWS profile; it mints temporary")
+        print("                     AWS credentials for you:")
+        print("                       pip install 'maap-py>=5.1.0'")
+        print("                       export MAAP_PGT='<token>'   # console.maap-project.org/profile/tokens")
+        print("                       export MAAP_API_HOST=api.maap-project.org  # default")
+        print("                     The host needs outbound HTTPS to that API and to S3.")
+        return 1
+    print(f"  credentials        OK, expire {payload['expiry_time']}")
+
+    # 4. What those credentials actually grant. The workspace path is always
+    #    first; anything after it is an org-shared bucket.
+    print("\n  authorized paths")
+    for i, path in enumerate(resp["authorized_s3_paths"]):
+        marker = "workspace" if i == 0 else path.get("type", "org")
+        print(f"    [{i}] {path['uri']}  ({marker}, {path.get('access', '?')})")
+
+    dest = args.dest or default_destination(maap)
+    bucket, prefix = split_s3_uri(dest)
+    print(f"\n  destination        {dest}")
+    print(f"    bucket           {bucket}")
+    print(f"    prefix           {prefix}")
+
+    # 5. Region. The uploader never hardcodes it, but knowing it makes the
+    #    curl reachability test from a production host possible.
+    s3 = make_session(args, maap).client("s3")
+    try:
+        loc = s3.get_bucket_location(Bucket=bucket).get("LocationConstraint")
+        print(f"    region           {loc or 'us-east-1'}")
+    except Exception as exc:                              # noqa: BLE001
+        if "GetBucketLocation" in str(exc) or "AccessDenied" in str(exc):
+            # The workspace session policy grants access to your prefix, not
+            # to bucket-level metadata. Uploads are unaffected.
+            print("    region           not readable (session policy scopes you to")
+            print("                     your prefix, not bucket metadata) -- harmless")
+        else:
+            print(f"    region           could not determine ({exc})")
+
+    # 6. A real write. Read-only credentials, a prefix you cannot write to, or
+    #    a bucket policy that only permits certain key shapes all look fine
+    #    until the first PUT -- so do one, then clean it up.
+    probe_key = f"{prefix}/.upload-probe" if prefix else ".upload-probe"
+    print(f"\n  write probe        {probe_key}")
+    try:
+        s3.put_object(Bucket=bucket, Key=probe_key, Body=b"mur upload probe\n")
+        body = s3.get_object(Bucket=bucket, Key=probe_key)["Body"].read()
+        assert body == b"mur upload probe\n"
+        s3.delete_object(Bucket=bucket, Key=probe_key)
+        print("                     OK (wrote, read back, deleted)")
+    except Exception as exc:                              # noqa: BLE001
+        print(f"                     FAILED: {exc}")
+        ok = False
+
+    # 6b. The team (org) bucket, probed the same way but only reported: the
+    #     cron's pre-flight runs this check, and a team bucket that is listed
+    #     but not yet writable must not stop the daily run. That is not
+    #     hypothetical -- on 2026-10-29 MAAP listed s3://mur-sst as
+    #     read_write, and every request to it was denied.
+    root = resp["authorized_s3_paths"][0]["uri"].rstrip("/")
+    for org in [p for p in resp["authorized_s3_paths"] if p.get("type") == "org"]:
+        org_bucket, org_prefix = split_s3_uri(org["uri"])
+        org_key = f"{org_prefix}/mur/.upload-probe" if org_prefix else "mur/.upload-probe"
+        print(f"\n  team bucket probe  s3://{org_bucket}/{org_key}  (informational)")
+        try:
+            s3.put_object(Bucket=org_bucket, Key=org_key, Body=b"mur upload probe\n")
+            s3.get_object(Bucket=org_bucket, Key=org_key)["Body"].read()
+            s3.delete_object(Bucket=org_bucket, Key=org_key)
+            print("                     OK (wrote, read back, deleted)")
+            root = org["uri"].rstrip("/")
+        except Exception as exc:                          # noqa: BLE001
+            print(f"                     DENIED: {exc}")
+            print("                     Listed as authorized, but the bucket does not")
+            print("                     admit these credentials. Its owner, or MAAP ops,")
+            print("                     has to grant access before maap.workspace_root")
+            print("                     can point at it.")
+
+    # 7. What to do next, with the values just discovered rather than
+    #    placeholders to substitute by hand.
+    print("\n  next")
+    print("    Put this in your MAAP config so the orchestrator and the")
+    print("    containers resolve the same layout:")
+    personal = resp["authorized_s3_paths"][0]
+    print(f'      "maap":    {{ "workspace_root": "{root}",')
+    print(f'                   "username": "{str(personal.get("prefix") or "").strip("/")}" }}')
+    static = args.dest or f"{root}/{DEFAULT_SUBPREFIX}"
+    print(f'      "landice": {{ "static_resources_dir": "{static}" }}')
+    print(f'      "mrva":    {{ "static_resources_dir": "{static}" }}')
+    print("\n    Then, from the host holding the static data:")
+    print("      # tree already assembled under one root (the usual case):")
+    print("      python utils/upload_static_resources.py \\")
+    print("          --from-config config.container.json --include-optional \\")
+    print(f"          --dest {dest} --dry-run")
+    print("      # or, if the files are still scattered across their NAS")
+    print("      # locations, swap --from-config for --from-prod-layout.")
+
+    print("\n" + ("CHECK PASSED" if ok else "CHECK FAILED"))
+    return 0 if ok else 1
 
 
 def default_destination(maap) -> str:
     """The workspace root, discovered rather than hardcoded.
 
     authorized_s3_paths[0] is documented as always being the workspace path.
+    A team bucket is deliberately not the default: --check gates the cron
+    on a write here. Pass --dest to upload into one.
     """
     _, resp = _credentials_payload(maap)
-    workspace = resp["authorized_s3_paths"][0]
-    return f"{workspace['uri'].rstrip('/')}/{DEFAULT_SUBPREFIX}"
+    paths = resp.get("authorized_s3_paths")
+    if not paths:
+        raise SystemExit(
+            "The credentials response carried no authorized_s3_paths, so the "
+            "destination cannot be discovered. Pass --dest explicitly, e.g.\n"
+            "  --dest s3://maap-ops-workspace/<username>/" + DEFAULT_SUBPREFIX
+            + f"\nResponse keys: {sorted(resp)}")
+    return f"{paths[0]['uri'].rstrip('/')}/{DEFAULT_SUBPREFIX}"
 
 
 # --------------------------------------------------------------------------
@@ -173,12 +655,37 @@ class Ledger:
 # upload
 # --------------------------------------------------------------------------
 
+def source_root_from_config(config_path) -> pathlib.Path:
+    """The static-resources root a pipeline config already points at.
+
+    Saves retyping a path that is maintained in one place, and keeps the
+    upload reading exactly the tree the local pipeline reads -- so what lands
+    in S3 is what local runs were validated against.
+    """
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    import mur_config
+
+    config = mur_config.load_config(config_path)
+    landice = config.get("landice", {}).get("static_resources_dir")
+    mrva = config.get("mrva", {}).get("static_resources_dir")
+    if not landice:
+        raise SystemExit(
+            f"{config_path} has no landice.static_resources_dir to read a source "
+            f"tree from. Pass --source-root explicitly.")
+    if mrva and mrva != landice:
+        print(f"WARNING: landice ({landice}) and mrva ({mrva}) point at different "
+              f"static-resources roots; using landice's.", file=sys.stderr)
+    return pathlib.Path(landice).expanduser()
+
+
 def build_plan(args) -> List[layout.Entry]:
     kwargs = dict(
         include_optional=args.include_optional,
         include_seasonal=not args.no_seasonal,
     )
-    if args.source_root:
+    if args.from_config:
+        kwargs["source_root"] = source_root_from_config(args.from_config)
+    elif args.source_root:
         kwargs["source_root"] = args.source_root
 
     entries = list(layout.iter_entries(**kwargs))
@@ -228,6 +735,60 @@ def print_plan(entries: Iterable[layout.Entry], dest: str, plan_json=None) -> in
         print(f"\nPlan written to {plan_json}")
 
     return sum(1 for e in missing if e.required)
+
+
+def abort_stale_multiparts(s3, bucket, prefix, *, older_than_hours=6, dry_run=False) -> int:
+    """Abort multipart uploads left behind by a killed run.
+
+    A file above the multipart threshold uploads in parts, and the object only
+    appears once CompleteMultipartUpload succeeds. So a process killed
+    mid-file (an ssh drop, SIGHUP, OOM) leaves no object -- which is good,
+    because it means a resume never mistakes a partial file for a complete
+    one -- but it does leave the uploaded parts sitting in the bucket. They
+    are invisible to list_objects and they are billed as storage until
+    aborted.
+
+    Only uploads older than `older_than_hours` are touched, so this is safe to
+    run while another upload of the same tree is in flight.
+    """
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - \
+        datetime.timedelta(hours=older_than_hours)
+
+    stale, skipped_recent = [], 0
+    try:
+        paginator = s3.get_paginator("list_multipart_uploads")
+        for page in paginator.paginate(Bucket=bucket, Prefix=f"{prefix}/" if prefix else ""):
+            for upload in page.get("Uploads", []):
+                if upload["Initiated"] < cutoff:
+                    stale.append(upload)
+                else:
+                    skipped_recent += 1
+    except Exception as exc:                              # noqa: BLE001
+        # The workspace session policy may not grant ListMultipartUploads.
+        # That is not fatal -- it just means orphans cannot be cleaned here.
+        print(f"  could not list multipart uploads ({exc})")
+        return 0
+
+    if not stale and not skipped_recent:
+        print("  no incomplete multipart uploads")
+        return 0
+    if skipped_recent:
+        print(f"  {skipped_recent} incomplete upload(s) newer than "
+              f"{older_than_hours}h left alone (possibly still running)")
+
+    for upload in stale:
+        age = datetime.datetime.now(datetime.timezone.utc) - upload["Initiated"]
+        hours = age.total_seconds() / 3600
+        if dry_run:
+            print(f"  would abort  {upload['Key']}  ({hours:.1f}h old)")
+            continue
+        try:
+            s3.abort_multipart_upload(Bucket=bucket, Key=upload["Key"],
+                                      UploadId=upload["UploadId"])
+            print(f"  aborted  {upload['Key']}  ({hours:.1f}h old)")
+        except Exception as exc:                          # noqa: BLE001
+            print(f"  FAILED to abort {upload['Key']}: {exc}")
+    return len(stale)
 
 
 def upload(entries, s3, bucket, prefix, args) -> int:
@@ -406,15 +967,37 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="Stage MUR static resources into a MAAP workspace S3 bucket.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        # Prefix matching turns an unknown flag into a confusing error about a
+        # DIFFERENT flag: on a checkout predating --check, argparse expanded it
+        # to --checksum and complained that it "expected one argument", which
+        # says nothing about the real problem (a stale copy). --verify and
+        # --verify-only can collide the same way. Require full names.
+        allow_abbrev=False,
         epilog=__doc__.split("TYPICAL SEQUENCE")[-1],
     )
-    src = p.add_mutually_exclusive_group(required=True)
+    p.add_argument("--bundle", metavar="DIR",
+                   help="Copy the files the uploader needs into DIR, ready to scp "
+                        "to the host where the static data lives, then exit.")
+    p.add_argument("--debug", action="store_true",
+                   help="With --check, show the server's own error body and which "
+                        "headers were sent.")
+    p.add_argument("--check", action="store_true",
+                   help="Verify credentials, destination and write access, then "
+                        "exit. Run this first, from the workspace.")
+    src = p.add_mutually_exclusive_group()
     src.add_argument("--source-root", type=pathlib.Path,
                      help="A static-resources/-shaped directory tree.")
+    src.add_argument("--from-config", metavar="CONFIG",
+                     help="Read the source tree from a pipeline config's "
+                          "landice.static_resources_dir -- i.e. the same directory "
+                          "the local pipeline already reads. Use this when the tree "
+                          "is assembled (config.container.json's layout).")
     src.add_argument("--from-prod-layout", action="store_true",
-                     help="The scattered production tree, via GRIDS_DIR/ICE_DIR/"
-                          "SEASONAL_DIR/POLARCAP_FILE (same contract as "
-                          "bundle_prod_static.sh, legacy p011 fallback included).")
+                     help="The SCATTERED production tree (GRIDS_DIR/ICE_DIR/"
+                          "SEASONAL_DIR/POLARCAP_FILE, same contract as "
+                          "bundle_prod_static.sh). Only for a host where the files "
+                          "are still in their original NAS locations, NOT one where "
+                          "they are already under a static-resources/ root.")
 
     p.add_argument("--dest", help="s3://bucket/prefix root. Default: the workspace "
                                   "bucket from workspace_bucket_credentials().")
@@ -441,6 +1024,20 @@ def parse_args(argv=None):
     p.add_argument("--verify", action="store_true", help="Verify after uploading.")
     p.add_argument("--verify-only", action="store_true", help="Verify and exit.")
 
+    p.add_argument("--credentials-command", metavar="CMD",
+                   help="Shell command printing JSON credentials. Re-run on every "
+                        "refresh, so a multi-hour upload survives expiry on a host "
+                        "that cannot install maap-py. See --help epilog.")
+    p.add_argument("--aws-profile",
+                   help="Use this AWS profile instead of maap-py. No refresh wiring; "
+                        "only suitable for static keys or an instance role.")
+    p.add_argument("--abort-stale-multiparts", action="store_true",
+                   help="Before uploading, abort incomplete multipart uploads left "
+                        "by a previously killed run. They are invisible to a normal "
+                        "listing but are billed as storage.")
+    p.add_argument("--stale-multipart-hours", type=float, default=6.0,
+                   help="Age above which an incomplete upload counts as stale "
+                        "(default: %(default)s).")
     p.add_argument("--concurrency", type=int, default=8,
                    help="Parts in flight per file (default: %(default)s).")
     p.add_argument("--part-size-mb", type=int, default=64,
@@ -450,6 +1047,19 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+
+    if args.bundle:
+        return make_bundle(args.bundle)
+
+    if args.check:
+        return check_environment(args)
+
+    if not (args.source_root or args.from_prod_layout or args.from_config):
+        print("ERROR: one of --from-config, --source-root or --from-prod-layout "
+              "is required "
+              "(or --check to verify the environment first).", file=sys.stderr)
+        return 2
+
     entries = build_plan(args)
 
     if args.dry_run:
@@ -471,14 +1081,31 @@ def main(argv=None) -> int:
         print("\nDry run: nothing uploaded.")
         return 0
 
-    maap = _maap_client()
+    # maap-py is only required when nothing else can supply credentials, and
+    # only it can discover the destination automatically.
+    maap = None
+    if not (args.credentials_command or args.aws_profile):
+        maap = _maap_client()
+    elif not args.dest:
+        print("ERROR: --dest is required with --credentials-command/--aws-profile, "
+              "since the workspace URI cannot be discovered without maap-py.\n"
+              "       Run --check in a workspace to find it.", file=sys.stderr)
+        return 2
+
     dest = args.dest or default_destination(maap)
     bucket, prefix = split_s3_uri(dest)
-    s3 = workspace_session(maap).client("s3")
+    s3 = make_session(args, maap).client("s3")
     print(f"Destination  : {dest}")
 
     if args.verify_only:
         return verify(entries, s3, bucket, prefix, dest, args)
+
+    if args.abort_stale_multiparts:
+        print("\nIncomplete multipart uploads")
+        abort_stale_multiparts(s3, bucket, prefix,
+                               older_than_hours=args.stale_multipart_hours,
+                               dry_run=args.dry_run)
+        print()
 
     rc = upload(entries, s3, bucket, prefix, args)
     if args.verify:

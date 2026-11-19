@@ -285,19 +285,25 @@ function makeMUR25_container(year, day, realtime, config)
                     fread(f, 2, 'int32');
                     fread(f, 1, 'uint32');
 
+                    % This file's own offset and scale, as makeMUR25.m reads
+                    % them. Not the SST pass's: that offset is 25 C and this
+                    % one is uave^2, so reusing it wrote a flat ~0.8 K error
+                    % field everywhere (MAAP vs ops, 2026/302).
                     fread(f, 1, 'uint32');
-                    fread(f, 2, 'float32');
+                    err_offset = double(fread(f, 1, 'float32=>single'));
+                    err_sscale = double(fread(f, 1, 'float32=>single'));
                     fread(f, 1, 'uint32');
 
                     fread(f, 1, 'uint32');
-                    err = fread(f, [ii_out, jj_out], 'int16=>int16');
+                    err = double(fread(f, [ii_out, jj_out], 'int16=>int16'));
                     fread(f, 1, 'uint32');
                     fclose(f);
 
                     delete(fortfile);
 
+                    % NaN only after the cast: assigned into int16 it was 0.
                     err(err == -32768) = NaN;
-                    err = sqrt(double(err) * sscale_out + offset - 273.15);
+                    err = sqrt(err * err_sscale + err_offset - 273.15);
                     err = (err - uave) / udev * (targetMean - targetMin) + targetMean;
                     err = single(err);
 

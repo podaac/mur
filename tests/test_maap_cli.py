@@ -1,0 +1,465 @@
+"""The run_mur_maap CLI.
+
+Everything here runs offline. --dry-run in particular must need no
+credentials: it is the pre-flight you run before committing a day's compute.
+"""
+import datetime
+import re
+
+import pytest
+
+import run_mur_maap as cli
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("-1", [-1]),
+    ("0", [0]),
+    ("-9:-1", list(range(-9, 0))),
+    ("-1:-9", list(range(-9, 0))),      # reversed is accepted
+    ("-3:-3", [-3]),
+])
+def test_parse_process_days(value, expected):
+    assert cli.parse_process_days(value) == expected
+
+
+@pytest.mark.parametrize("value", [
+    "<queue name from MAAP ops>",
+    "s3://maap-ops-workspace/<username>/mur/static-resources",
+])
+def test_unfilled_placeholders_are_detected(value):
+    """They are truthy, so a plain falsiness check lets them through to fail
+    later as something obscure."""
+    assert cli._is_placeholder(value) is True
+
+
+@pytest.mark.parametrize("value", ["maap-dps-worker-8gb", "", None, 42])
+def test_real_values_are_not_placeholders(value):
+    assert cli._is_placeholder(value) is False
+
+
+def test_dry_run_needs_no_credentials(capsys):
+    """The whole point: exercise the window maths, config and sensor
+    selection before spending any compute."""
+    rc = cli.main(["--config", "config.maap.example.json",
+                   "--date", "2026-08-10", "-p=-9:-1", "--dry-run"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "2026-08-01" in out and "2026-08-09" in out
+    assert "nothing submitted" in out
+
+
+def test_dry_run_shows_the_nrt_rea_split(capsys):
+    """day1 is run day - 4, so the last three days are NRT."""
+    cli.main(["--config", "config.maap.example.json",
+              "--date", "2026-08-10", "-p=-9:-1", "--dry-run"])
+    out = capsys.readouterr().out
+    modes = dict(re.findall(r"^\s+(\d{4}-\d{2}-\d{2})\s+(\w+)$", out, re.M))
+    assert modes["2026-08-06"] == "rea"
+    assert modes["2026-08-07"] == "nrt"
+
+
+def test_force_nrt_overrides_every_day(capsys):
+    cli.main(["--config", "config.maap.example.json",
+              "--date", "2026-08-10", "-p=-9:-1", "--force-nrt", "--dry-run"])
+    # Match the mode column specifically. A bare "rea" substring also hits
+    # "Already-staged" in the staging note, which has nothing to do with mode.
+    modes = re.findall(r"^\s+\d{4}-\d{2}-\d{2}\s+(\w+)$",
+                       capsys.readouterr().out, re.M)
+    assert modes and set(modes) == {"nrt"}
+
+
+def test_sensor_filter_narrows_the_run(capsys):
+    cli.main(["--config", "config.maap.example.json",
+              "-p", "-1", "--sensors", "amsr2r,modisa", "--dry-run"])
+    out = capsys.readouterr().out
+    assert "AMSR2R, MODISA" in out
+    assert "MODIST" not in out
+
+
+def test_a_placeholder_queue_stops_before_any_api_call(capsys):
+    """Without this the run reaches maap-py and fails as an import or auth
+    error, which says nothing about the actual problem."""
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--config", "config.maap.example.json", "-p", "-1"])
+    assert "queue" in str(exc.value).lower()
+
+
+def test_a_range_without_equals_is_rejected_by_argparse():
+    """argparse reads a bare -9:-1 as an option; the help says to use -p=-9:-1."""
+    with pytest.raises(SystemExit):
+        cli.parse_args(["--config", "x.json", "-p", "-9:-1"])
+
+
+def test_unknown_flags_are_not_abbreviation_matched():
+    with pytest.raises(SystemExit):
+        cli.parse_args(["--config", "x.json", "--nonsense"])
+
+
+# --- config bootstrap ------------------------------------------------------
+
+def test_a_missing_config_explains_how_to_make_one(capsys):
+    """A FileNotFoundError traceback says nothing about what to do; the repo
+    ships only the example, so a missing config is the expected first state."""
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--config", "definitely-not-here.json", "-p", "-1"])
+    msg = str(exc.value)
+    assert "--init-config" in msg
+    assert "config.maap.example.json" in msg
+
+
+def test_init_config_writes_a_usable_config(tmp_path, capsys):
+    """Without MAAP reachable it still writes the template rather than
+    failing -- the queue has to be filled in by hand either way."""
+    dest = tmp_path / "config.maap.json"
+    assert cli.main(["--config", str(dest), "--init-config"]) == 0
+
+    import json
+    written = json.loads(dest.read_text())
+    assert "maap" in written and "l2p" in written and "mrva" in written
+    assert "maap.queue" in capsys.readouterr().out
+
+
+def test_init_config_refuses_to_overwrite(tmp_path):
+    dest = tmp_path / "config.maap.json"
+    dest.write_text("{}")
+    with pytest.raises(SystemExit, match="already exists"):
+        cli.main(["--config", str(dest), "--init-config"])
+
+
+def test_list_queues_does_not_require_a_config():
+    """Choosing a queue is a prerequisite to writing the config, so requiring
+    the config first would be circular."""
+    args = cli.parse_args(["--list-queues"])
+    assert args.list_queues and args.config is None
+
+
+def test_config_is_still_required_for_a_real_run():
+    with pytest.raises(SystemExit, match="--config is required"):
+        cli.main(["-p", "-1"])
+
+
+def test_init_config_is_non_interactive_without_a_terminal(tmp_path, monkeypatch):
+    """It must still write a usable file when run from a script or CI, rather
+    than blocking on input() forever."""
+    monkeypatch.setattr(cli, "fetch_queues", lambda **kw: ["small", "large"])
+    dest = tmp_path / "c.json"
+    assert cli.main(["--config", str(dest), "--init-config"]) == 0
+    assert dest.exists()
+
+
+def test_module_needs_cover_every_process_the_orchestrator_submits():
+    """The listing is read against these, so a missing module would print a
+    queue table that silently omits one."""
+    import re
+    source = (cli.pathlib.Path(cli.__file__)).read_text()
+    submitted = set(re.findall(r'submit_job\("(mur-[a-z]+)"', source))
+    assert submitted <= set(cli.MODULE_NEEDS)
+
+
+def test_known_queues_are_offered_when_the_listing_is_denied(tmp_path, monkeypatch, capsys):
+    """/admin/job-queues is admin-only, so an ordinary account gets 401. The
+    names are still knowable -- they are in the Jobs UI -- so falling back to
+    them beats leaving a placeholder to look up elsewhere."""
+    monkeypatch.setattr(cli, "fetch_queues", lambda **kw: None)
+    dest = tmp_path / "c.json"
+    assert cli.main(["--config", str(dest), "--init-config"]) == 0
+    out = capsys.readouterr().out
+    assert "maap-dps-worker-8gb" in out
+
+
+def test_the_cwls_do_not_pretend_to_request_resources():
+    """ramMin/coresMin must not reach the CWL, because on DPS they do nothing.
+
+    This replaces a test that asserted mrva's 65536 MiB exceeded what a queue
+    named ...-64gb provides, on the theory that the job would then never
+    schedule. Job 310fc265 disproved it: that exact CWL, asking for 64 GiB and
+    16 cores, pulled and ran on maap-dps-worker-16gb, with cwltool printing
+
+        Skipping Docker software container '--memory' limit despite presence
+        of ResourceRequirement with ramMin and/or ramMax setting.
+
+    DPS passes neither --strict-memory-limit nor --strict-cpu-limit, and
+    cwltool's evalResources has no branch that refuses an oversized request.
+    The fields reserve nothing and reject nothing; the queue decides. Leaving
+    them in costs a warning per run and, worse, offers a plausible-looking
+    knob that has never changed where a job ran.
+
+    The measurements still live in algorithm_config.yml, where they pick the
+    queue -- that is what the assertion on MODULE_NEEDS below guards.
+    """
+    import pathlib as _p
+    for cwl in sorted(_p.Path("maap/cwl_workflows").glob("*.cwl")):
+        text = cwl.read_text()
+        assert "ramMin" not in text, f"{cwl.name} still declares ramMin"
+        assert "coresMin" not in text, f"{cwl.name} still declares coresMin"
+        # outdirMax describes stage-out size, not scheduling, and is kept.
+        assert "outdirMax" in text, f"{cwl.name} lost its outdirMax"
+
+
+def test_the_measured_requirement_survives_where_it_picks_the_queue():
+    """algorithm_config.yml and MODULE_NEEDS must not contradict each other.
+
+    Both describe what mrva needs, for different readers -- the yml picks the
+    queue at registration, MODULE_NEEDS is printed beside the queue listing --
+    and nothing else records the requirement now that ramMin is out of the CWL.
+
+    The assertion is an inequality rather than an equality, because the two
+    numbers are different KINDS of number and always will be. MODULE_NEEDS
+    carries the measured floor: 28.75 GiB of Fortran at L=11 plus MATLAB, which
+    a worker reporting 31.0 GiB could not hold on 2026-09-29. ram_min is the
+    allocation to request, which has to be comfortably above that and is
+    currently 64 GiB. What must never happen is ram_min dropping below the
+    figure an operator is being told the job needs.
+    """
+    import re, yaml, pathlib as _p
+    cfg = yaml.safe_load(_p.Path("maap/mrva/algorithm_config.yml").read_text())
+    stated = cli.MODULE_NEEDS["mur-mrva"]
+    floor_gib = int(re.match(r"\s*(\d+)", stated).group(1))
+    assert floor_gib >= 29, "the measured L=11 working set is 28.75 GiB + MATLAB"
+    assert cfg["ram_min"] / 1024 >= floor_gib, (
+        f"ram_min is {cfg['ram_min'] / 1024} GiB but operators are told "
+        f"mrva needs {stated}")
+    assert "maap-dps-worker-32vcpu-64gb" in cli.KNOWN_QUEUES
+
+
+def test_interrupt_reports_the_jobs_left_running(capsys):
+    """Ctrl-C stops the polling, not the jobs. Their ids live only in this
+    process, so losing them makes running work untrackable."""
+    class FakeClient:
+        _job_process = {"abc-123": "mur-landice", "def-456": "mur-l2p"}
+
+    cli._report_interrupt(FakeClient())
+    out = capsys.readouterr().out
+    assert "STILL RUNNING" in out
+    assert "abc-123" in out and "mur-landice" in out
+    assert "cancel_job" in out and "list_jobs" in out
+
+
+def test_interrupt_is_useful_even_before_anything_was_submitted(capsys):
+    class Empty:
+        pass
+    cli._report_interrupt(Empty())
+    assert "Interrupted" in capsys.readouterr().out
+
+
+def test_dry_run_reports_the_job_count(capsys):
+    """23 jobs and a large download is a different commitment from the
+    single-sensor test that preceded it; seeing it first is the point."""
+    cli.main(["--config", "config.maap.example.json",
+              "--date", "2026-09-18", "-p", "-1", "--dry-run"])
+    out = capsys.readouterr().out
+    assert "mur-l2p" in out and "job(s)" in out
+    assert "mur-mrva" in out
+
+
+def test_dry_run_reports_the_granule_volume(capsys):
+    """Not a staging cost any more -- nothing passes through this process --
+    but the containers still fetch it, and it explains a long L2P job."""
+    cli.main(["--config", "config.maap.example.json", "--date", "2026-09-18",
+              "-p", "-1", "--dry-run"])
+    out = capsys.readouterr().out
+    assert "granule volume" in out
+    assert "GB fetched by the containers" in out
+    assert "re-uploaded" not in out, "nothing is re-uploaded any more"
+
+    cli.main(["--config", "config.maap.example.json", "--date", "2026-09-18",
+              "-p", "-1", "--dry-run", "--granule-staging", "direct"])
+    assert "downloaded and re-uploaded" not in capsys.readouterr().out
+
+
+def test_the_plan_excludes_future_days(capsys):
+    """A forward day_range reaches past the run day; those are not submitted,
+    so counting them would overstate the work."""
+    cli.main(["--config", "config.maap.example.json",
+              "--date", "2026-09-18", "-p", "-1", "--dry-run"])
+    out = capsys.readouterr().out
+    # day_range [2,2] around 2026-09-17 spans 15th-19th; the 19th is future.
+    assert "4 sensor-day(s)" in out
+
+
+# --- --queue must beat the per-process map ---------------------------------
+#
+# MRVA failed with "permission denied ... /var/run/docker.sock" -- cwltool
+# could not reach Docker at all on the worker, so nothing about the image or
+# the CWL was reachable as a cause. The queue is the one variable that differs
+# between MRVA and the three stages that work, and testing that means putting
+# a known-good stage on MRVA's queue. --queue only replaced maap.queue, so
+# maap.queues["mur-mrva"] kept sending MRVA back to its own pool and the
+# experiment could not be run at all.
+
+def test_an_explicit_queue_overrides_the_per_process_map(monkeypatch):
+    import run_mur_maap
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("mur_maap.client.MaapPyClient", FakeClient)
+    config = {"maap": {"queue": "small", "queues": {"mur-mrva": "huge"},
+                       "workspace_root": "s3://bucket/user"},
+              "l2p": {"active_sensors": [], "sensors": {}}}
+    args = run_mur_maap.parse_args(
+        ["--config", "x.json", "--queue", "forced"])
+    run_mur_maap.build_client(config, args)
+    assert captured["queue"] == "forced"
+    assert not captured["queues"], \
+        "a per-process queue would send MRVA back to the pool under test"
+
+
+def test_without_the_flag_the_per_process_map_still_applies(monkeypatch):
+    import run_mur_maap
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("mur_maap.client.MaapPyClient", FakeClient)
+    config = {"maap": {"queue": "small", "queues": {"mur-mrva": "huge"},
+                       "workspace_root": "s3://bucket/user"},
+              "l2p": {"active_sensors": [], "sensors": {}}}
+    args = run_mur_maap.parse_args(["--config", "x.json"])
+    run_mur_maap.build_client(config, args)
+    assert captured["queue"] == "small"
+    assert captured["queues"] == {"mur-mrva": "huge"}
+
+
+# --- the queue that cannot run anything ------------------------------------
+
+def test_a_known_broken_queue_is_called_out_before_submitting(monkeypatch, caplog):
+    """mur-mrva failed three times with "permission denied ...
+    /var/run/docker.sock" -- a five-minute failure whose message points at
+    Docker, not at the pool. The pool is the cause, and it is set in the
+    operator's own config file, so the check belongs here."""
+    import logging
+    import run_mur_maap
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+    monkeypatch.setattr("mur_maap.client.MaapPyClient", FakeClient)
+    config = {"maap": {"queue": "maap-dps-worker-8gb",
+                       "queues": {"mur-mrva": "maap-dps-worker-32vcpu-64gb"},
+                       "workspace_root": "s3://bucket/user"},
+              "l2p": {"active_sensors": [], "sensors": {}}}
+    args = run_mur_maap.parse_args(["--config", "x.json"])
+    with caplog.at_level(logging.WARNING):
+        run_mur_maap.build_client(config, args)
+    assert "mur-mrva" in caplog.text
+    assert "docker.sock" in caplog.text
+
+
+def test_a_good_queue_map_says_nothing(monkeypatch, caplog):
+    """The healthy-queue example is maap-dps-worker-32gb, chosen deliberately.
+
+    It was maap-dps-worker-64gb until 2026-09-25, when that pool joined
+    BROKEN_QUEUES and this test went red -- which is the test doing its job.
+    32gb is the largest pool that has actually completed work: it carried mrva
+    2.0.6 through L=10. If it ever has to be swapped out too, the fix is not to
+    reach for another name but to notice MUR has nowhere left to run.
+    """
+    import logging
+    import run_mur_maap
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+    monkeypatch.setattr("mur_maap.client.MaapPyClient", FakeClient)
+    config = {"maap": {"queue": "maap-dps-worker-8gb",
+                       "queues": {"mur-mrva": "maap-dps-worker-32gb"},
+                       "workspace_root": "s3://bucket/user"},
+              "l2p": {"active_sensors": [], "sensors": {}}}
+    args = run_mur_maap.parse_args(["--config", "x.json"])
+    with caplog.at_level(logging.WARNING):
+        run_mur_maap.build_client(config, args)
+    assert "broken" not in caplog.text
+
+
+# --- which algorithm version a run will use --------------------------------
+#
+# MAAP keeps every version ever registered, so naming an old one succeeds: it
+# resolves, it submits, and it runs an old image with nothing in the output
+# saying so. Resolution used to live only inside build_client(), which --dry-run
+# never calls, so the plan could not be checked before a long run.
+
+def test_the_version_comes_from_the_checkout_by_default():
+    import run_mur_maap
+    from mur_maap.version import ALGORITHM_VERSION
+
+    assert run_mur_maap.resolve_version({}) == (ALGORITHM_VERSION, False)
+    assert run_mur_maap.resolve_version(
+        {"maap": {}}) == (ALGORITHM_VERSION, False)
+
+
+def _other_version():
+    """A version that is deliberately not this checkout's.
+
+    Hardcoding one couples the test to today's number: these were written when
+    the repo was at 2.0.4 and broke the moment it rolled to 2.0.19, because an
+    override equal to the checkout is correctly not a pin.
+    """
+    from mur_maap.version import ALGORITHM_VERSION
+    major, _, _ = ALGORITHM_VERSION.partition(".")
+    return f"{int(major) - 1}.0.0"
+
+
+def test_a_config_override_is_reported_as_pinned():
+    import run_mur_maap
+
+    other = _other_version()
+    assert run_mur_maap.resolve_version(
+        {"maap": {"algorithm_version": other}}) == (other, True)
+
+
+def test_an_override_equal_to_the_checkout_is_not_a_pin():
+    """Same number is not a disagreement, and must not read as a rollback."""
+    import run_mur_maap
+    from mur_maap.version import ALGORITHM_VERSION
+
+    assert run_mur_maap.resolve_version(
+        {"maap": {"algorithm_version": ALGORITHM_VERSION}}) == (
+            ALGORITHM_VERSION, False)
+
+
+def test_a_null_override_falls_back_to_the_checkout():
+    """config.maap.example.json ships algorithm_version: null deliberately."""
+    import run_mur_maap
+    from mur_maap.version import ALGORITHM_VERSION
+
+    assert run_mur_maap.resolve_version(
+        {"maap": {"algorithm_version": None}}) == (ALGORITHM_VERSION, False)
+
+
+def test_the_dry_run_plan_names_the_version(capsys, tmp_path):
+    """A plan that does not say which code it will run cannot be checked."""
+    import json
+    import pathlib
+    import run_mur_maap
+
+    config = json.loads(
+        (pathlib.Path(run_mur_maap.__file__).parent
+         / "config.maap.example.json").read_text())
+    config["maap"]["workspace_root"] = "s3://maap-ops-workspace/someone"
+    config["maap"]["queue"] = "maap-dps-worker-8gb"
+    other = _other_version()
+    config["maap"]["algorithm_version"] = other
+    for section in ("landice", "mrva"):
+        config[section]["static_resources_dir"] = (
+            "s3://maap-ops-workspace/someone/mur/static-resources")
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config))
+
+    assert run_mur_maap.main(
+        ["--config", str(path), "-p", "-5", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert f"version        {other} (pinned by config)" in out
+
+
+def test_the_default_is_nrtmrvas_daily_sweep():
+    """The cron wrapper passes no -p. It used to pass -1, so no day ever got
+    its Final run."""
+    assert cli.parse_process_days(cli.parse_args([]).process_days) == \
+        list(range(-9, 0))

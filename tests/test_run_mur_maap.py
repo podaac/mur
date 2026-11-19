@@ -11,6 +11,8 @@ from collections import Counter
 
 import pytest
 
+from mur_maap import stac
+
 from run_mur_maap import (
     MAAPClient,
     MAAPOrchestrator,
@@ -26,10 +28,15 @@ def test_build_l2p_manifest_from_hrefs():
         "s3://podaac/AMSR2-REMSS-L2P-v8.2/2026-08-07.nc",
     ])
 
+    # Each entry declares how the container should read it. The orchestrator
+    # knows the source, so it says so rather than leaving the container to
+    # infer it from a bucket name.
     assert manifest == {
         "files": [
-            {"path": "s3://podaac/AMSR2-REMSS-L2P-v8.2/2026-08-06.nc"},
-            {"path": "s3://podaac/AMSR2-REMSS-L2P-v8.2/2026-08-07.nc"},
+            {"path": "s3://podaac/AMSR2-REMSS-L2P-v8.2/2026-08-06.nc",
+             "access": "podaac"},
+            {"path": "s3://podaac/AMSR2-REMSS-L2P-v8.2/2026-08-07.nc",
+             "access": "podaac"},
         ]
     }
 
@@ -122,7 +129,15 @@ class FakeMAAPClient(MAAPClient):
         self.job_ids = []
         self.waited = []
         self.published = []
+        self.published_extras = []
         self.written_manifests = []
+        self.copied = []
+        self.tags = []
+        # Job ids the test wants to come back failed.
+        self.failing_jobs = set()
+        self.dedups = []
+        # Byte sizes for object_size, by href; see there for the default.
+        self.sizes = {}
 
     def job_id_for(self, process_id, **match):
         """Job id of the single recorded submission for `process_id`,
@@ -144,11 +159,24 @@ class FakeMAAPClient(MAAPClient):
             )
         return hits[0]
 
-    def stac_search(self, collections, start, end):
+    def stac_search(self, collections, start, end, *, sensor=None):
         return [f"s3://podaac/{collections[0]}/{start.isoformat()}.nc"]
 
     def object_exists(self, s3_uri):
         return s3_uri in self.existing_objects
+
+    def object_modified(self, s3_uri):
+        # Unknown, which _bic_is_stale reads as "not stale".
+        return None
+
+    def object_size(self, s3_uri):
+        # Anything that exists holds data unless a test says otherwise;
+        # job outputs are never in existing_objects, so they get the default.
+        if s3_uri in self.sizes:
+            return self.sizes[s3_uri]
+        if s3_uri in self.existing_objects or s3_uri.startswith("s3://podaac/output/"):
+            return 4096
+        return None
 
     def list_objects(self, prefix):
         return [uri for uri in self.existing_objects if uri.startswith(prefix)]
@@ -157,20 +185,54 @@ class FakeMAAPClient(MAAPClient):
         self.written_manifests.append((prefix, manifest))
         return f"s3://podaac/{prefix}"
 
-    def submit_job(self, process_id, args):
+    def submit_job(self, process_id, args, *, tag=None, dedup=None):
+        self.tags.append(tag)
+        self.dedups.append(dedup)
         job_id = f"job-{len(self.submitted)}"
         self.submitted.append((process_id, args))
         self.job_ids.append(job_id)
         return job_id
 
-    def wait_all(self, job_ids):
+    def copy_object(self, src_uri, dest_uri):
+        self.copied.append((src_uri, dest_uri))
+        self.existing_objects.add(dest_uri)
+        return dest_uri
+
+    def wait_all(self, job_ids, *, timeout=None, raise_on_failure=True):
         self.waited.append(list(job_ids))
+        # Mirrors the real client: {job_id: status} for the failures, empty
+        # when everything succeeded. Returning None here let run_day pass its
+        # `job in failures` check against a non-container.
+        failures = {j: "failed" for j in job_ids if j in self.failing_jobs}
+        if failures and raise_on_failure:
+            raise RuntimeError(f"job(s) failed: {failures}")
+        return failures
 
-    def get_job_output(self, job_id, output_name):
-        return f"s3://podaac/output/{job_id}/{output_name}"
+    def get_job_output(self, job_id, output_name, **fmt):
+        # **fmt mirrors the real client, where it selects WHICH file when a
+        # job produced several -- iquam writes one .bii per day of its window.
+        # A fake that ignored it returned the same href for every day, so a
+        # manifest referencing one file five times looked correct.
+        suffix = "".join(f"/{k}={v}" for k, v in sorted(fmt.items()))
+        return f"s3://podaac/output/{job_id}/{output_name}{suffix}"
 
-    def publish_stac_item(self, netcdf_href, process_date, mode):
+    def publish_stac_item(self, netcdf_href, process_date, mode,
+                          *, extra_assets=None, analysis_level=None):
+        # extra_assets is recorded separately so existing assertions on
+        # `published` keep their shape; what they check has not changed.
         self.published.append((netcdf_href, process_date, mode))
+        self.published_extras.append(extra_assets)
+
+
+def _mrva_args(client):
+    """The arguments mrva was submitted with, found by name.
+
+    Was client.submitted[-1][1] until cog became a stage that runs after mrva,
+    at which point the last submission was a different job and these tests
+    started asserting against the wrong dictionary. Position was never what
+    they meant.
+    """
+    return next(a for p, a in reversed(client.submitted) if p == "mur-mrva")
 
 
 @pytest.fixture
@@ -331,8 +393,12 @@ def test_run_day_submits_l2p_when_no_cached_bic_exists():
 def test_run_day_submits_mrva_last_and_publishes_stac_item(orchestrator):
     orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
     processes = [p for p, _ in orchestrator.client.submitted]
-    assert processes[-1] == "mur-mrva"
-    mrva_args = orchestrator.client.submitted[-1][1]
+    # mrva is the last SCIENTIFIC stage. cog runs after it, deriving browse
+    # rasters from its granule, so the final submission is cog whenever that
+    # stage is enabled -- which is the default.
+    assert [p for p in processes if p != "mur-cog"][-1] == "mur-mrva"
+    assert processes[-1] in ("mur-mrva", "mur-cog")
+    mrva_args = _mrva_args(orchestrator.client)
     assert mrva_args["year"] == 2026
     assert mrva_args["doy"] == 218
     assert mrva_args["mode"] == "nrt"
@@ -342,9 +408,46 @@ def test_run_day_submits_mrva_last_and_publishes_stac_item(orchestrator):
     assert mode == "nrt"
 
 
+def test_mrva_runs_the_full_analysis_unless_the_config_caps_it(orchestrator):
+    """No max_level in the config means none in the submission.
+
+    The default -- the full L=2..11 that production delivers -- lives in exactly
+    one place, mrva4com_container.m, which treats an absent field as 11. If this
+    sent "11" explicitly the default would exist in two places and could drift;
+    worse, a reader of the submitted args could not tell a deliberate cap from a
+    repeated default.
+    """
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    mrva_args = _mrva_args(orchestrator.client)
+    assert "max_level" not in mrva_args
+
+
+def test_a_configured_cap_reaches_mrva_and_is_announced(caplog):
+    """Capping is a scientific decision, so it is passed AND logged.
+
+    A capped granule is structurally identical to a full one -- same grid, same
+    dimensions, same variables -- so without the warning the only hint in the
+    run is a config field nobody re-reads. The granule itself carries
+    mrva_analysis_level for the same reason.
+    """
+    import logging
+    config = _single_sensor_config()
+    config.setdefault("mrva", {})["max_level"] = 10
+    client = FakeMAAPClient(existing_objects=set())
+    orch = MAAPOrchestrator(
+        config, client, today_fn=lambda: datetime.date(2026, 8, 9)
+    )
+    with caplog.at_level(logging.WARNING):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    mrva_args = next(a for p, a in client.submitted if p == "mur-mrva")
+    assert mrva_args["max_level"] == "10"
+    assert "L=10" in caplog.text and "SMOOTHER" in caplog.text
+
+
 def test_run_day_mrva_gets_named_static_and_landice_hrefs_not_raw_lists(orchestrator):
     orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
-    mrva_args = orchestrator.client.submitted[-1][1]
+    mrva_args = _mrva_args(orchestrator.client)
 
     assert "bic_inputs" not in mrva_args
     assert "iquam_input" not in mrva_args
@@ -354,23 +457,31 @@ def test_run_day_mrva_gets_named_static_and_landice_hrefs_not_raw_lists(orchestr
         "s3://podaac-bucket/mur/static-resources/landice/CylinderP01_edge.bip"
     assert mrva_args["seasonal_file"] == \
         "s3://podaac-bucket/mur/static-resources/seasonal/mur_218.nc"
-    landice_job_id = orchestrator.client.job_id_for("mur-landice")
-    assert mrva_args["landice_ice_p011_file"] == f"s3://podaac/output/{landice_job_id}/landice_ice_p011"
-    assert mrva_args["landice_grid_p01_file"] == f"s3://podaac/output/{landice_job_id}/landice_grid_p01"
-    assert mrva_args["landice_icefiles_p011_file"] == f"s3://podaac/output/{landice_job_id}/landice_icefiles_p011"
+    # Canonical workspace keys, not the DPS job path they came out of. A DPS
+    # path is only meaningful while you still hold the job id, so MRVA is
+    # handed the promoted copy -- which is also what lets tomorrow's run find
+    # these without resubmitting landice.
+    root = "s3://maap-ops-workspace/testuser/mur/landice"
+    assert mrva_args["landice_ice_p011_file"] == \
+        f"{root}/p011/2026/Global_ice_2026_218.bip"
+    assert mrva_args["landice_grid_p01_file"] == \
+        f"{root}/p01/2026/landiceP01_2026_218.gds"
+    assert mrva_args["landice_icefiles_p011_file"] == \
+        f"{root}/p011/2026/icefiles_2026_218.txt"
     # --l4-reference-root must NOT be passed: it names a directory tree, and
     # localize.sh's `aws s3 cp` has no --recursive, so an s3:// value passes
     # through unfetched and mrva's verify_inputs_exist rejects it as a missing
     # directory. Passing it breaks the job rather than enabling a fallback.
     assert "l4_reference_root" not in mrva_args
-    # Prior-CSP cross-run lookup isn't implemented yet (depends on
-    # unimplemented STAC cataloging) -- must be omitted, not guessed.
+    # No prior coefficient has been promoted for 2026-08-05 in this test, and
+    # absence is a valid state -- MATLAB bootstraps. It must be omitted rather
+    # than guessed at a path that was never confirmed to exist.
     assert "prior_csp_file" not in mrva_args
 
 
 def test_run_day_mrva_sensor_inputs_manifest_covers_bic_and_iquam(orchestrator):
     orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
-    mrva_args = orchestrator.client.submitted[-1][1]
+    mrva_args = _mrva_args(orchestrator.client)
 
     assert mrva_args["sensor_inputs_manifest"].startswith("s3://podaac/mur/manifests/mrva/")
     prefix, manifest = orchestrator.client.written_manifests[-1]
@@ -449,9 +560,13 @@ def test_maap_client_stub_methods_raise_not_implemented():
     with pytest.raises(NotImplementedError):
         client.object_exists("s3://bucket/key")
     with pytest.raises(NotImplementedError):
+        client.object_modified("s3://bucket/key")
+    with pytest.raises(NotImplementedError):
         client.list_objects("s3://bucket/prefix")
     with pytest.raises(NotImplementedError):
         client.write_manifest("mur/manifests/x.json", {"files": []})
+    with pytest.raises(NotImplementedError):
+        client.copy_object("s3://bucket/a", "s3://bucket/b")
     with pytest.raises(NotImplementedError):
         client.submit_job("mur-landice", {})
     with pytest.raises(NotImplementedError):
@@ -460,3 +575,1127 @@ def test_maap_client_stub_methods_raise_not_implemented():
         client.get_job_output("job-0", "netcdf")
     with pytest.raises(NotImplementedError):
         client.publish_stac_item("s3://bucket/out.nc", datetime.date.today(), "nrt")
+
+
+# --- promotion to canonical keys -------------------------------------------
+#
+# DPS chooses where a job's outputs land and that path is not reconstructable,
+# so an artifact left where DPS put it is invisible to tomorrow's run. These
+# assert the promotion that makes the BIC cache and prior-CSP chaining real.
+
+def test_fresh_bics_are_promoted_to_canonical_keys(orchestrator):
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    client = orchestrator.client
+
+    assert client.copied, "no BIC was promoted"
+    for src, dest in client.copied:
+        if "/mur/bic/" not in dest:
+            continue
+        assert dest.startswith(f"{WORKSPACE_ROOT}/mur/bic/")
+        # The canonical key must end in the real filename, or the promoted
+        # object is invisible to mrva4com_container.m's per-sensor scan.
+        assert dest.rsplit("/", 1)[-1].startswith("Global_")
+
+
+def test_manifest_points_at_canonical_keys_not_dps_paths(orchestrator):
+    """A DPS path is only meaningful while you still hold the job id, so the
+    manifest has to reference the durable location."""
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    _, manifest = orchestrator.client.written_manifests[-1]
+
+    for entry in manifest["files"]:
+        if entry["sensor"] == "IQUAM0":
+            continue        # iquam is same-run only; no cross-run reuse
+        assert entry["path"].startswith(f"{WORKSPACE_ROOT}/mur/bic/"), entry
+
+
+def test_a_cached_bic_is_not_promoted_again():
+    cached = f"{WORKSPACE_ROOT}/mur/bic/AMSR2R/2026/Global_AMSR2R_2026_218.bic.gz"
+    client = FakeMAAPClient(existing_objects={cached})
+    orch = MAAPOrchestrator(
+        _single_sensor_config(), client, today_fn=lambda: datetime.date(2026, 8, 9)
+    )
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    assert not [d for _, d in client.copied if "/mur/bic/" in d]
+
+
+def test_second_run_reuses_the_first_runs_promoted_bic():
+    """The whole point of promotion: yesterday's output is findable today."""
+    client = FakeMAAPClient()
+    config = _single_sensor_config()
+    day = datetime.date(2026, 8, 6)
+
+    first = MAAPOrchestrator(config, client, today_fn=lambda: datetime.date(2026, 8, 9))
+    first.run_day(day, mode="nrt")
+    submitted_first = len([p for p, _ in client.submitted if p == "mur-l2p"])
+    assert submitted_first == 1
+
+    # A separate invocation, with no memory of the first beyond the bucket.
+    second = MAAPOrchestrator(config, client, today_fn=lambda: datetime.date(2026, 8, 9))
+    second.run_day(day, mode="nrt")
+    submitted_total = len([p for p, _ in client.submitted if p == "mur-l2p"])
+    assert submitted_total == submitted_first, "second run resubmitted a cached BIC"
+
+
+# --- prior-coefficient chaining --------------------------------------------
+
+def test_mrva_chains_from_a_promoted_prior_coefficient(orchestrator):
+    prior = f"{WORKSPACE_ROOT}/mur/csp/2026/2026080509_MRVA4_Global.c06"
+    orchestrator.client.existing_objects.add(prior)
+
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    mrva_args = _mrva_args(orchestrator.client)
+    assert mrva_args["prior_csp_file"] == prior
+
+
+def test_rea_mode_never_chains_from_a_prior_coefficient(orchestrator):
+    """REA never used one -- see run_mur_pipeline.py's resolve_mrva_prior_csp."""
+    orchestrator.client.existing_objects.add(
+        f"{WORKSPACE_ROOT}/mur/csp/2026/2026080509_MRVA4_Global.c06")
+
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="rea")
+    assert "prior_csp_file" not in _mrva_args(orchestrator.client)
+
+
+def test_this_days_coefficient_is_promoted_for_tomorrow(orchestrator):
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    dests = [d for _, d in orchestrator.client.copied if "/mur/csp/" in d]
+    assert dests == [f"{WORKSPACE_ROOT}/mur/csp/2026/2026080609_MRVA4_Global.c06"]
+
+
+def test_a_day_with_no_granules_does_not_submit_l2p():
+    """The current day is still accumulating, and a sensor can have no
+    coverage. Submitting anyway writes an empty manifest, runs L2P over
+    nothing, and leaves MRVA's manifest referencing a BIC that was never
+    produced -- which only surfaces later as an unresolvable output."""
+    client = FakeMAAPClient()
+    client.stac_search = lambda collections, start, end: []
+
+    orch = MAAPOrchestrator(
+        _single_sensor_config(), client, today_fn=lambda: datetime.date(2026, 8, 9))
+    with pytest.raises(RuntimeError, match="no sensor inputs"):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    assert [p for p, _ in client.submitted if p == "mur-l2p"] == []
+
+
+def test_mrva_is_not_submitted_with_nothing_to_analyse():
+    """Previously this wrote an empty manifest and submitted MRVA anyway. The
+    job then staged nothing and died inside MATLAB, which is a slower and far
+    less legible way to learn that no BIC was ever produced."""
+    client = FakeMAAPClient()
+    client.stac_search = lambda collections, start, end: []
+
+    orch = MAAPOrchestrator(
+        _single_sensor_config(), client, today_fn=lambda: datetime.date(2026, 8, 9))
+    with pytest.raises(RuntimeError, match="not one BIC or IQUAM0"):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    assert [p for p, _ in client.submitted if p == "mur-mrva"] == []
+    assert not any("manifests/mrva" in prefix
+                   for prefix, _ in client.written_manifests), \
+        "a manifest for a job that is refused is just litter"
+
+
+def test_a_sensor_with_granules_is_unaffected():
+    """The skip must be per sensor-day, not a blanket bail-out."""
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(
+        _single_sensor_config(), client, today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert len([p for p, _ in client.submitted if p == "mur-l2p"]) == 1
+
+
+# --- --execute -------------------------------------------------------------
+#
+# The flag was declared in parse_args and read nowhere. `--execute l2p`
+# submitted all four stages while the operator believed it had been limited to
+# one -- silently spending compute on jobs they had explicitly excluded, which
+# is the worst direction for a scoping flag to fail in.
+
+import run_mur_maap as rmm
+
+
+def test_stage_selection_defaults_to_everything():
+    assert rmm.validate_stages(None) == set(rmm.ALL_STAGES)
+
+
+def test_an_unknown_stage_is_rejected_by_name():
+    with pytest.raises(SystemExit, match=r"l2pp"):
+        rmm.validate_stages(["l2pp"])
+
+
+def test_an_empty_selection_is_rejected():
+    with pytest.raises(SystemExit, match="no stages"):
+        rmm.validate_stages([" ", ""])
+
+
+def test_mrva_may_now_run_alone_against_what_is_in_the_bucket():
+    """This used to be refused, and the reason was sound at the time: MRVA
+    read landice's outputs and the BICs from THIS run's job results, so
+    running it alone crashed after the other jobs were paid for.
+
+    Promotion removed that dependency -- those outputs now sit at canonical
+    keys -- and MRVA is exactly the stage worth re-running on its own: it is
+    the expensive one, and re-attempting it should not mean re-running twenty
+    L2P jobs that already succeeded.
+    """
+    assert rmm.validate_stages(["mrva"]) == {"mrva"}
+    assert rmm.validate_stages(["mrva", "l2p"]) == {"mrva", "l2p"}
+    assert rmm.validate_stages(["mrva", "l2p", "landice"]) == {
+        "mrva", "l2p", "landice"}
+
+
+def test_mrva_alone_still_needs_landice_in_the_bucket(orchestrator):
+    """Permitting the selection is not promising the inputs exist.
+
+    The BICs are seeded so the run gets past the sensor-inputs check and
+    reaches the landice one -- otherwise this would pass for the wrong reason.
+    """
+    from mur_maap import paths
+    client = orchestrator.client
+    root = "s3://maap-ops-workspace/testuser"
+    for sensor in ("AMSR2R", "MODISA"):
+        for offset in range(-3, 4):
+            day = datetime.date(2026, 8, 6) + datetime.timedelta(days=offset)
+            client.existing_objects.add(
+                paths.href(root, paths.bic_key(sensor, day)))
+
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=["mrva"])
+    with pytest.raises(RuntimeError, match="no landice outputs"):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert [p for p, _ in client.submitted if p == "mur-mrva"] == []
+
+
+def test_mrva_alone_runs_when_the_bucket_has_everything(orchestrator):
+    """The point of the change: re-attempt the expensive stage on its own."""
+    from mur_maap import paths
+    client = orchestrator.client
+    root = "s3://maap-ops-workspace/testuser"
+    day0 = datetime.date(2026, 8, 6)
+    for sensor in ("AMSR2R", "MODISA"):
+        for offset in range(-3, 4):
+            day = day0 + datetime.timedelta(days=offset)
+            client.existing_objects.add(
+                paths.href(root, paths.bic_key(sensor, day)))
+    for output_name in paths.LANDICE_OUTPUTS:
+        client.existing_objects.add(paths.href(
+            root, paths.landice_key(output_name, day0,
+                                    paths.landice_filename(output_name, day0))))
+
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=["mrva"])
+    orch.run_day(day0, mode="nrt")
+
+    submitted = [p for p, _ in client.submitted]
+    assert submitted == ["mur-mrva"], \
+        "nothing upstream should be resubmitted; it is all already there"
+
+
+def test_stages_are_case_and_whitespace_tolerant():
+    assert rmm.validate_stages([" L2P ", "iquam"]) == {"l2p", "iquam"}
+
+
+def _submitted_processes(stages):
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=stages)
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    return [pid for pid, _ in client.submitted]
+
+
+def test_excluding_a_stage_actually_stops_its_submission():
+    """The regression: this is what the flag claimed to do and did not."""
+    assert "mur-landice" not in _submitted_processes(["l2p"])
+    assert "mur-iquam" not in _submitted_processes(["l2p"])
+    assert "mur-mrva" not in _submitted_processes(["l2p"])
+    assert "mur-l2p" in _submitted_processes(["l2p"])
+
+
+def test_l2p_alone_submits_no_other_process():
+    assert set(_submitted_processes(["l2p"])) == {"mur-l2p"}
+
+
+def test_landice_and_iquam_alone_submit_no_l2p():
+    assert set(_submitted_processes(["landice", "iquam"])) == {
+        "mur-landice", "mur-iquam"}
+
+
+def test_the_default_submits_every_stage_including_the_browse_rasters():
+    """Was "all four" until cog became a stage of its own.
+
+    cog is default-on because the browse rasters exist to be looked at, and a
+    layer nobody generated is a layer nobody sees. It is last and derives from
+    mrva's granule rather than feeding anything, so dropping it with
+    --execute landice,iquam,l2p,mrva leaves a complete scientific run missing
+    only its pictures.
+    """
+    """Nobody passing --execute must be affected by any of this."""
+    assert set(_submitted_processes(None)) == {
+        "mur-cog",
+        "mur-landice", "mur-iquam", "mur-l2p", "mur-mrva"}
+
+
+def test_a_partial_run_returns_a_day_result_without_an_l4():
+    """Excluding mrva means no L4 granule. That is a real outcome, not an
+    error, and it must not be reported as a netcdf_href of some other day."""
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=["l2p"])
+    result = orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert result.process_date == datetime.date(2026, 8, 6)
+    assert result.mrva_job_id is None
+    assert result.netcdf_href is None
+
+
+# --- a failed job must not discard the successful ones ---------------------
+#
+# wait_all raised the moment any job failed, which aborted run_day BEFORE the
+# promotion step. The BICs that had been produced stayed at unpredictable DPS
+# output paths, where _find_cached_bic cannot see them, so the next run
+# resubmitted every one of them. One bad granule cost twenty jobs twice.
+
+def _orch_with_failures(failing):
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    orch._failing = failing
+    real_submit = client.submit_job
+
+    def submit(process_id, args, *, tag=None, **kw):
+        jid = real_submit(process_id, args, tag=tag, **kw)
+        if process_id in failing and jid not in client.failing_jobs:
+            client.failing_jobs.add(jid)
+            failing.remove(process_id)          # only the first such job
+        return jid
+
+    client.submit_job = submit
+    return orch, client
+
+
+def test_one_failed_l2p_still_promotes_every_other_bic():
+    """The salvage: the nineteen that worked are promoted to canonical keys,
+    so a re-run finds them cached instead of resubmitting."""
+    orch, client = _orch_with_failures({"mur-l2p"})
+    with pytest.raises(RuntimeError, match="job.s. failed"):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert client.copied, "no BIC was promoted despite other jobs succeeding"
+
+
+def test_the_failure_says_what_was_salvaged():
+    """Otherwise the reader has no way to know a re-run is cheap."""
+    orch, client = _orch_with_failures({"mur-l2p"})
+    with pytest.raises(RuntimeError) as exc:
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    message = str(exc.value)
+    assert "job_logs.py" in message, "must say how to diagnose"
+    assert "promoted" in message, "must say what survived"
+
+
+def test_a_failed_jobs_bic_is_not_promoted_or_referenced():
+    """A failed job produced no BIC. Promoting it would create a manifest
+    entry pointing at an object that was never written, and MRVA would fail
+    on a missing input rather than on the real cause."""
+    orch, client = _orch_with_failures({"mur-l2p"})
+    with pytest.raises(RuntimeError):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    failed = client.failing_jobs
+    for src, _dest in client.copied:
+        for jid in failed:
+            assert jid not in src, f"promoted output of failed job {jid}"
+
+
+def test_mrva_is_not_submitted_when_a_bic_is_missing():
+    """Stopping is the right call: MRVA fans in the BICs, and producing an L4
+    from an incomplete set is a scientific decision, not error handling."""
+    orch, client = _orch_with_failures({"mur-l2p"})
+    with pytest.raises(RuntimeError):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert not any(pid == "mur-mrva" for pid, _ in client.submitted)
+
+
+def test_a_clean_day_still_promotes_and_reaches_mrva():
+    """The salvage path must not change the normal one."""
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert any(pid == "mur-mrva" for pid, _ in client.submitted)
+    assert client.copied
+
+
+# --- a rewrite must actually re-run ----------------------------------------
+#
+# The L2P manifest lives at a stable key -- manifests/l2p/<sensor>/<year>/
+# <doy>.json -- so reprocessing a day with late-arriving granules changes the
+# manifest's CONTENT while every input VALUE stays identical. MAAP deduplicates
+# on the values, refuses to run, and returns a job whose status is "deduped".
+#
+# Two consequences, both observed on a real run: wait_all polled that status
+# forever because it matched none of its sets, and the reprocess the stability
+# window exists to perform never happened.
+
+def test_a_rewrite_opts_out_of_dedup():
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    # day0 of the window is recent enough to be inside every sensor's
+    # stability latency, so these are rewrites.
+    orch.run_day(datetime.date(2026, 8, 8), mode="nrt")
+
+    l2p = [(pid, args, dedup)
+           for (pid, args), dedup in zip(client.submitted, client.dedups)
+           if pid == "mur-l2p"]
+    assert l2p, "no L2P jobs submitted"
+    rewrites = [d for _, args, d in l2p if str(args.get("rewrite")) == "1"]
+    assert rewrites, "no rewrite job in this window; the fixture needs a recent day"
+    assert all(d is False for d in rewrites), (
+        "a rewrite was submitted with dedup left on; MAAP will match the "
+        "earlier identical submission and the reprocess will not happen")
+
+
+def test_a_non_rewrite_still_dedups():
+    """Dedup is worth keeping everywhere else -- it is what stops an
+    interrupted run resubmitting work that already succeeded."""
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    for (pid, args), dedup in zip(client.submitted, client.dedups):
+        if pid == "mur-l2p" and str(args.get("rewrite")) != "1":
+            assert dedup is None, "a plain resubmission should keep dedup"
+
+
+# --- running without buoy data ---------------------------------------------
+#
+# NOAA's monthly iQuam file can be corrupt: the 2026-09 file had 11 of its 32
+# variables unreadable ("bad object header version number"), including every
+# field makedailyiquam reads -- day, hour, lon, sst, platform_type. Nothing in
+# this pipeline can fix that, and it blocks every analysis day in that month.
+#
+# --execute without iquam lets the rest of the pipeline run meanwhile. MRVA
+# fans in sensors from a manifest, so omitting IQUAM0 is expressible -- but it
+# is a degraded analysis and must say so.
+
+def test_mrva_runs_without_iquam_when_it_is_excluded():
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=["landice", "l2p", "mrva"])
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert any(pid == "mur-mrva" for pid, _ in client.submitted)
+
+
+def test_the_manifest_has_no_iquam_entries_when_iquam_did_not_run():
+    """An entry would name a file nothing wrote, and MRVA would fail on a
+    missing input rather than on the real reason."""
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=["landice", "l2p", "mrva"])
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    manifests = [m for m in client.written_manifests if "mrva" in str(m[0])]
+    assert manifests, "no MRVA manifest written"
+    sensors = {f["sensor"] for f in manifests[-1][1]["files"]}
+    assert "IQUAM0" not in sensors, sensors
+    assert sensors, "the manifest lost every sensor, not just IQUAM0"
+
+
+def test_running_without_buoys_warns_loudly(caplog):
+    import logging
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=["landice", "l2p", "mrva"])
+    with caplog.at_level(logging.WARNING):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert "NO in-situ buoy observations" in caplog.text
+
+
+def test_the_buoy_warning_is_said_once(caplog):
+    """It fires per IQUAM0 day in the fan-in window; seven copies of the same
+    warning trains people to scroll past it."""
+    import logging
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9),
+                            stages=["landice", "l2p", "mrva"])
+    with caplog.at_level(logging.WARNING):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert caplog.text.count("NO in-situ buoy observations") == 1
+
+
+def test_including_iquam_still_puts_it_in_the_manifest():
+    """The normal path is unchanged."""
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    manifests = [m for m in client.written_manifests if "mrva" in str(m[0])]
+    sensors = {f["sensor"] for f in manifests[-1][1]["files"]}
+    assert "IQUAM0" in sensors
+
+
+# --- reuse instead of resubmit ---------------------------------------------
+#
+# MAAP's dedup was meant to stop a re-run from redoing finished work. It does
+# the opposite of what a pipeline needs: it skips the job AND discards the
+# handle on the earlier result -- a new id with no DPS record, absent from
+# "View My Jobs", 500 on get_job_result. Confirmed against the live API on two
+# consecutive failed runs, both landice, because landice's inputs never vary.
+#
+# The answer is the one L2P already used: promote each output to a canonical
+# key, then look before submitting. The object's existence IS the record, so
+# there is no second source of truth to lose or reconcile.
+
+def test_landice_is_promoted_to_a_canonical_key(orchestrator):
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    dests = [dest for _src, dest in orchestrator.client.copied]
+    assert "s3://maap-ops-workspace/testuser/mur/landice/p011/2026/" \
+           "Global_ice_2026_218.bip" in dests
+    assert "s3://maap-ops-workspace/testuser/mur/landice/p01/2026/" \
+           "landiceP01_2026_218.gds" in dests
+
+
+def test_a_second_run_does_not_resubmit_landice(orchestrator):
+    """The bug in one line: landice ran again on every single invocation."""
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    first = [pid for pid, _ in orchestrator.client.submitted]
+    assert first.count("mur-landice") == 1
+
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    second = [pid for pid, _ in orchestrator.client.submitted]
+    assert second.count("mur-landice") == 1, \
+        "landice was already in the bucket; running it again is pure waste"
+
+
+def test_a_second_run_still_hands_mrva_the_landice_files(orchestrator):
+    """Skipping the job must not mean skipping the inputs."""
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    mrva_args = _mrva_args(orchestrator.client)
+    root = "s3://maap-ops-workspace/testuser/mur/landice"
+    assert mrva_args["landice_ice_p011_file"] == \
+        f"{root}/p011/2026/Global_ice_2026_218.bip"
+    assert mrva_args["landice_grid_p01_file"] == \
+        f"{root}/p01/2026/landiceP01_2026_218.gds"
+
+
+def test_a_partial_landice_cache_reruns_the_job(orchestrator):
+    """All three or nothing. Skipping on a partial set would submit MRVA with
+    a missing input, which fails later and less clearly than re-running."""
+    orchestrator.client.existing_objects.add(
+        "s3://maap-ops-workspace/testuser/mur/landice/p011/2026/"
+        "Global_ice_2026_218.bip.gz")
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert [pid for pid, _ in orchestrator.client.submitted].count(
+        "mur-landice") == 1
+
+
+def test_iquam_days_are_promoted_one_file_per_day(orchestrator):
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    dests = [d for _s, d in orchestrator.client.copied
+             if "/mur/iquam/" in d]
+    assert len(dests) == len(set(dests)) and len(dests) > 1, \
+        "one iquam job writes its whole window; each day is its own object"
+    assert "s3://maap-ops-workspace/testuser/mur/iquam/2026/" \
+           "Global_IQUAM0_2026_218.bii" in dests
+
+
+def test_a_second_run_does_not_resubmit_iquam(orchestrator):
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert [pid for pid, _ in orchestrator.client.submitted].count(
+        "mur-iquam") == 1
+
+
+def test_the_manifest_uses_the_canonical_iquam_hrefs_on_a_rerun(orchestrator):
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    _prefix, manifest = orchestrator.client.written_manifests[-1]
+    iquam = [f for f in manifest["files"] if f["sensor"] == "IQUAM0"]
+    assert iquam, "the buoys must still be in the manifest"
+    for entry in iquam:
+        assert entry["path"].startswith(
+            "s3://maap-ops-workspace/testuser/mur/iquam/")
+
+
+def test_a_failed_landice_job_is_not_promoted(orchestrator):
+    """Promoting a failed job's output would poison the cache: every later
+    run would reuse it and never notice."""
+    client = orchestrator.client
+    real_submit = client.submit_job
+
+    def submit(process_id, args, *, tag=None, dedup=None):
+        job = real_submit(process_id, args, tag=tag, dedup=dedup)
+        if process_id == "mur-landice":
+            client.failing_jobs.add(job)
+        return job
+
+    client.submit_job = submit
+    with pytest.raises(RuntimeError):
+        orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert not [d for _s, d in client.copied if "/mur/landice/" in d]
+
+
+def test_mur25_is_catalogued_with_the_granule(orchestrator):
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    extras = orchestrator.client.published_extras[0]
+    assert extras is not None
+    assert "mur25" in extras
+
+
+def test_browse_rasters_are_submitted_and_not_waited_on(orchestrator):
+    """cog runs while the next day starts.
+
+    Its rasters reach the catalogue through the catalog.json each job stages
+    out, and every tool reads them from there, so the run has nothing to
+    collect from it. Waiting only held up the next day. Hence: one cog job per
+    granule, none of them ever waited on, and no browse asset in the sidecar.
+    """
+    client = orchestrator.client
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    cog_jobs = [job for (process, _args), job
+                in zip(client.submitted, client.job_ids)
+                if process == "mur-cog"]
+    assert len(cog_jobs) == 2                  # 1 km and MUR25
+    waited = {j for batch in client.waited for j in batch}
+    assert not waited & set(cog_jobs)
+    assert not any(k.startswith("browse")
+                   for k in client.published_extras[0])
+
+
+def test_a_missing_browse_raster_does_not_fail_the_day():
+    """Stage 10b is non-fatal in the container, so it must be here too.
+
+    gdal_translate can fail per field, and MUR25 is skipped entirely when its
+    grid file is absent. A day that produced an L4 granule must not be thrown
+    away because a picture is missing: the granule costs an hour, the picture
+    seconds. This client raises for every optional output, which is the
+    all-absent case.
+    """
+    class NoExtras(FakeMAAPClient):
+        def get_job_output(self, job_id, output_name, **fmt):
+            if output_name.startswith("cog") or output_name == "netcdf25":
+                raise LookupError(f"{output_name!r}: expected 1 match, found 0")
+            return super().get_job_output(job_id, output_name, **fmt)
+
+    client = NoExtras()
+    orch = MAAPOrchestrator(
+        CONFIG, client, today_fn=lambda: datetime.date(2026, 8, 9))
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    assert len(client.published) == 1          # the day still succeeded
+    assert client.published_extras == [None]   # and carried no extras
+
+
+def test_the_granules_are_promoted_so_a_date_can_find_them(orchestrator):
+    """Without this, a granule is reachable only from the run that made it.
+
+    A DPS result path embeds the job id -- .../18/10/20/964098/... -- so
+    nothing can address yesterday's product by date. That is why regenerating
+    browse rasters for an existing day was impossible.
+    """
+    orchestrator.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    copied = [d for _s, d in orchestrator.client.copied]
+
+    assert any("/mur/l4/1km/2026/" in d for d in copied), \
+        f"the 1 km granule was not promoted; copies were {copied}"
+    assert any("/mur/l4/25km/2026/" in d for d in copied), \
+        f"MUR25 was not promoted; copies were {copied}"
+
+
+def test_cog_alone_works_from_a_promoted_granule():
+    """`--execute cog` used to stop at "mrva not in --execute".
+
+    cog derives from a granule rather than from this run, so it can go ahead
+    against one already promoted -- which is most of the argument for it being
+    a separate container. It could not before, because there was no canonical
+    key to look the granule up at.
+    """
+    config = _single_sensor_config()
+    client = FakeMAAPClient(existing_objects=set())
+    # Only the promoted granules exist -- which is the state after an mrva run
+    # on some earlier day, and the state this path is for.
+    client.object_exists = lambda href: "/mur/l4/" in href
+    orch = MAAPOrchestrator(
+        config, client, today_fn=lambda: datetime.date(2026, 8, 9),
+        stages=["cog"])
+
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert any(p == "mur-cog" for p, _ in client.submitted), \
+        "cog alone submitted nothing"
+
+
+def test_cog_alone_says_so_when_there_is_no_granule(caplog):
+    """A day never analysed is a legitimate state, not an error.
+
+    It must say which key it looked for, or the only thing the operator learns
+    is that nothing happened.
+    """
+    import logging
+    client = FakeMAAPClient(existing_objects=set())
+    client.object_exists = lambda href: False
+    orch = MAAPOrchestrator(
+        _single_sensor_config(), client,
+        today_fn=lambda: datetime.date(2026, 8, 9), stages=["cog"])
+
+    with caplog.at_level(logging.INFO):
+        orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+
+    assert "no promoted granule" in caplog.text
+    assert "mur/l4/1km/2026/" in caplog.text
+
+
+# --- STAC reporting must not reach the network -------------------------------
+
+def test_reporting_stac_links_makes_no_network_call(orchestrator, monkeypatch):
+    """The whole suite runs offline, and a run must not depend on an API.
+
+    An earlier version of _report_stac asked dps-stac for the real collection
+    id, which is correct but put an HTTP GET on the run path -- and hung this
+    file. The registered name is read off a DPS href the run already fetched
+    instead. If anything here calls find_collection again, this fails.
+    """
+    def explode(*_a, **_k):                                # pragma: no cover
+        raise AssertionError("_report_stac must not call the STAC API")
+
+    monkeypatch.setattr(stac, "find_collection", explode)
+    orchestrator._report_stac(datetime.date(2026, 8, 6), "nrt")
+
+
+def test_the_registered_algorithm_name_is_learned_from_a_job_output(orchestrator):
+    """So the collection id can be built without guessing MAAP's suffix."""
+    orchestrator._note_registered(
+        "s3://b/u/dps_output/mur-mrva_1756/2.0.14/2026/10/09/1/2/3/4/x.nc")
+    assert orchestrator._registered["mur-mrva"] == "mur-mrva_1756"
+
+
+def test_an_unlearned_module_is_reported_as_unknown_not_guessed(orchestrator, caplog):
+    """Saying "unknown collection" beats printing a plausible dead URL."""
+    import logging
+    with caplog.at_level(logging.INFO):
+        orchestrator._report_stac(datetime.date(2026, 8, 6), "nrt")
+    assert "unknown collection" in caplog.text
+    assert "__mur-mrva__" not in caplog.text
+
+
+def test_a_learned_module_gets_a_real_collection_url(orchestrator, caplog):
+    import logging
+    orchestrator._note_registered(
+        "s3://b/u/dps_output/mur-mrva_1756/2.0.14/2026/10/09/1/2/3/4/x.nc")
+    monkey = orchestrator.config.setdefault("maap", {})
+    monkey["workspace_root"] = "s3://maap-ops-workspace/jleach_jpl"
+    monkey["algorithm_version"] = "2.0.14"
+    with caplog.at_level(logging.INFO):
+        orchestrator._report_stac(datetime.date(2026, 10, 8), "nrt")
+    assert ("jleach_jpl__mur-mrva_1756__2.0.14/items/mur-l4-20261008-nrt"
+            in caplog.text)
+
+
+def test_a_team_bucket_root_takes_the_username_from_the_config(orchestrator):
+    """With the data in s3://mur-sst the root's last segment names nobody;
+    the collection id needs the person who submitted the jobs."""
+    orchestrator.config.setdefault("maap", {}).update({
+        "workspace_root": "s3://mur-sst",
+        "username": "jleach_jpl",
+        "algorithm_version": "2.0.18",
+        "registration_suffix": "_1756",
+    })
+    args = orchestrator._cog_args("s3://b/g.nc", "nrt")
+    assert args["stac_collection"] == "jleach_jpl__mur-cog_1756__2.0.18"
+
+
+def test_a_team_bucket_root_falls_back_to_the_clients_username(orchestrator):
+    orchestrator.config.setdefault("maap", {})["workspace_root"] = "s3://mur-sst"
+    orchestrator.client.username = "jleach_jpl"
+    assert orchestrator.username == "jleach_jpl"
+
+
+def test_a_team_bucket_root_never_becomes_the_username(orchestrator):
+    orchestrator.config.setdefault("maap", {})["workspace_root"] = "s3://mur-sst"
+    assert orchestrator.username == ""
+
+
+def test_an_unknown_collection_is_omitted_rather_than_sent_empty(orchestrator):
+    """MAAP rejects a submission whose inputs do not match the declared ones,
+    so every key sent has to exist in the registered CWL. A blank one buys
+    nothing and adds a way to fail."""
+    assert "stac_collection" not in orchestrator._cog_args("s3://b/g.nc", "nrt")
+
+
+def test_a_known_collection_is_passed_to_cog(orchestrator):
+    """So the item can carry map and preview links, which the container
+    cannot build for itself -- the id is assigned at ingest."""
+    orchestrator._note_registered(
+        "s3://b/u/dps_output/mur-mrva_1756/2.0.16/2026/10/09/1/2/3/4/x.nc")
+    orchestrator.config.setdefault("maap", {})["workspace_root"] = \
+        "s3://maap-ops-workspace/jleach_jpl"
+    orchestrator.config["maap"]["algorithm_version"] = "2.0.16"
+    args = orchestrator._cog_args("s3://b/g.nc", "nrt")
+    # Learned from mrva, applied to cog: one suffix per deployment.
+    assert args["stac_collection"] == "jleach_jpl__mur-cog_1756__2.0.16"
+
+
+def test_a_configured_suffix_lets_a_cog_only_run_build_links(orchestrator):
+    """A run that submits only cog never sees an mrva DPS path, so it cannot
+    learn MAAP's registration suffix and its items came out with no viewer
+    links. Pinning it in the config closes that gap without a network call."""
+    orchestrator.config.setdefault("maap", {}).update({
+        "workspace_root": "s3://maap-ops-workspace/jleach_jpl",
+        "algorithm_version": "2.0.18",
+        "registration_suffix": "_1756",
+    })
+    args = orchestrator._cog_args("s3://b/g.nc", "nrt")
+    assert args["stac_collection"] == "jleach_jpl__mur-cog_1756__2.0.18"
+
+
+def test_a_learned_suffix_beats_the_configured_one(orchestrator):
+    """What the deployment actually returned outranks what a config remembers,
+    because a stale pin would name a collection that does not exist."""
+    orchestrator.config.setdefault("maap", {}).update({
+        "workspace_root": "s3://maap-ops-workspace/jleach_jpl",
+        "algorithm_version": "2.0.18",
+        "registration_suffix": "_9999",
+    })
+    orchestrator._note_registered(
+        "s3://b/u/dps_output/mur-mrva_1756/2.0.18/2026/10/11/1/2/3/4/x.nc")
+    args = orchestrator._cog_args("s3://b/g.nc", "nrt")
+    assert args["stac_collection"] == "jleach_jpl__mur-cog_1756__2.0.18"
+
+
+# --- stale BIC detection ---------------------------------------------------
+#
+# is_rewrite() asks whether a day is young NOW. It cannot ask whether a day was
+# young WHEN ITS BIC WAS WRITTEN, which is the only question that matters in a
+# backfill: every day is old, so nothing is ever a rewrite, and a BIC an NRT
+# run built from half-arrived granules is reused unchanged in the reanalysis.
+
+class _MtimeClient(FakeMAAPClient):
+    """FakeMAAPClient that also answers object_modified."""
+
+    def __init__(self, *args, mtimes=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.mtimes = mtimes or {}
+
+    def object_modified(self, s3_uri):
+        return self.mtimes.get(s3_uri)
+
+
+def _bic_href(orchestrator, sensor, day):
+    from mur_maap import paths
+    return paths.bic_candidate_hrefs(
+        orchestrator.workspace_root, sensor, day)[0]
+
+
+def _orchestrator_with_bic(day, *, written, rebuild_stale_bics, stable=2):
+    """An orchestrator whose only cached BIC was written on `written`."""
+    config = _single_sensor_config()
+    config["l2p"]["sensors"]["AMSR2R"]["stable"] = stable
+
+    client = _MtimeClient()
+    orchestrator = MAAPOrchestrator(
+        config, client, rebuild_stale_bics=rebuild_stale_bics,
+        today_fn=lambda: datetime.date(2026, 10, 14))
+    href = _bic_href(orchestrator, "AMSR2R", day)
+    client.existing_objects.add(href)
+    client.mtimes[href] = written
+    return orchestrator, href
+
+
+def test_a_bic_written_while_its_granules_were_still_arriving_is_rejected():
+    """The NRT-era BIC: written one day after the swath, stable is 2."""
+    day = datetime.date(2026, 10, 9)
+    orchestrator, _ = _orchestrator_with_bic(
+        day, written=datetime.date(2026, 10, 10), rebuild_stale_bics=True)
+    assert orchestrator._find_cached_bic("AMSR2R", day, min_age_days=2) is None
+
+
+def test_a_bic_written_after_the_data_settled_is_reused():
+    day = datetime.date(2026, 10, 9)
+    orchestrator, href = _orchestrator_with_bic(
+        day, written=datetime.date(2026, 10, 12), rebuild_stale_bics=True)
+    assert orchestrator._find_cached_bic(
+        "AMSR2R", day, min_age_days=2) == href
+
+
+def test_the_boundary_is_stable_days_after_the_data_day():
+    day = datetime.date(2026, 10, 9)
+    for written, expected_reuse in ((datetime.date(2026, 10, 10), False),
+                                    (datetime.date(2026, 10, 11), True)):
+        orchestrator, href = _orchestrator_with_bic(
+            day, written=written, rebuild_stale_bics=True)
+        got = orchestrator._find_cached_bic("AMSR2R", day, min_age_days=2)
+        assert (got == href) is expected_reuse, written
+
+
+def test_an_unknown_mtime_is_not_treated_as_stale():
+    """A cache probe that silently became rebuild-everything would be a far
+    worse failure than one reused BIC."""
+    day = datetime.date(2026, 10, 9)
+    orchestrator, href = _orchestrator_with_bic(
+        day, written=None, rebuild_stale_bics=True)
+    assert orchestrator._find_cached_bic(
+        "AMSR2R", day, min_age_days=2) == href
+
+
+def test_without_min_age_days_any_existing_bic_is_trusted():
+    """The historic behaviour, and what a running backfill still gets."""
+    day = datetime.date(2026, 10, 9)
+    orchestrator, href = _orchestrator_with_bic(
+        day, written=datetime.date(2026, 10, 10), rebuild_stale_bics=False)
+    assert orchestrator._find_cached_bic("AMSR2R", day) == href
+
+
+def test_stale_bics_are_rebuilt_by_default():
+    """Off, a BIC's last build was 06Z the day after its data day and it was
+    frozen there: MODISA 2026/293 kept 113 of prod's 322 granules."""
+    orchestrator = MAAPOrchestrator(_single_sensor_config(), FakeMAAPClient())
+    assert orchestrator.rebuild_stale_bics is True
+
+
+def test_trusting_cached_bics_never_asks_for_an_mtime():
+    """--trust-cached-bics is the old behaviour exactly: the extra HEAD is not
+    even issued."""
+    day = datetime.date(2026, 10, 9)
+    config = _single_sensor_config()
+
+    asked = []
+
+    class _Recording(FakeMAAPClient):
+        def object_modified(self, s3_uri):
+            asked.append(s3_uri)
+            return None
+
+    client = _Recording()
+    orchestrator = MAAPOrchestrator(config, client, rebuild_stale_bics=False,
+                                    today_fn=lambda: datetime.date(2026, 10, 14))
+    client.existing_objects.add(_bic_href(orchestrator, "AMSR2R", day))
+    orchestrator._find_cached_bic("AMSR2R", day)
+    assert asked == []
+
+
+def test_a_datetime_mtime_works_as_well_as_a_date():
+    """boto3 returns a tz-aware datetime, the fakes a date; both must compare."""
+    import datetime as _dt
+    day = datetime.date(2026, 10, 9)
+    orchestrator, _ = _orchestrator_with_bic(
+        day,
+        written=_dt.datetime(2026, 10, 10, 3, 0, tzinfo=_dt.timezone.utc),
+        rebuild_stale_bics=True)
+    assert orchestrator._find_cached_bic("AMSR2R", day, min_age_days=2) is None
+
+
+# --- buoy files: when an existing one is not good enough ---------------------
+#
+# Every MAAP .bii from 2026/282 on was 24 bytes -- a header and no
+# observations -- written at 06Z on its own day, before iQUAM had any data.
+# Any existing object counted as cached, so none was rebuilt and MRVA ran with
+# no buoys at all.
+
+def _iquam_href(day):
+    from mur_maap import paths
+    return paths.iquam_href(WORKSPACE_ROOT, day)
+
+
+def _iquam_orchestrator(today=datetime.date(2026, 10, 28)):
+    client = FakeMAAPClient()
+    return MAAPOrchestrator(CONFIG, client, today_fn=lambda: today), client
+
+
+def test_a_header_only_buoy_file_is_not_reused():
+    orch, client = _iquam_orchestrator()
+    day = datetime.date(2026, 10, 20)
+    client.existing_objects.add(_iquam_href(day))
+    client.sizes[_iquam_href(day)] = rmm.IQUAM_EMPTY_BII_BYTES
+    assert orch._find_cached_iquam(day) is None
+    client.sizes[_iquam_href(day)] = rmm.IQUAM_EMPTY_BII_BYTES + 9   # N=1
+    assert orch._find_cached_iquam(day) == _iquam_href(day)
+
+
+def test_a_buoy_file_younger_than_stable_latency_is_rebuilt():
+    """nrtMRVA.py's buoystablat: iQUAM may still be adding to it."""
+    orch, client = _iquam_orchestrator()
+    for age, reused in ((0, False), (1, False), (2, True)):
+        day = datetime.date(2026, 10, 28) - datetime.timedelta(days=age)
+        client.existing_objects.add(_iquam_href(day))
+        assert (orch._find_cached_iquam(day) is not None) is reused, age
+
+
+def test_an_empty_rebuild_does_not_overwrite_a_file_with_data():
+    orch, client = _iquam_orchestrator()
+    day = datetime.date(2026, 10, 27)
+    client.existing_objects.add(_iquam_href(day))
+    client.sizes["s3://podaac/output/job-9/output/doy=300/year=2026"] = 24
+    assert orch._promote_iquam(day, "job-9") == _iquam_href(day)
+    assert not client.copied
+
+
+def test_an_empty_rebuild_with_nothing_earlier_is_left_out():
+    orch, client = _iquam_orchestrator()
+    day = datetime.date(2026, 10, 27)
+    client.sizes["s3://podaac/output/job-9/output/doy=300/year=2026"] = 24
+    assert orch._promote_iquam(day, "job-9") is None
+    assert not client.copied
+
+
+def test_empty_buoy_days_stay_out_of_the_mrva_manifest():
+    orch, client = _iquam_orchestrator(today=datetime.date(2026, 8, 9))
+    client.sizes.update({
+        f"s3://podaac/output/job-1/output/doy={d}/year=2026": 24
+        for d in (217, 218)})
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    _prefix, manifest = client.written_manifests[-1]
+    days = sorted(f["relative_path"] for f in manifest["files"]
+                  if f["sensor"] == "IQUAM0")
+    assert days and not any(d.endswith(("_217.bii", "_218.bii")) for d in days)
+
+
+# --- the daily sweep ----------------------------------------------------------
+
+def test_a_young_bic_is_built_once_per_run_not_once_per_window():
+    """In a T-9..T-1 sweep T-1 sits in three analysis days' windows. nrtMRVA.py
+    builds it once a run ("just written"); so must this."""
+    config = _single_sensor_config()
+    config["l2p"]["sensors"]["AMSR2R"]["day_range"] = [2, 2]
+    client = FakeMAAPClient()
+    today = datetime.date(2026, 8, 9)
+    orch = MAAPOrchestrator(config, client, today_fn=lambda: today)
+    for back in (3, 2, 1):
+        orch.run_day(today - datetime.timedelta(days=back), mode="nrt")
+    l2p_days = [(a["year"], a["doy"]) for p, a in client.submitted if p == "mur-l2p"]
+    assert len(l2p_days) == len(set(l2p_days)), l2p_days
+
+
+def test_a_final_day_that_already_exists_is_kept():
+    from mur_maap import paths
+    orch, client = _iquam_orchestrator(today=datetime.date(2026, 8, 9))
+    day = datetime.date(2026, 8, 3)
+    client.existing_objects.add(paths.l4_href(WORKSPACE_ROOT, day, "rea"))
+    result = orch.run_day(day, mode="rea")
+    assert client.submitted == []
+    assert result.netcdf_href == paths.l4_href(WORKSPACE_ROOT, day, "rea")
+
+
+def test_rerun_final_redoes_it():
+    from mur_maap import paths
+    client = FakeMAAPClient()
+    orch = MAAPOrchestrator(CONFIG, client, rerun_final=True,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    day = datetime.date(2026, 8, 3)
+    client.existing_objects.add(paths.l4_href(WORKSPACE_ROOT, day, "rea"))
+    orch.run_day(day, mode="rea")
+    assert "mur-mrva" in [p for p, _ in client.submitted]
+
+
+def test_an_nrt_granule_does_not_count_as_final():
+    from mur_maap import paths
+    orch, client = _iquam_orchestrator(today=datetime.date(2026, 8, 9))
+    day = datetime.date(2026, 8, 3)
+    client.existing_objects.add(paths.l4_href(WORKSPACE_ROOT, day, "nrt"))
+    orch.run_day(day, mode="rea")
+    assert "mur-mrva" in [p for p, _ in client.submitted]
+
+
+# --- sharing L4 granules to the team bucket --------------------------------
+
+TEAM_ROOT = "s3://team-bucket"
+
+
+def _sharing_orchestrator(team_bucket=None, discovered=TEAM_ROOT):
+    """An orchestrator whose client 'discovers' `discovered` as the team bucket."""
+    client = FakeMAAPClient()
+    client.team_matches = []
+
+    def team_root(match=None):
+        client.team_matches.append(match)
+        return discovered
+    client.team_root = team_root
+    config = dict(CONFIG, maap=dict(CONFIG["maap"]))
+    if team_bucket is not None:
+        config["maap"]["team_bucket"] = team_bucket
+    orch = MAAPOrchestrator(config, client,
+                            today_fn=lambda: datetime.date(2026, 8, 9))
+    return orch, client
+
+
+def test_each_promoted_granule_is_also_copied_to_the_team_bucket():
+    from mur_maap import paths
+    orch, client = _sharing_orchestrator()
+    day = datetime.date(2026, 8, 6)
+    orch.run_day(day, mode="nrt")
+
+    # Searched for by the project's name, and only once for the whole run.
+    assert client.team_matches == ["mur"]
+    for res in ("1km", "25km"):
+        promoted = paths.l4_href(WORKSPACE_ROOT, day, "nrt", res)
+        assert (promoted, paths.l4_href(TEAM_ROOT, day, "nrt", res)) in client.copied
+    # Nothing but L4 netCDFs goes there.
+    shared = [d for _s, d in client.copied if d.startswith(TEAM_ROOT)]
+    assert len(shared) == 2 and all(d.endswith(".nc") for d in shared)
+
+
+def test_an_explicit_team_bucket_root_is_used_without_searching():
+    orch, client = _sharing_orchestrator(team_bucket="s3://elsewhere/shared/")
+    assert orch.team_root == "s3://elsewhere/shared"
+    assert client.team_matches == []
+
+
+def test_the_search_text_comes_from_the_config():
+    orch, client = _sharing_orchestrator(team_bucket="sst")
+    assert orch.team_root == TEAM_ROOT
+    assert client.team_matches == ["sst"]
+
+
+@pytest.mark.parametrize("team_bucket,discovered", [
+    (False, TEAM_ROOT),        # switched off
+    ("", TEAM_ROOT),
+    (None, None),              # the account has no matching team bucket
+    (None, WORKSPACE_ROOT),    # the data root is already the team bucket
+])
+def test_nothing_is_shared_without_a_separate_team_bucket(team_bucket, discovered):
+    orch, client = _sharing_orchestrator(team_bucket, discovered)
+    orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert orch.team_root is None
+    assert all(d.startswith(WORKSPACE_ROOT) for _s, d in client.copied)
+
+
+def test_a_failed_share_does_not_fail_the_day(caplog):
+    orch, client = _sharing_orchestrator()
+    plain_copy = client.copy_object
+
+    def copy(src, dest):
+        if dest.startswith(TEAM_ROOT):
+            raise RuntimeError("AccessDenied")
+        return plain_copy(src, dest)
+    client.copy_object = copy
+
+    with caplog.at_level("WARNING"):
+        result = orch.run_day(datetime.date(2026, 8, 6), mode="nrt")
+    assert result.netcdf_href.startswith(WORKSPACE_ROOT)
+    assert len(client.published) == 1
+    assert "share_l4.py" in caplog.text
+
+
+def test_a_kept_final_day_is_shared_if_the_team_bucket_lacks_it():
+    from mur_maap import paths
+    orch, client = _sharing_orchestrator()
+    day = datetime.date(2026, 8, 3)
+    final = paths.l4_href(WORKSPACE_ROOT, day, "rea")
+    client.existing_objects.add(final)
+
+    orch.run_day(day, mode="rea")
+    assert client.submitted == []
+    assert client.copied == [(final, paths.l4_href(TEAM_ROOT, day, "rea"))]
+
+    orch.run_day(day, mode="rea")              # now there: not copied again
+    assert len(client.copied) == 1

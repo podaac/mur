@@ -30,18 +30,41 @@ dependencies = [
     # Web interface
     "streamlit>=1.28.0",
     "plotly>=5.17.0",
+
+    # Viewer data sources: STAC search over plain HTTP (no pystac-client
+    # needed for one POST) and S3 reads of the MAAP workspace bucket.
+    # earthaccess, above, covers PO.DAAC discovery and download.
+    "requests>=2.28.0",
+    "s3fs>=2023.1.0",
 ]
 
 [project.scripts]
 mur-pipeline = "run_mur_pipeline:main"
 mur-viewer = "dataviewer.dataviewer:main"
 mur-web-viewer = "run_web_viewer:main"
+mur-maap = "run_mur_maap:main"
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",
+    # Validates what common/bin/write_stac.py emits. Dev-only on purpose:
+    # the containers hand-build their STAC because neither image has pip, so
+    # the real library checks the output here instead -- before an image is
+    # built rather than inside one.
+    "pystac[validation]>=1.10.0",
 ]
+# Everything run_mur_maap.py needs that the rest of the project does not.
+# An extra rather than a core dependency: maap-py only works against MAAP's
+# API, and nothing else here -- the local docker pipeline, the dataviewer,
+# the tests -- imports it. Inside a MAAP workspace the pangeo image already
+# ships it, which is why this gap went unnoticed until the orchestrator was
+# first run from an ordinary server.
+maap = [
+    "maap-py>=5.0.0",
+    "boto3>=1.34.0",
+]
+
 viz = [
     "cartopy>=0.22.0",
 ]
@@ -54,16 +77,34 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["dataviewer"]
+packages = ["dataviewer", "mur_maap"]
+# Both console scripts live at the repo root, not in a package, so each
+# entry point's module and everything it imports has to be listed. Omitting
+# any of these still builds a wheel -- the `mur-pipeline`/`mur-maap` scripts
+# then ImportError at first run, which an editable install never reveals.
 include = [
     "run_mur_pipeline.py",
     "run_web_viewer.py",
+    "run_mur_maap.py",
+    "mur_config.py",
+    "mur_date.py",
+    "mur_window.py",
+    "mur_certs.py",
+    "iquam_date_flags.py",
+    "landice_static_files.py",
+    "mrva_static_files.py",
+    "static_resources_layout.py",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",
+    # Validates what common/bin/write_stac.py emits. Dev-only on purpose:
+    # the containers hand-build their STAC because neither image has pip, so
+    # the real library checks the output here instead -- before an image is
+    # built rather than inside one.
+    "pystac[validation]>=1.10.0",
 ]
 
 [tool.pytest.ini_options]

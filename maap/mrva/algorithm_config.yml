@@ -9,10 +9,13 @@ algorithm_description: >
   MUR multi-resolution variational analysis for one day. Fuses the per-sensor
   BIC files and iQuam in-situ observations against the seasonal climatology and
   the land/ice mask, emitting the GHRSST L4 MUR NetCDF granule, the MUR25
-  sibling product, and the coefficient file carried into the next day.
+  sibling product, and the coefficient file carried into the next day. Also
+  writes the STAC metadata that publishes the granules: the catalog.json
+  staged out alongside them is ingested into dps-stac.maap-project.org, so a
+  granule is addressable by date rather than by the job that produced it.
 algorithm_name: mur-mrva
-algorithm_version: "1.0.0"
-algorithm_container_url: ghcr.io/podaac/mur/mrva-dps:1.0.0
+algorithm_version: "2.0.20"
+algorithm_container_url: ghcr.io/podaac/mur/mrva-dps:2.0.20
 
 keywords: MUR, SST, GHRSST, L4, variational analysis
 code_repository: https://github.com/podaac/mur
@@ -31,11 +34,34 @@ release_notes: >
 
 run_command: /opt/mrva/bin/entrypoint.sh
 
-# 64 GiB / 16 cores. The local docker settings are 72g/32, but those are
-# ceilings rather than measurements. Note MRVA reaches L=9, which
-# mrva/docs/MEMORY_ANALYSIS_AND_MATRIX_FREE_PLAN.md puts at ~60 GB total
-# (infoMatrix alone is 53.71 GB) -- so the headroom here is real but thin.
-# If a job OOMs at the finest level, this is the first number to raise.
+# 64 GiB / 16 cores. MRVA runs L0..LF = 2..11 (NRT restarts at L0=6) and the
+# cost is dominated by the finest level. Since 2.0.6 infoMatrix is built
+# real*4, so L=11 is a 30.77 GiB working set rather than 55.48.
+#
+# Still put mrva on maap-dps-worker-64gb, not -32gb. 30.77 GiB against a
+# 32 GiB pool leaves ~1.2 GiB for MATLAB, which is still resident while the
+# Fortran runs, plus the OS -- that is not headroom, it is a coin flip. On
+# 64 GiB there is 33 GiB spare. The larger pool, maap-dps-worker-32vcpu-64gb,
+# remains unusable: its workers cannot reach the Docker socket.
+#
+# Every earlier version of this comment, and the memory analysis it cited, was
+# 17.4x too high: that document's table is shifted two levels, so its "L=9,
+# 53.71 GB" is really L=11. Corrected figures and the three confirmations are
+# at the top of mrva/docs/MEMORY_ANALYSIS_AND_MATRIX_FREE_PLAN.md. The real
+# L=9 needs 3.46 GiB, and the crash once attributed to it was the container
+# stack, fixed by -heap-arrays rather than by more RAM.
+#
+# DPS has no swap, and it would not help if it did -- the PCG streams the whole
+# matrix every iteration, so paging it costs ~18 s/iteration on NVMe before any
+# arithmetic.
+# These are measurements, not a request. They are deliberately NOT emitted into
+# the CWL as ResourceRequirement ramMin/coresMin: DPS runs cwltool without
+# --strict-memory-limit / --strict-cpu-limit, so those fields reserve nothing
+# and reject nothing -- a CWL asking for 64 GiB ran to completion on a 16 GiB
+# worker. The DPS queue picks the hardware, and it is set per process in the
+# operator's config.maap.json (maap.queue / maap.queues). Read the numbers
+# below as "which queue does this module need", and see MODULE_NEEDS in
+# run_mur_maap.py, which mirrors them next to the queue listing.
 ram_min: 65536
 cores_min: 16
 outdir_max: 8192   # the L4 granule alone is ~760 MB, plus MUR25 and the .c06
@@ -79,9 +105,7 @@ inputs:
     label: Landice icefiles listing (p011)
     doc: >
       s3:// href to this day's icefiles_<YYYY>_<DDD>.txt from mur-landice.
-      The file is real (written by landice/src/readosisafice.m's write_file),
-      but which output subdirectory it lands in on DPS is unconfirmed --
-      verify against one real landice job.
+      Confirmed present at p011/<year>/ in a real job's staged-out directory.
     type: string
   - name: sensor-inputs-manifest
     label: Sensor inputs manifest
@@ -103,6 +127,20 @@ inputs:
     doc: >
       Optional s3:// href to grids/MUR25grid.gds. An empty string skips MUR25
       product generation, which the entrypoint handles explicitly.
+    type: string?
+    default: ""
+  - name: max-level
+    label: Maximum analysis level
+    doc: >
+      Optional cap on the finest analysis scale. Empty means the full L=2..11,
+      which is what production delivers and what you want unless you know
+      otherwise. An ESCAPE HATCH, not a tuning knob: L=11 needs about 28.8 GiB
+      and no DPS pool currently provides it, while L=10 needs 13.84 and
+      completes on a 32 GB worker. A capped granule is on the same grid with
+      the same dimensions and variables, but the field is smoother and lacks
+      the operational product's finest scale -- it records which level it used
+      in the mrva_analysis_level global attribute, since nothing else about
+      the file would tell you.
     type: string?
     default: ""
   - name: prior-csp-file

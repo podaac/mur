@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# Daily MUR-on-MAAP run, for cron on a server outside the MAAP workspace.
+#
+# Why a wrapper and not a bare crontab line:
+#
+#   * cron's environment is nearly empty. It does not read ~/.bashrc, so
+#     MAAP_PGT is absent and PATH is roughly /usr/bin:/bin -- no venv, no uv.
+#     Everything the run needs is named explicitly below.
+#   * run_mur_maap.py blocks for the whole run -- two serial barriers per
+#     day (l2p fan-in, mrva; cog is submitted and not waited on) -- and
+#     keeps no resumable state. Two overlapping
+#     runs would resubmit the same jobs, and dedup is off by design
+#     (mur_maap/client.py:163). flock in the crontab makes the second exit.
+#   * A token that has expired must fail here, loudly, rather than as 25
+#     separate job failures an hour later.
+#
+# Override any of these in the crontab if the layout differs:
+#   MUR_REPO (default ~/mur)   MUR_PYTHON / MUR_UV (default: find uv)
+#   MUR_CONFIG (default $MUR_REPO/config.maap.json)   MUR_LOGDIR
+#   MUR_PROCESS_DAYS (default: unset, i.e. run_mur_maap.py's own default --
+#   nrtMRVA.py's T-9..T-1 sweep. Set it, e.g. to -1, only to narrow a run.)
+set -euo pipefail
+
+# --check runs every gate, reports what it found, prints the command it would
+# have run, and exits without submitting. The point is to be runnable the way
+# cron will run it:
+#
+#     env -i HOME=$HOME ~/mur/utils/cron_mur_maap.sh --check
+#
+# `env -i` is what makes it a real test. Run from a login shell, the script
+# inherits a populated PATH and an exported MAAP_PGT and passes for reasons
+# that will not exist at 06:00.
+CHECK_ONLY=0
+[[ "${1:-}" == "--check" ]] && CHECK_ONLY=1
+
+REPO="${MUR_REPO:-$HOME/mur}"
+CONFIG="${MUR_CONFIG:-$REPO/config.maap.json}"
+LOGDIR="${MUR_LOGDIR:-$HOME/mur-maap-logs}"
+# No -p by default, so the run is the orchestrator's full T-9..T-1 sweep, as
+# production's nrtMRVA.py does it. This used to pass -p -1: T-1 in NRT and
+# nothing else, so no day ever got its Final (REA) run, and no NRT day had a
+# .c06 to chain from, since only a Final run writes one.
+PROCESS_DAYS="${MUR_PROCESS_DAYS:-}"
+DAYS_ARGS=()
+[[ -n "$PROCESS_DAYS" ]] && DAYS_ARGS=("-p=$PROCESS_DAYS")
+
+mkdir -p "$LOGDIR"
+# `date -u +%F` and the explicit format below rather than -Is: BSD date has no
+# -I, so -Is made the script unrunnable on macOS and therefore untestable
+# anywhere but the target host.
+now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+LOG="$LOGDIR/maap_$(date -u '+%Y-%m-%d_%H%MZ').txt"
+
+# Keep the token out of the crontab and out of ps. ~/.maap-token holds the
+# RAW token value and nothing else -- no `export`, no quoting -- so that it can
+# be read identically from bash, tcsh (`setenv MAAP_PGT "`cat ~/.maap-token`"`)
+# or Python. A file of shell syntax would only be sourceable from the shell
+# that wrote it, and this host's login shell is tcsh while this script is bash.
+#
+# Stripping all whitespace is deliberate rather than tidy: a trailing newline
+# or a space picked up in a copy-paste is invisible, and the API's only
+# response is "Invalid session or insufficient permissions". A JWT contains no
+# whitespace, so there is nothing legitimate to lose.
+TOKEN_FILE="${MUR_TOKEN_FILE:-$HOME/.maap-token}"
+if [[ -z "${MAAP_PGT:-}" && -f "$TOKEN_FILE" ]]; then
+    if [[ "$(head -c7 "$TOKEN_FILE" 2>/dev/null)" == "export " ]]; then
+        # Older files written as `export MAAP_PGT=...`; still honoured.
+        # shellcheck source=/dev/null
+        source "$TOKEN_FILE"
+        MAAP_PGT="$(printf %s "${MAAP_PGT:-}" | tr -d '[:space:]')"
+    else
+        MAAP_PGT="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+    fi
+    export MAAP_PGT
+fi
+
+# A check reports to the terminal; a real run reports to the log, because
+# cron discards stdout and the log is the only record.
+if (( CHECK_ONLY )); then
+    echo "=== check only: no job will be submitted ==="
+else
+    exec >>"$LOG" 2>&1 </dev/null
+fi
+echo "=== $(now) starting (repo=$REPO days=${PROCESS_DAYS:-default sweep}) ==="
+
+fail() { echo "ERROR: $1"; exit "${2:-1}"; }
+
+[[ -f "$CONFIG" ]] || fail "no config at $CONFIG. Copy config.maap.json from
+       the workspace; only config.maap.example.json is in git." 78
+
+# How to invoke Python. uv is strongly preferred, and not merely as a
+# convenience: `uv run` syncs .venv to exactly the extras it is given, so a
+# bare `uv run pytest` in the same checkout UNINSTALLS maap-py and silently
+# breaks a cron job pinned to .venv/bin/python. Going through uv with the
+# extra named means the environment is correct at the moment of use, whatever
+# anyone ran yesterday.
+#
+# MUR_PYTHON overrides, for a host with no uv. There the caller owns keeping
+# maap-py installed.
+RUN=()
+if [[ -n "${MUR_PYTHON:-}" ]]; then
+    [[ -x "$MUR_PYTHON" ]] || fail "MUR_PYTHON=$MUR_PYTHON is not executable" 78
+    RUN=("$MUR_PYTHON")
+else
+    UV="${MUR_UV:-}"
+    if [[ -z "$UV" ]]; then
+        for candidate in "$HOME/.local/bin/uv" /usr/local/bin/uv /usr/bin/uv \
+                         "$(command -v uv 2>/dev/null || true)"; do
+            [[ -n "$candidate" && -x "$candidate" ]] && { UV="$candidate"; break; }
+        done
+    fi
+    if [[ -n "$UV" ]]; then
+        RUN=("$UV" run --extra maap --directory "$REPO" python)
+    elif [[ -x "$REPO/.venv/bin/python" ]]; then
+        RUN=("$REPO/.venv/bin/python")
+    else
+        fail "found neither uv nor $REPO/.venv/bin/python.
+       Install uv, or set MUR_PYTHON to an interpreter that has maap-py." 78
+    fi
+fi
+echo "interpreter    ${RUN[*]}"
+
+# maap-py is an extra, so a plain `pip install -e .` does not bring it in.
+# Check rather than fail obscurely four steps later.
+"${RUN[@]}" -c 'import maap.maap, boto3' 2>/dev/null \
+    || fail "maap-py and/or boto3 are not importable via: ${RUN[*]}
+       Fix with:  cd $REPO && uv sync --extra maap --extra dev" 78
+
+[[ -n "${MAAP_PGT:-}" ]] || fail "MAAP_PGT is not set. Put the raw token value
+       (and nothing else) in $TOKEN_FILE, from
+       https://console.maap-project.org/profile/tokens" 78
+
+cd "$REPO"
+
+# Prove the token still works before submitting anything: --check does a real
+# put/get/delete against the workspace bucket and exits non-zero on failure.
+#
+# This is the ONLY check on the token's validity, deliberately. An earlier
+# version also required it to start "jwt:eyJ", inferred from the shape of a
+# workspace session ticket -- and rejected a perfectly valid token generated
+# at console.maap-project.org, which is a different shape. A guess about the
+# format can only add false negatives; an authenticated round-trip cannot.
+"${RUN[@]}" utils/upload_static_resources.py --check \
+    || fail "MAAP auth pre-flight failed. The token is expired, truncated or
+       otherwise not accepted -- the output above is the server's own answer.
+       A fresh one: https://console.maap-project.org/profile/tokens" 75
+
+if (( CHECK_ONLY )); then
+    # The orchestrator's own --dry-run resolves the config, the algorithm
+    # version and the token provenance without submitting -- the three things
+    # that are wrong when a run fails for a reason the gates above cannot see.
+    "${RUN[@]}" run_mur_maap.py --config "$CONFIG" ${DAYS_ARGS[@]+"${DAYS_ARGS[@]}"} --dry-run \
+        | grep -E "^(run day|analysis days|version|token|sensors)" || true
+    echo
+    echo "all gates passed. The scheduled run would be:"
+    echo "  ${RUN[*]} run_mur_maap.py --config $CONFIG ${DAYS_ARGS[*]:-}"
+    echo "  logging to $LOGDIR/maap_<timestamp>.txt"
+    exit 0
+fi
+
+echo "--- pre-flight passed, submitting ---"
+"${RUN[@]}" run_mur_maap.py --config "$CONFIG" ${DAYS_ARGS[@]+"${DAYS_ARGS[@]}"}
+echo "=== $(now) finished rc=0 ==="

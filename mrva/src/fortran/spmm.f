@@ -27,12 +27,62 @@
       integer coeffSize
       integer infoSize
 
+! Storage precision for infoMatrix ONLY. real*4 by default; build with
+! -DINFOMATRIX_R8 to restore real*8.
+!
+! infoMatrix is 49 reals per coefficient and dominates everything else. At
+! L=11 the working set is 55.48 GiB with real*8, of which infoMatrix is
+! 49.43. In real*4 that becomes 24.72, for 30.77 GiB total.
+!
+! real*4 is the DEFAULT because real*8 does not fit anywhere we can run. The
+! largest usable DPS pool is 64 GiB, production peaks near 72 GB at L=11 once
+! MATLAB -- still resident while this runs -- is counted, and the one 64 GiB
+! pool with more cores cannot reach the Docker socket. A real*8 build is
+! therefore not a fallback we can select; it is a configuration with no
+! machine. Leaving it the default would mean shipping something that cannot
+! execute.
+!
+! Why single precision is defensible here -- it is already the precision this
+! solver works in everywhere else:
+!   - the PCG vectors r,p,z,w and the arrays behind them (u,v,h) are real*4
+!   - csp/dsp, the coefficients being solved for, are real*4
+!   - there is no implicit none in this file, so rhoNew -- the convergence
+!     reduction, sum(r*z) over every coefficient -- is real*4 as well
+!   - the preconditioner is diagonal (diagPCG=.true.), and nothing here is
+!     factorized: the pointer named L is the thin-plate stencil accumulator,
+!     not a Cholesky factor
+!   - mrva.f already loosens the tolerance to 1.0e-3 for L>=9, far above what
+!     real*4 can resolve
+! So real*8 on the matrix was the last double in a single-precision solver,
+! and the convergence test could not perceive the digits it cost 25 GiB for.
+!
+! infoVector follows the same kind. It was left real*8 at first on the grounds
+! that 1.01 GiB was not worth arguing about; job 890a1c7a then missed by
+! roughly that much, on a 31.0 GiB worker with 29.3 GiB free at start.
+!
+! STILL UNVALIDATED. The obvious check -- process a day both ways and diff --
+! cannot be run, because the real*8 side does not fit. Validation is therefore
+! against PRODUCTION output for the same day, which is the real reference
+! anyway. Until that comparison exists, treat any L4 granule this produces as
+! provisional. A cheaper partial check is available if wanted: at LF=9 both
+! precisions fit easily (3.46 GiB), so a reduced-level run could be diffed
+! both ways to catch a gross error, though it would not exercise L=10-11.
+#ifdef INFOMATRIX_R8
+      integer, parameter :: imk = 8
+#else
+      integer, parameter :: imk = 4
+#endif
+
 ! Matrix-free mode: comment out infoMatrix allocation to save memory
 ! MATRIX_FREE mode computes stencil coefficients on-the-fly
 #ifndef MATRIX_FREE
-      real*8, allocatable, target :: infoMatrix(:,:,:,:,:,:,:)
+      real(imk), allocatable, target :: infoMatrix(:,:,:,:,:,:,:)
 #endif
-      real*8, allocatable, target :: infoVector(:,:,:,:)
+! infoVector follows infoMatrix. It is only 1.01 GiB at L=11, but the run is
+! short by about that much, and the argument is if anything stronger: spmPCG
+! does `r(i,j,n,k)=b(i,j,n,k)` where r is real*4, so the solver has always
+! truncated this to single precision on the very first line it reads it.
+      real(imk), allocatable, target :: infoVector(:,:,:,:)
 
       real S00(-3:3,-3:3),S11(-3:3,-3:3),S22(-3:3,-3:3)
       real S01(-3:3,-3:3),S10(-3:3,-3:3)
@@ -136,6 +186,7 @@
       hy=(ymax-ymin)/my
 
 #ifndef MATRIX_FREE
+      call spmReportAlloc()
       allocate(infoMatrix(-1:mx+1-cix,-1:my+1,-3:3,-3:3,nv,nv,mz3))
       infoMatrix=0.
 #else
@@ -155,6 +206,61 @@
       end subroutine
 
 !!!!!!!!!!
+      subroutine spmReportAlloc
+!
+! Say what is about to be allocated, and what the machine has left, IMMEDIATELY
+! before the allocation that decides whether this job survives.
+!
+! Four jobs have now been OOM-killed at the L=10 -> L=11 transition and not one
+! left a usable number. The entrypoint samples MemAvailable every 2 s, which is
+! too coarse: the fatal event is a single `infoMatrix=0.` faulting in tens of
+! gibibytes, and it is over before the next sample. Sampling from outside also
+! cannot attribute the memory -- it says the box filled, not what filled it.
+!
+! This is printed from the one place that knows both halves at the moment they
+! meet: the size being requested, and MemAvailable read straight from /proc.
+! The grid is printed rather than the level, because L is a local of mrva.f's
+! loop and not module scope -- with no implicit none in this file, naming it
+! here would have typed it INTEGER by its first letter and printed an
+! undefined value. mx/my identify the level unambiguously.
+! If the next line in the log is "Killed", the two numbers on this line are the
+! whole post-mortem.
+!
+      integer, parameter :: iu = 91
+      character(len=160) line
+      real*8 avail, want
+      integer ios
+
+      want = dble(coeffSize)*49.d0*dble(nv)*dble(imk)
+
+      avail = -1.d0
+      open(iu,file='/proc/meminfo',status='old',action='read',iostat=ios)
+      if (ios .eq. 0) then
+        do
+          read(iu,'(A)',iostat=ios) line
+          if (ios .ne. 0) exit
+          if (line(1:13) .eq. 'MemAvailable:') then
+            read(line(14:),*,iostat=ios) avail
+            if (ios .ne. 0) avail = -1.d0
+            exit
+          endif
+        enddo
+        close(iu)
+      endif
+
+      if (avail .ge. 0.d0) then
+        print '(A,I6,A,I6,A,F8.2,A,F8.2,A)',
+     .    '  [alloc] grid ', mx, ' x', my, '  infoMatrix ',
+     .    want/1073741824.d0, ' GiB requested, ',
+     .    avail/1048576.d0, ' GiB available'
+      else
+        print '(A,I6,A,I6,A,F8.2,A)',
+     .    '  [alloc] grid ', mx, ' x', my, '  infoMatrix ',
+     .    want/1073741824.d0, ' GiB requested (meminfo unreadable)'
+      endif
+
+      end subroutine
+
       subroutine spmRefresh
 
 #ifndef MATRIX_FREE
@@ -174,6 +280,7 @@
       hy=(ymax-ymin)/my
 
 #ifndef MATRIX_FREE
+      call spmReportAlloc()
       allocate(infoMatrix(-1:mx+1-cix,-1:my+1,-3:3,-3:3,nv,nv,mz3))
       infoMatrix=0.
 #else
@@ -244,7 +351,7 @@
 !!!!!!!!!!
       subroutine spmDiagonal(w,n)
 #ifndef MATRIX_FREE
-      real*8,pointer:: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
       Asp=>infoMatrix
       do k=1,mz3
       do j=-1,my+1
@@ -262,7 +369,8 @@
       integer n,k
 
 #ifndef MATRIX_FREE
-      real*8, pointer :: bsp(:,:,:,:),Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
       bsp=>infoVector
       Asp=>infoMatrix
 
@@ -324,7 +432,7 @@
 
 #ifndef MATRIX_FREE
       real*8 L1(-1:1,-2:2),L2(-2:2,-2:2)
-      real*8, pointer :: L(:,:,:,:,:,:,:)
+      real(imk), pointer :: L(:,:,:,:,:,:,:)
       L=>infoMatrix
 
       L1(:,:)=0.; L1(0:1,-1)=-1.; L1(-1:0,1)=-1.
@@ -400,7 +508,8 @@
 #endif
 
 #ifndef MATRIX_FREE
-      real*8, pointer :: bsp(:,:,:,:),Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
       bsp=>infoVector
       Asp=>infoMatrix
 
@@ -553,7 +662,7 @@
 
 #ifndef MATRIX_FREE
       real*8 L1(-1:1,-2:2),L2(-2:2,-2:2)
-      real*8, pointer :: L(:,:,:,:,:,:,:)
+      real(imk), pointer :: L(:,:,:,:,:,:,:)
       L=>infoMatrix
 
       L1(:,:)=0.; L1(0:1,-1)=-1.; L1(-1:0,1)=-1.
@@ -637,7 +746,8 @@
       integer n,k,i,j
 
 #ifndef MATRIX_FREE
-      real*8, pointer :: bsp(:,:,:,:),Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
       bsp=>infoVector
       Asp=>infoMatrix
         if(j.le.1) then  
@@ -690,9 +800,9 @@
       real xd(nd),yd(nd),Ex(nd),Ey(nd),Et(nd),wd(nd)
 
       real bx(4),by(4)
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
       bsp=>infoVector
 #ifndef MATRIX_FREE
@@ -751,9 +861,9 @@
       real xd(nd),yd(nd),zd(nd),wd(nd)
 
       real bx(4),by(4)
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
       bsp=>infoVector
 #ifndef MATRIX_FREE
@@ -802,9 +912,9 @@
       real scaling(-1:mx+1-cix,-1:my+1)
 
       real bx(4),by(4)
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
       bsp=>infoVector
 #ifndef MATRIX_FREE
@@ -856,9 +966,9 @@
       real scaling(-1:mx+1-cix,-1:my+1)
 
       real bx(4),by(4)
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
       bsp=>infoVector
 #ifndef MATRIX_FREE
@@ -918,9 +1028,9 @@
       real scaling(-1:mx+1-cix,-1:my+1)
 
       real bx(4),by(4)
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
       bsp=>infoVector
 #ifndef MATRIX_FREE
@@ -981,9 +1091,9 @@
       real scaling(-1:mx+1-cix,-1:my+1)
 
       real bx(4),by(4)
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
       bsp=>infoVector
 #ifndef MATRIX_FREE
@@ -1042,9 +1152,9 @@
       real scaling(-1:mx+1-cix,-1:my+1)
 
       real bx(4),by(4)
-      real*8, pointer :: bsp(:,:,:,:)
+      real(imk), pointer :: bsp(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: Asp(:,:,:,:,:,:,:)
+      real(imk), pointer :: Asp(:,:,:,:,:,:,:)
 #endif
       bsp=>infoVector
 #ifndef MATRIX_FREE
@@ -1223,7 +1333,8 @@
 #ifndef MATRIX_FREE
       real step,ratio,threshold
       real resSum,oldSum
-      real*8, pointer :: K4(:,:,:,:,:,:,:),bij(:,:,:,:)
+      real(imk), pointer :: K4(:,:,:,:,:,:,:)
+      real(imk), pointer :: bij(:,:,:,:)
       K4=>infoMatrix
       bij=>infoVector
 
@@ -1298,9 +1409,9 @@
       integer minIteration
       parameter(minIteration=5)
 
-      real*8, pointer :: b(:,:,:,:)
+      real(imk), pointer :: b(:,:,:,:)
 #ifndef MATRIX_FREE
-      real*8, pointer :: A(:,:,:,:,:,:,:)
+      real(imk), pointer :: A(:,:,:,:,:,:,:)
 #endif
       real, pointer :: r(:,:,:,:),p(:,:,:,:),z(:,:,:,:),w(:,:,:,:)
 
