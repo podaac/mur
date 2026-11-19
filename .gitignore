@@ -36,6 +36,9 @@ htmlcov/
 *.log
 testing/
 config.json
+# The filled-in MAAP config names your workspace and team bucket; the
+# documented template is config.maap.example.json.
+config.maap.json
 landice/tests/in
 landice/tests/out
 landice/tests/truth-data

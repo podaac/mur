@@ -333,3 +333,18 @@ python utils/share_l4.py --config config.maap.json            # what would be co
 python utils/share_l4.py --config config.maap.json --copy
 python utils/share_l4.py --config config.maap.json --copy --only '*/25km/2026/*'
 ```
+
+### migrate_workspace_root.py
+
+Copies the pipeline's whole `mur/` tree from one data root to another, for
+moving `maap.workspace_root` from a personal workspace to a team bucket.
+Server-side copies, resumable, nothing deleted; hrefs inside manifests and
+sidecar STAC items are repointed on the way. `dps_output/` is not touched.
+The destination defaults to the team bucket found by name (`--match`,
+default `mur`).
+
+```bash
+python utils/migrate_workspace_root.py            # report, copy nothing
+python utils/migrate_workspace_root.py --copy
+python utils/migrate_workspace_root.py --verify
+```
