@@ -121,7 +121,7 @@ def test_choose_mrva_falls_back_when_no_run_of_that_kind():
 
 def _sample_report(prior_csp="s3://b/2026101909_MRVA4_Global.c06"):
     return {
-        "date": "2026-10-20", "year": 2026, "doy": 293, "host": "podaac-mure",
+        "date": "2026-10-20", "year": 2026, "doy": 293, "host": "prod-host",
         "generated": "2026-10-28 12:00 UTC",
         "differences": {"mrva_ingest": 1, "l2p": 1, "landice": 0, "iquam": 0},
         "mrva_ingest": {
@@ -172,3 +172,13 @@ def test_find_params_reads_dps_hyphenated_names_and_keeps_empty_values():
     ctx = {"job_specification": {"params": [{"name": "prior-csp-file"}]},
            "inputs": {"mode": "nrt", "prior-csp-file": "", "doy": "293"}}
     assert cmp.find_params(ctx) == {"mode": "nrt", "prior_csp_file": ""}
+
+
+def test_html_report_shows_l4_copies_and_flags_a_missing_team_copy():
+    report = _sample_report()
+    report["l4"] = {"data_root": "s3://ws/u", "team_root": "s3://team",
+                    "granules": [{"mode": "nrt", "resolution": "25km", "key": "k",
+                                  "data_root": 100, "team": None, "match": False}]}
+    page = cmp.render_html(report)
+    assert "L4 granules" in page and "s3://team" in page and "share_l4.py" in page
+    assert "L4 granules" not in cmp.render_html(_sample_report())

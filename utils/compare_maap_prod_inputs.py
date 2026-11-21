@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Compare what went INTO one analysis day on MAAP against production.
 
-    python utils/compare_maap_prod_inputs.py --date 2026-10-20 --host podaac-mure
-    python utils/compare_maap_prod_inputs.py --year 2026 --doy 293 \\
-        --host jleach@podaac-ops-measures --ssh-opt -p --ssh-opt 2222
+    python utils/compare_maap_prod_inputs.py --date 2026-10-20 --host <user>@<prod host>
+    MUR_PROD_HOST=<user>@<prod host> python utils/compare_maap_prod_inputs.py --year 2026 --doy 293
     python utils/compare_maap_prod_inputs.py --date 2026-10-20 --skip-remote
 
 WHY THIS EXISTS
@@ -20,14 +19,20 @@ WHAT IS COMPARED, PER STAGE
                   This is the decisive one -- what MRVA saw, not what it was
                   handed. prod: <csp-root>/<year>/;  MAAP: the mrva DPS job.
     MRVA params   (MAAP only) the job's own inputs from _job.json -- above all
-                  whether prior_csp_file was passed. Without it MRVA
+                  whether prior_csp_file was passed. Without it an NRT MRVA
                   bootstraps instead of chaining from yesterday, and no input
-                  comparison will explain the difference.
+                  comparison will explain the difference. (REA never chains,
+                  on prod either.)
     L2P -> BIC    L2Plist_Global_<SENSOR>_<YYYY>_<DDD>.txt, written by
                   l2p2bic.m: the granules folded into each BIC, for every
                   sensor across the +/- dayrange window.
     Land/ice      icefiles_<YYYY>_<DDD>.txt: the OSI-SAF files used.
     iQUAM         .bii sizes over +/- the buoy dayrange (it has no list file).
+    L4 copies     (MAAP only) where the day's granules are: the data root and
+                  the team bucket (maap.team_bucket), per mode and resolution,
+                  with sizes. A missing or different-sized team copy means a
+                  teammate diffing against "MAAP" is looking at another file;
+                  utils/share_l4.py --copy repairs it.
 
     Raw files from both sides are saved under --out for inspection, together
     with the chosen MRVA job's stdout/stderr and the canonical MAAP manifests.
@@ -53,12 +58,13 @@ REMOTE ACCESS
     host prompts once rather than once per file, and a missing file is
     reported rather than aborting the batch. The remote roots default to the
     production layout (see collect_prod_inputs.py); override them with the
-    --*-root flags for a mirror such as podaac-mure.
+    --*-root flags for a mirror that lays them out differently.
 """
 import argparse
 import dataclasses
 import datetime
 import json
+import os
 import pathlib
 import re
 import shlex
@@ -194,10 +200,12 @@ def fetch_remote(host: str, ssh_opts: List[str], script: str) -> str:
 class Maap:
     """Read-only S3 access to this account's MAAP workspace."""
 
-    def __init__(self, data_root: Optional[str] = None):
+    def __init__(self, data_root: Optional[str] = None,
+                 config: Optional[Dict] = None):
         from mur_maap import auth
         from mur_maap.client import MaapPyClient
         from mur_maap.version import ALGORITHM_VERSION
+        from mur_maap.workspace import team_root_for
         source = auth.load()
         if not source:
             raise SystemExit("No MAAP token: set MAAP_PGT or write ~/.maap-token")
@@ -209,6 +217,9 @@ class Maap:
         # maap.workspace_root, e.g. the team bucket s3://mur-sst. Job outputs
         # stay under dps_output/ in the personal workspace either way.
         self.data_root = (data_root or self.ws.uri).rstrip("/")
+        # Where run_mur_maap.py copies finished L4 granules for teammates.
+        team = team_root_for(config or {}, client.workspace)
+        self.team_root = team if team and team != self.data_root else None
         self._dps_root = None
 
     def _list(self, prefix: str, delimiter: Optional[str] = None):
@@ -387,7 +398,8 @@ def render_html(report: Dict) -> str:
     diffs = report.get("differences", {})
     ing = report.get("mrva_ingest", {})
     labels = {"mrva_ingest": "MRVA ingest", "l2p": "L2P → BIC",
-              "landice": "Land/ice", "iquam": "iQUAM"}
+              "landice": "Land/ice", "iquam": "iQUAM",
+              "l4_team_copy": "L4 team copy"}
     kind = lambda rt: "&ndash;" if rt is None else ("NRT" if rt else "REA")
 
     cards = "".join(
@@ -433,7 +445,8 @@ what the analysis saw, not just what it was handed.</p>
     if params:
         plist = "".join(f"<dt>{_e(k)}</dt><dd class='mono'>{_e(params[k])}</dd>"
                         for k in MRVA_PARAMS if k in params)
-        bootstrap = ("" if params.get("prior_csp_file") else
+        # Prod chains only in NRT (mrva4com.m: `if realtime,`); REA bootstraps there too.
+        bootstrap = ("" if params.get("prior_csp_file") or params.get("mode") != "nrt" else
                      '<div class="warn"><strong>No <code>prior_csp_file</code>.</strong> '
                      "This MRVA bootstrapped instead of chaining from the previous day&rsquo;s "
                      "coefficients, which prod always does. That alone changes the analysis.</div>")
@@ -500,6 +513,25 @@ no input list, so size is the cheapest check that both sides built the same file
 <div class="scroll"><table><thead><tr><th>Day</th><th class="n">Prod</th><th class="n">MAAP</th>
 <th></th></tr></thead><tbody>{iq_rows}</tbody></table></div></section>"""
 
+    # L4 copies
+    l4 = report.get("l4") or {}
+    l4_rows = "".join(
+        f'<tr class="{"diff" if r["match"] is False else ""}"><td>{_e(r["mode"].upper())}</td>'
+        f'<td>{_e(r["resolution"])}</td><td class="n">{_num(r["data_root"])}</td>'
+        f'<td class="n">{_num(r["team"])}</td><td>{_pill(r["match"])}</td></tr>'
+        for r in l4.get("granules", []))
+    l4_html = f"""
+<section><h2>L4 granules</h2>
+<p class="what">Where this day&rsquo;s promoted granules are. Data root
+<code>{_e(l4.get("data_root"))}</code>; team bucket
+<code>{_e(l4.get("team_root") or "none")}</code>. A team copy that is missing or a different
+size is a different file from the one in the data root: run
+<code>utils/share_l4.py --copy</code>.</p>
+<div class="scroll"><table><thead><tr><th>Mode</th><th>Resolution</th><th class="n">Data root</th>
+<th class="n">Team bucket</th><th></th></tr></thead><tbody>{l4_rows or
+'<tr><td colspan="5">no promoted granule in either root</td></tr>'}</tbody></table></div>
+</section>""" if l4 else ""
+
     title = f'Inputs {report["year"]}/{report["doy"]:03d}'
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -510,7 +542,7 @@ no input list, so size is the cheapest check that both sides built the same file
 <p class="sub">Analysis day {report["year"]}/{report["doy"]:03d} &middot; prod host
 {_e(report.get("host") or "not read (--skip-remote)")} &middot; generated {_e(report.get("generated"))}</p>
 <div class="cards">{cards}</div>
-{ingest_html}{params_html}{l2p_html}{ice_html}{iquam_html}
+{ingest_html}{params_html}{l2p_html}{ice_html}{iquam_html}{l4_html}
 </main></body></html>
 """
 
@@ -541,11 +573,13 @@ def parse_args(argv=None):
                     help="analysis day, YYYY-MM-DD")
     ap.add_argument("--year", type=int)
     ap.add_argument("--doy", type=int)
-    ap.add_argument("--host", help="ssh target for the prod side, e.g. "
-                    "podaac-mure or user@podaac-ops-measures")
+    ap.add_argument("--host", default=os.environ.get("MUR_PROD_HOST"),
+                    help="ssh target for the prod side, e.g. user@host "
+                         "(default: $MUR_PROD_HOST)")
     ap.add_argument("--ssh-opt", action="append", default=[],
                     help="extra ssh argument; repeat for each, e.g. "
-                         "--ssh-opt -p --ssh-opt 2222")
+                         "--ssh-opt=-oConnectTimeout=10 (the = keeps argparse from "
+                         "reading a leading - as a flag)")
     ap.add_argument("--skip-remote", action="store_true",
                     help="MAAP side only (no ssh)")
     ap.add_argument("--mode", choices=("auto", "nrt", "rea"), default="auto",
@@ -564,6 +598,10 @@ def parse_args(argv=None):
     ap.add_argument("--config", type=pathlib.Path, default=REPO / "config.maap.json",
                     help="pipeline config; its maap.workspace_root is where "
                          "manifests, landice and iquam are read from")
+    ap.add_argument("--data-root",
+                    help="s3:// root of the pipeline's files (manifests, landice, "
+                         "iquam, l4); default: the config's maap.workspace_root, "
+                         "else the personal workspace")
     ap.add_argument("--max-names", type=int, default=15,
                     help="granule names to print per difference (all go to JSON)")
     args = ap.parse_args(argv)
@@ -572,7 +610,7 @@ def parse_args(argv=None):
             ap.error("give --date, or --year and --doy")
         args.date = datetime.date(args.year, 1, 1) + datetime.timedelta(days=args.doy - 1)
     if not args.skip_remote and not args.host:
-        ap.error("--host is required unless --skip-remote")
+        ap.error("--host (or MUR_PROD_HOST) is required unless --skip-remote")
     return args
 
 
@@ -612,11 +650,13 @@ def main(argv=None) -> int:
             save(out / "prod", path.lstrip("/"), text)
 
     print(f"Listing MAAP DPS outputs for {day} ({year}/{doy:03d})")
-    data_root = None
-    if args.config.exists():
-        data_root = (json.loads(args.config.read_text()).get("maap") or {}).get(
-            "workspace_root")
-    maap = Maap(data_root)
+    config = json.loads(args.config.read_text()) if args.config.exists() else {}
+    data_root = args.data_root or (config.get("maap") or {}).get("workspace_root")
+    if data_root and "<" in data_root:
+        data_root = None
+    maap = Maap(data_root, config)
+    print(f"  data root:   {maap.data_root}")
+    print(f"  team bucket: {maap.team_root or '(none: same as data root, or not found)'}")
     report: Dict = {"date": str(day), "year": year, "doy": doy,
                     "host": None if args.skip_remote else args.host}
 
@@ -698,7 +738,7 @@ def main(argv=None) -> int:
         for k in MRVA_PARAMS:
             if k in params:
                 print(f"  {k:<28} {params[k]}")
-        if params and not params.get("prior_csp_file"):
+        if params and params.get("mode") == "nrt" and not params.get("prior_csp_file"):
             print("  WARNING: no prior_csp_file -- this MRVA BOOTSTRAPPED instead "
                   "of chaining from the previous day's coefficients, unlike prod")
     report["mrva_params"] = params
@@ -792,12 +832,36 @@ def main(argv=None) -> int:
               f"{('-' if m is None else m):>12}" + ("" if p == m else "   <-- differs"))
     report["iquam"] = iquam
 
+    # --- L4 copies --------------------------------------------------------
+    from mur_maap import paths as mpaths
+    print("\n== L4 granules (data root / team bucket, bytes) ==")
+    l4 = []
+    for mode in ("nrt", "rea"):
+        for res in ("1km", "25km"):
+            key = mpaths.l4_key(day, mode, res)
+            d_size = maap.size(f"{maap.data_root}/{key}")
+            t_size = maap.size(f"{maap.team_root}/{key}") if maap.team_root else None
+            # Only a granule that exists somewhere is worth a row.
+            if d_size is None and t_size is None:
+                continue
+            ok = None if not maap.team_root else d_size == t_size
+            l4.append({"mode": mode, "resolution": res, "key": key,
+                       "data_root": d_size, "team": t_size, "match": ok})
+            print(f"  {mode.upper():<4} {res:<5} {('-' if d_size is None else d_size):>12} "
+                  f"{('-' if t_size is None else t_size):>12}"
+                  + ("   <-- team copy missing or differs" if ok is False else ""))
+    if not l4:
+        print("  no promoted L4 granule for this day in either root")
+    report["l4"] = {"data_root": maap.data_root, "team_root": maap.team_root,
+                    "granules": l4}
+
     # --- summary ----------------------------------------------------------
     diffs = {
         "mrva_ingest": sum(not r["match"] for r in ingest),
         "l2p": sum(bool(r["only_prod"] or r["only_maap"]) for r in l2p_report),
         "landice": int(bool(ice["only_prod"] or ice["only_maap"])),
         "iquam": sum(not r["match"] for r in iquam),
+        "l4_team_copy": sum(r["match"] is False for r in l4),
     }
     report["differences"] = diffs
     report["generated"] = datetime.datetime.now(datetime.timezone.utc).strftime(

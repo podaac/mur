@@ -228,15 +228,22 @@ iQUAM `.bii` sizes. Logs only, so no data is downloaded. Runs anywhere with
 `maap-py` and a MAAP token (`MAAP_PGT` or `~/.maap-token`).
 
 ```bash
-python utils/compare_maap_prod_inputs.py --date 2026-10-20 --host podaac-mure
+python utils/compare_maap_prod_inputs.py --date 2026-10-20 --host <user>@<prod host>
 python utils/compare_maap_prod_inputs.py --date 2026-10-20 --skip-remote   # MAAP side only
 # A mirror with a different layout: override the remote roots
-python utils/compare_maap_prod_inputs.py --date 2026-10-20 --host podaac-mure \
+python utils/compare_maap_prod_inputs.py --date 2026-10-20 --host <user>@<prod host> \
     --bic-root /mirror/bic --csp-root /mirror/cyc4out --iquam-root /mirror/iquam
 ```
 
 Raw files from both sides, `report.json` and a self-contained `report.html`
 land in `./maap_vs_prod_<YYYY>_<DDD>/`.
+
+The report also lists where the day's L4 granules are: the data root and the
+team bucket (`maap.team_bucket`), with sizes. A team copy that is missing or a
+different size gets flagged, because a teammate comparing against "MAAP" would
+be looking at a different file. `share_l4.py --copy` fixes it. `--data-root`
+overrides `maap.workspace_root`, for example after moving the data root to the
+team bucket.
 
 ## L2P download orphan capture (`l2p_capture.py`)
 

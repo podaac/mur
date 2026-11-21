@@ -61,3 +61,12 @@ def test_org_path_can_be_searched_for_by_name():
     assert bucket.org_path("nothing-like-it") is None
     # Only team buckets are searched: the personal workspace also says "maap".
     assert bucket.org_path("maap-ops") is None
+
+
+def test_team_root_for_follows_the_team_bucket_setting():
+    from mur_maap.workspace import team_root_for
+    bucket = WorkspaceBucket(FakeMaap(AUTHORIZED))
+    assert team_root_for({}, bucket) == "s3://mur-sst"
+    assert team_root_for({"maap": {"team_bucket": "s3://x/y/"}}, bucket) == "s3://x/y"
+    assert team_root_for({"maap": {"team_bucket": False}}, bucket) is None
+    assert team_root_for({"maap": {"team_bucket": "nothing"}}, bucket) is None

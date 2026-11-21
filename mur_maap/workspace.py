@@ -149,3 +149,23 @@ class WorkspaceBucket:
         if self._authorized is None:
             self._fetch()
         return self._authorized or []
+
+
+def team_root_for(config: Dict, bucket: "WorkspaceBucket") -> Optional[str]:
+    """The team bucket's s3:// root as the config's maap.team_bucket names it.
+
+    For readers (the comparison and viewer tools), which want the shared copy
+    of a granule. An s3:// setting is used as given; text is looked for among
+    the team buckets `bucket`'s credentials authorize (org_path). None when
+    sharing is off, nothing matches, or the lookup fails -- a reader then
+    simply has one root fewer to try.
+    """
+    from mur_maap import paths
+    root, match = paths.team_bucket_setting(config)
+    if root is None and match is not None:
+        try:
+            org = bucket.org_path(match)
+        except Exception:                                  # noqa: BLE001
+            return None
+        root = org.uri if org else None
+    return root.rstrip("/") if root else None
