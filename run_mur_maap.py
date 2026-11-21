@@ -42,6 +42,7 @@ from landice_static_files import LANDICE_STATIC_RELATIVE_PATHS
 from mrva_static_files import MRVA_STATIC_RELATIVE_PATHS, seasonal_relative_path
 from mur_maap import auth, paths, stac
 from mur_maap import tags
+from mur_maap.frozen import FrozenCase, load_case
 
 # mur_maap.stac reads MAAP's STAC over urllib, which carries no CA store of
 # its own. Without this, link decoration fails with CERTIFICATE_VERIFY_FAILED
@@ -315,8 +316,13 @@ class MAAPOrchestrator:
         today_fn: Optional[Callable[[], datetime.date]] = None,
         stages: Optional[Iterable[str]] = None,
         rerun_final: bool = False,
+        frozen: Optional[FrozenCase] = None,
     ):
         self.config = mur_config.normalize_config(config)
+        # A regression replay of one prod run (mur_maap/frozen.py). Set, it
+        # replaces every live input with the case's frozen one and keeps the
+        # run's output inside the case's data root.
+        self.frozen = frozen
         self.client = client
         self.force_nrt = force_nrt
         # On by default. With it off, a BIC's LAST build was at 06Z the day
@@ -356,6 +362,11 @@ class MAAPOrchestrator:
     def get_reference_today(self) -> datetime.date:
         return self._today_fn()
 
+    def _tag(self, stage: str) -> str:
+        """The Console batch a job goes in: one per stage, or in a replay one
+        per case, so the compare step can find exactly that case's jobs."""
+        return self.frozen.job_tag if self.frozen is not None else tags.batch(stage)
+
     def calculate_processing_window(
         self,
         target_date: Optional[datetime.date] = None,
@@ -393,6 +404,8 @@ class MAAPOrchestrator:
         None when sharing is off, no team bucket matches, or the data root is
         already there -- the promoted granule is then the shared one.
         """
+        if self.frozen is not None:
+            return None                 # a replay never writes shared granules
         if not self._team_root_resolved:
             self._team_root_resolved = True
             root, match = paths.team_bucket_setting(self.config)
@@ -594,7 +607,8 @@ class MAAPOrchestrator:
             return self._built_iquam[data_day]
         reference_today = reference_today or self.get_reference_today()
         stable = self.config.get("iquam", {}).get("stable_latency", 2)
-        if mur_window.is_rewrite(reference_today, data_day, stable):
+        # Frozen: the seeded file IS what prod used, young or not.
+        if self.frozen is None and mur_window.is_rewrite(reference_today, data_day, stable):
             return None
         candidate = paths.iquam_href(self.workspace_root, data_day)
         size = self.client.object_size(candidate)
@@ -820,7 +834,7 @@ class MAAPOrchestrator:
                 # STAC item would otherwise record the day with no indication
                 # of whether it is the interim or the final analysis.
                 "mur-cog", self._cog_args(granule_href, mode),
-                tag=tags.batch("cog"))
+                tag=self._tag("cog"))
         except Exception as exc:                          # noqa: BLE001
             logger.warning("    browse rasters for %s not submitted (%s); "
                            "the granule is unaffected", asset_prefix, exc)
@@ -861,7 +875,13 @@ class MAAPOrchestrator:
 
         Returns None when the job produced no coefficient, which is not an
         error -- absence just means tomorrow bootstraps.
+
+        Not in an isolated replay: the next day must chain from prod's c06
+        (or bootstrap where prod did), not from ours.
         """
+        if self.frozen is not None and not self.frozen.promotes_csp:
+            logger.info("    isolated replay: c06 for %s not promoted", process_date)
+            return None
         # c06 specifically, because that is the level makeref reads it at:
         # Stage 3 runs Lref0..Lref, and Lref0 is 6 in NRT.
         #
@@ -987,6 +1007,58 @@ class MAAPOrchestrator:
                 })
         return files
 
+    REPLAY_MRVA_OUTPUTS = ("inputs", "csp06", "csp07", "csp08", "csp09",
+                           "csp10", "csp11", "csu06", "csu07", "csu08")
+
+    def _copy_replay_output(self, job: str, output_name: str, subdir: str,
+                            **fmt) -> Optional[str]:
+        """Copy one job output under <root>/mur/replay/<subdir>/, for the
+        compare step. Missing is fine: an NRT job writes no c02..c06."""
+        try:
+            src = self.client.get_job_output(job, output_name, **fmt)
+        except Exception:                                 # noqa: BLE001
+            return None
+        dest = paths.href(self.workspace_root,
+                          f"{paths.MUR_ROOT}/replay/{subdir}/{src.rsplit('/', 1)[-1]}")
+        return self.client.copy_object(src, dest)
+
+    def _promote_replay_outputs(self, process_date: datetime.date, job: str) -> None:
+        """A replay's MRVA outputs that a normal run leaves in dps_output:
+        the inputs log and every coefficient level, at keys the compare step
+        can find by day, plus which job made them."""
+        t = f"{process_date.year:04d}_{process_date.timetuple().tm_yday:03d}"
+        got = [self._copy_replay_output(job, name, t)
+               for name in self.REPLAY_MRVA_OUTPUTS]
+        self.client.write_manifest(
+            f"{paths.MUR_ROOT}/replay/{t}/job.json",
+            {"files": [], "job_id": job, "variant": self.frozen.variant,
+             "copied": [g for g in got if g]})
+
+    def _frozen_bic(self, sensor: str, data_day: datetime.date, rewrite: bool,
+                    bic_results: Dict) -> Optional[List[str]]:
+        """A BIC in a replay: the granules to rebuild it from, or None when it
+        is settled (taken from the case's root, or absent as it was in prod).
+
+        A young day (rewrite) in the chained variant is rebuilt from exactly
+        the granules prod's L2Plist names, as prod rebuilt it. Everything
+        else is prod's own BIC, with no staleness test: its write time is the
+        upload's, and the content is by definition what prod used.
+        """
+        if rewrite and self.frozen.rebuilds_young_bics:
+            granules = self.frozen.granules(sensor, data_day)
+            if not granules:
+                logger.info("    %s %s: prod had no granules; no BIC",
+                            sensor, data_day)
+                return None
+            return granules
+        cached = self._find_cached_bic(sensor, data_day)
+        if cached is None:
+            logger.warning("    %s %s: no prod BIC in the case; MRVA goes "
+                           "without it", sensor, data_day)
+            return None
+        bic_results[(sensor, data_day)] = (cached, None)
+        return None
+
     def run_day(self, process_date: datetime.date, mode: str) -> DayResult:
         """Submit and chain the four container jobs for one analysis day."""
         year = process_date.year
@@ -1022,6 +1094,11 @@ class MAAPOrchestrator:
         if landice_cached is not None:
             logger.info("    landice %s already in the bucket; not resubmitting",
                         process_date)
+        elif self.frozen is not None:
+            raise RuntimeError(
+                f"frozen case: prod's landice for {process_date} is not in "
+                f"{self.workspace_root}. The landice job fetches live OSI-SAF "
+                f"data, so it is never run in a replay; re-stage the case.")
         elif "landice" in self.stages:
             landice_hrefs = resolve_landice_static_hrefs(
                 self.config["landice"]["static_resources_dir"])
@@ -1034,7 +1111,7 @@ class MAAPOrchestrator:
                 "landmask_p01_file": landice_hrefs["landmask_p01"],
                 "gridindex_north_p01_file": landice_hrefs["gridindex_north_p01"],
                 "gridindex_south_p01_file": landice_hrefs["gridindex_south_p01"],
-            }, tag=tags.batch("landice"))
+            }, tag=self._tag("landice"))
 
         iquam_job = None
         iquam_days = self._iquam_window_days(process_date, reference_today)
@@ -1048,6 +1125,11 @@ class MAAPOrchestrator:
         if iquam_days and len(iquam_settled) == len(iquam_days):
             logger.info("    iquam %s: all %d day(s) already in the bucket; "
                         "not resubmitting", process_date, len(iquam_days))
+        elif self.frozen is not None:
+            # Never live NOAA data in a replay. A day prod had no .bii for is
+            # left out of the manifest, as it was out of prod's.
+            logger.info("    iquam %s: frozen case has %d of %d day(s)",
+                        process_date, len(iquam_cached), len(iquam_days))
         elif "iquam" in self.stages:
             iquam_config = self.config["iquam"]
             iquam_job = self.client.submit_job("mur-iquam", {
@@ -1058,7 +1140,7 @@ class MAAPOrchestrator:
                     self.get_reference_today()),
                 "buoy_day_range": iquam_config["buoy_dayrange"],
                 "stability_latency": iquam_config["stable_latency"],
-            }, tag=tags.batch("iquam"))
+            }, tag=self._tag("iquam"))
 
         l2p_jobs = []
         # Maps (sensor, data_day) -> (cached_href_or_None, job_or_None) for
@@ -1089,20 +1171,26 @@ class MAAPOrchestrator:
                     bic_results[(sensor, data_day)] = (built, None)
                     continue
 
-                cached_href = None
-                if not rewrite:
-                    cached_href = self._find_cached_bic(
-                        sensor, data_day,
-                        min_age_days=stable if self.rebuild_stale_bics else None)
-                if cached_href is not None:
-                    bic_results[(sensor, data_day)] = (cached_href, None)
-                    continue
+                if self.frozen is not None:
+                    granules = self._frozen_bic(sensor, data_day, rewrite,
+                                                bic_results)
+                    if granules is None:
+                        continue
+                else:
+                    cached_href = None
+                    if not rewrite:
+                        cached_href = self._find_cached_bic(
+                            sensor, data_day,
+                            min_age_days=stable if self.rebuild_stale_bics else None)
+                    if cached_href is not None:
+                        bic_results[(sensor, data_day)] = (cached_href, None)
+                        continue
 
-                granules = self.client.stac_search(
-                    collections=sensor_config["collection_name"],
-                    start=data_day,
-                    end=data_day,
-                )
+                    granules = self.client.stac_search(
+                        collections=sensor_config["collection_name"],
+                        start=data_day,
+                        end=data_day,
+                    )
                 if not granules:
                     # A day with no granules is a real answer, not a failure:
                     # the current day is still accumulating, and a sensor can
@@ -1159,7 +1247,7 @@ class MAAPOrchestrator:
                 # first bug.
                 job = self.client.submit_job(
                     "mur-l2p", l2p_args,
-                    tag=tags.batch("l2p"),
+                    tag=self._tag("l2p"),
                     dedup=False if rewrite else None)
                 l2p_jobs.append(job)
                 bic_results[(sensor, data_day)] = (None, job)
@@ -1189,6 +1277,11 @@ class MAAPOrchestrator:
             bic_results[key] = (self._promote_bic(sensor, data_day, job), job)
             self._built_bics[key] = bic_results[key][0]
             promoted += 1
+            if self.frozen is not None:
+                self._copy_replay_output(
+                    job, "l2plist", f"l2p/{sensor}/{data_day.year}",
+                    sensor=sensor, year=data_day.year,
+                    doy=f"{data_day.timetuple().tm_yday:03d}")
 
         # Landice and iquam get the same treatment for the same reason, and
         # before the raise below, so a day that fails part way still banks
@@ -1326,11 +1419,13 @@ class MAAPOrchestrator:
 
         mrva_job = self.client.submit_job(
             "mur-mrva", mrva_args,
-            tag=tags.batch("mrva"))
+            tag=self._tag("mrva"))
         self.client.wait_all([mrva_job])
 
         # Promote this day's coefficient so tomorrow can chain from it.
         self._promote_csp(process_date, mrva_job)
+        if self.frozen is not None:
+            self._promote_replay_outputs(process_date, mrva_job)
 
         # Promoted to canonical keys, then used from there.
         #
@@ -1375,14 +1470,15 @@ class MAAPOrchestrator:
             logger.info("    catalogued %d extra asset(s): %s",
                         len(extras), ", ".join(sorted(extras)))
 
-        self.client.publish_stac_item(
-            netcdf_href, process_date, mode,
-            extra_assets=extras or None,
-            # Absent in the config means the full L=11; record the effective
-            # level either way so the item never has to be read as "unknown".
-            analysis_level=int(self.config.get("mrva", {}).get("max_level", 11)))
+        if self.frozen is None:         # a replay is not a product
+            self.client.publish_stac_item(
+                netcdf_href, process_date, mode,
+                extra_assets=extras or None,
+                # Absent in the config means the full L=11; record the effective
+                # level either way so the item never has to be read as "unknown".
+                analysis_level=int(self.config.get("mrva", {}).get("max_level", 11)))
 
-        self._report_stac(process_date, mode)
+            self._report_stac(process_date, mode)
 
         return DayResult(
             process_date=process_date,
@@ -1564,6 +1660,33 @@ def resolve_version(config: Dict) -> Tuple[str, bool]:
     if override and str(override) != ALGORITHM_VERSION:
         return str(override), True
     return ALGORITHM_VERSION, False
+
+
+def load_frozen(args, client, config: Dict, days, day1) -> FrozenCase:
+    """Load --frozen-case and point the run at its data root.
+
+    The root replaces maap.workspace_root for this run only, so every cache
+    probe, manifest and promotion lands inside the case -- never in the
+    workspace's own mur/ tree, which a replay must not touch.
+    """
+    if not args.date:
+        raise SystemExit("--frozen-case needs --date (prod's run day), so the "
+                         "window and every day's mode match prod's run")
+    if args.force_nrt:
+        raise SystemExit("--force-nrt cannot replay prod: it changes the modes")
+    s3 = client.workspace.s3() if args.frozen_case.startswith("s3://") else None
+    frozen = load_case(args.frozen_case, args.frozen_variant, s3=s3)
+    if frozen.run_date != mur_date.today():
+        raise SystemExit(f"--date {mur_date.today()} is not the case's run "
+                         f"day {frozen.run_date}")
+    frozen.check_days(days, {d: mur_window.mode_for(d, day1) for d in days})
+    config.setdefault("maap", {})["workspace_root"] = frozen.root
+    config["maap"]["team_bucket"] = False
+    client.data_root = frozen.root
+    print(f"frozen case    {args.frozen_case} ({frozen.variant})")
+    print(f"data root      {frozen.root}")
+    print(f"job tag        {frozen.job_tag}")
+    return frozen
 
 
 def build_client(config: Dict, args):
@@ -2023,6 +2146,18 @@ def parse_args(argv=None):
                              "nrtMRVA.py keeps it.")
     parser.add_argument("--force-nrt", action="store_true",
                         help="Process every day in NRT mode.")
+    parser.add_argument("--frozen-case",
+                        help="Replay one prod run from its staged case.json "
+                             "(utils/stage_prod_snapshot.py): every input comes "
+                             "from the case, nothing is fetched live, and all "
+                             "output stays in the case's data root. Needs "
+                             "--date set to prod's run day.")
+    parser.add_argument("--frozen-variant", choices=("isolated", "chained"),
+                        default="chained",
+                        help="isolated: MRVA on prod's own BICs, buoys, ice and "
+                             "c06. chained: young BICs rebuilt from prod's "
+                             "granules and c06 chained, as ops runs "
+                             "(default: %(default)s).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the plan and exit. Needs no credentials.")
     parser.add_argument("--debug", action="store_true")
@@ -2093,13 +2228,23 @@ def main(argv=None) -> int:
         return 0
 
     client = build_client(config, args)
+    stages = args.execute.split(",") if args.execute else None
+    frozen = None
+    if args.frozen_case:
+        frozen = load_frozen(args, client, config, days, day1)
+        # cog and STAC publish a product; a replay is not one.
+        stages = [s for s in (stages or ["landice", "iquam", "l2p", "mrva"])
+                  if s != "cog"]
     orchestrator = MAAPOrchestrator(
         config, client,
         force_nrt=args.force_nrt,
         rebuild_stale_bics=not args.trust_cached_bics,
         today_fn=lambda: reference_today,     # frozen: a run must not drift
-        stages=args.execute.split(",") if args.execute else None,
-        rerun_final=args.rerun_final,
+        stages=stages,
+        # A replay always analyses its REA day, even if an earlier replay
+        # left a Final granule in the case root.
+        rerun_final=args.rerun_final or frozen is not None,
+        frozen=frozen,
     )
 
     failed = []

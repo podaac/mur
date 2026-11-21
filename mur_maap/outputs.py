@@ -196,6 +196,12 @@ OUTPUT_PATTERNS: Dict[str, Dict[str, str]] = {
         "csp09": r"^csp/.*\.c09$",
         "csp10": r"^csp/.*\.c10$",
         "csp11": r"^csp/.*\.c11$",
+        "csu06": r"^csp/.*\.u06$",
+        "csu07": r"^csp/.*\.u07$",
+        "csu08": r"^csp/.*\.u08$",
+        # makebiq's record of every input it read, and how many points each
+        # gave: the first thing to compare with prod's.
+        "inputs": r"^csp/.*_inputs\.txt$",
     },
 }
 

@@ -16,52 +16,17 @@ import argparse
 import datetime
 import json
 import os
+import sys
 import zipfile
 
 
-# ---------------------------------------------------------------------------
-# Production paths (from mur-internal/cyc4/nrtMRVA.py and mrva4com.m)
-# ---------------------------------------------------------------------------
-
-# BIC files: /nas2/bic/{SENSOR}/{YYYY}/Global_{SENSOR}_{YYYY}_{DOY}.bic.gz
-BIC_ROOT = "/nas2/bic"
-
-# iQUAM files: /nas2/iquam/{YYYY}/Global_IQUAM0_{YYYY}_{DOY}.bii
-IQUAM_ROOT = "/nas2/iquam"
-
-# Land/ice p011: /nas/ftp/mur_sst/tmchin/landice/{YYYY}/landice_{YYYY}_{DOY}.gds.gz
-#                /nas/ftp/mur_sst/tmchin/landice/{YYYY}/Global_ice_{YYYY}_{DOY}.bip.gz
-LANDICE_P011_ROOT = "/nas/ftp/mur_sst/tmchin/landice"
-
-# Land/ice p01:  /nas2/landice/{YYYY}/landiceP01_{YYYY}_{DOY}.gds.gz
-#                /nas2/landice/{YYYY}/Global_ice_{YYYY}_{DOY}.bip.gz
-LANDICE_P01_ROOT = "/nas2/landice"
-
-# MRVA coefficients: /nas4/cyc4out/{YYYY}/{YYYYMMDD}09_MRVA4_Global.c{LL}
-CSP_ROOT = "/nas4/cyc4out"
-
-# L2P source files (from SensorTable.m and cron scripts)
-# Downloads land at: L2P_ROOT / L2P_SUBDIRS[sensor] / YYYY / DOY / *.nc
-L2P_ROOT = "/measures_mur/seamap/newnas/nas2/l2p/mur_sst/mur_downloads"
-L2P_SUBDIRS = {
-    "AMSR2R": "GDS2/L2P/AMSR2/REMSS/v8.2",
-    "MODISA": "GDS2/L2P/MODIS_A/JPL/v2019.0",
-    "MODIST": "GDS2/L2P/MODIS_T/JPL/v2019.0",
-    "AVMTAG": "GDS2/L2P/AVHRRMTA_G/NAVO/v2",
-    "AVMTBG": "GDS2/L2P/AVHRRMTB_G/NAVO/v2",
-}
-
-# Sensor definitions (from nrtMRVA.py lines 69-75)
-# (sensor_code, dayrange)
-SENSORS = [
-    ("AMSR2R", 2),
-    ("MODISA", 2),
-    ("MODIST", 2),
-    ("AVMTAG", 2),
-    ("AVMTBG", 2),
-]
-
-BUOY_DAYRANGE = 3  # nrtMRVA.py line 59
+# Production paths and sensor parameters live in prod_paths.py, shared with
+# capture_prod_run.py. Both files are copied to the prod host together.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from prod_paths import (  # noqa: E402
+    BIC_ROOT, BUOY_DAYRANGE, CSP_ROOT, IQUAM_ROOT, L2P_ROOT, L2P_SUBDIRS,
+    LANDICE_P01_ROOT, LANDICE_P011_ROOT, SENSORS, date_to_doy, doy_to_date,
+)
 
 # Run-mode latency, in days from the run date back to the analysis date.
 # Source of truth: mur-internal/cyc4/nrtMRVA.py:38-40.
@@ -71,14 +36,6 @@ REA_LATENCY_DAYS = 4
 
 def latency_for_mode(mode):
     return REA_LATENCY_DAYS if mode == "rea" else NRT_LATENCY_DAYS
-
-
-def date_to_doy(d):
-    return d.timetuple().tm_yday
-
-
-def doy_to_date(year, doy):
-    return datetime.date(year, 1, 1) + datetime.timedelta(days=doy - 1)
 
 
 def collect_file_list(analysis_date, include_l2p=False):

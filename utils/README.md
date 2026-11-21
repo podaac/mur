@@ -355,3 +355,94 @@ python utils/migrate_workspace_root.py            # report, copy nothing
 python utils/migrate_workspace_root.py --copy
 python utils/migrate_workspace_root.py --verify
 ```
+
+## Regression replay of a prod run (capture → stage → replay → compare)
+
+A frozen regression case is one prod `nrtMRVA.py` run, replayed on MAAP with
+exactly the inputs prod used. It covers the REA day T-4 and the NRT days
+T-3..T-1. That is one prod run, because a single daily run analyses T-9..T-1.
+The replay runs through the registered MAAP containers. See the
+`mur_maap/frozen.py` docstring for what the two variants do.
+
+### 1. `capture_prod_run.py` (on the prod host, or one that mounts its disks)
+
+Copy `capture_prod_run.py` and `prod_paths.py` into the same directory on the
+prod host. The script is stdlib only and runs on python3.12. Start it from
+cron five minutes before `nrtMRVA.py`, in the same host's crontab so both use
+the same clock.
+
+Start with `check`. It is read-only and prints one line per root, per input
+kind for each day, and for whether the granules named in the L2Plists can be
+opened. It exits 1 if a capture would come out incomplete. Run it on the host
+you plan to capture from. If that host mounts the ops disks under different
+paths than the prod host does, add `--map PROD=LOCAL` (repeatable) to this
+command and to the later ones.
+
+```bash
+python3.12 capture_prod_run.py check --snap-root /path/to/mur_snapshots
+python3.12 capture_prod_run.py check --map /nas2=/mnt/nas2 --run-date 2026-11-19
+```
+
+If `watch` cannot see the `nrtMRVA.py` process, which is the case on any host
+other than the one running prod, it waits until every wanted day has started.
+It treats the run as over once the logs have then been quiet for `--idle`
+minutes (default 15).
+
+```bash
+# crontab (nrtMRVA.py runs at 05 07)
+00 07 * * *  nice -n 19 /usr/bin/python3.12 ~/mur/utils/capture_prod_run.py watch \
+    --snap-root /path/to/mur_snapshots --keep 14 >> ~/logs/capture_prod_run.log 2>&1
+
+# Rehearse once without copying anything
+python3.12 capture_prod_run.py watch --snap-root /path/to/mur_snapshots --dry-run --no-l2p
+
+# A past run, as it is on disk now (marked exact: false)
+python3.12 capture_prod_run.py once --run-date 2026-10-24 --snap-root /path/to/mur_snapshots
+```
+
+- **Run date:** taken from the `Today = Year Y Day D` header that the run writes
+  to `nrtMRVA.log`, not from the clock.
+- **Inputs:** each day's inputs are copied when its `MRVA_<Y>_<DDD>.log`
+  appears.
+- **Outputs:** the L4, coefficients, write-once caches and logs are copied
+  once each day's csp2nc log goes quiet.
+- **L2P granules:** copied from the server's own download tree into
+  `l2p_pool/<SENSOR>/<name>/<md5>`. A granule already in the pool is not
+  copied again. If a name turns up again with different content, the new copy
+  is kept beside the old one and counted in `run.json`.
+- **Safety:** it never writes under an ops path, and on any error it logs and
+  exits 0.
+
+### 2. `stage_prod_snapshot.py` (laptop: needs ssh to prod and MAAP credentials)
+
+```bash
+python utils/stage_prod_snapshot.py all --run-date 2026-10-24 \
+    --host <user>@<capture host> --snap-root /path/to/mur_snapshots   # or set MUR_PROD_HOST
+```
+
+This runs rsync, then checks every md5. It then uploads to
+`s3://nasa-maap-mur-sst/regression/<YYYYMMDD>/snapshot/` and to
+`regression/l2p_pool/<SENSOR>/<md5>/<name>`, which is shared across cases.
+Next it seeds the `isolated/` and `chained/` data roots by server-side copy.
+Finally it writes `case.json`.
+
+### 3. `regress_mur_maap.py` (MAAP workspace)
+
+```bash
+python utils/regress_mur_maap.py run --config config.maap.json \
+    --case s3://nasa-maap-mur-sst/regression/20261024/case.json --variant both
+python utils/regress_mur_maap.py compare \
+    --case s3://nasa-maap-mur-sst/regression/20261024/case.json
+```
+
+`run` starts `run_mur_maap.py --date <run date> -p=-4:-1 --frozen-case ...`
+once for each variant. The replay never queries CMR and never runs landice or
+iquam, which fetch live OSI-SAF and NOAA data. It does not copy to the team
+`mur/l4/`, publish STAC items or submit cog jobs. Every job is tagged
+`MUR-REGRESS-<YYYYMMDD>-<variant>`.
+
+`compare` writes `report.json` and `report.html`, covering:
+- the inputs log;
+- the coefficient files;
+- difference statistics for the L4 fields;
+- for chained, each rebuilt BIC and its L2Plist against prod's.
